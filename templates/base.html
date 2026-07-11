@@ -1,0 +1,256 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}SMARKAFRICA{% endblock %}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <meta name="description" content="{{ settings.get('site_description', 'SMARKAFRICA marketplace for secure buying, selling, digital products, physical goods, and M-Pesa checkout across Africa.') }}">
+    <meta name="keywords" content="{{ settings.get('site_keywords', 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products') }}">
+    <meta name="csrf-token" content="{{ csrf_token() if csrf_token else '' }}">
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark sticky-top">
+        <div class="container">
+            <a class="navbar-brand fw-bold" href="{{ url_for('home') }}">
+                <img src="{{ url_for('static', filename='images/smarkafrica-logo.png') }}" alt="SMARKAFRICA" class="site-logo">
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('home') }}"><i class="fas fa-home me-1"></i>Home</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('shop') }}"><i class="fas fa-tags me-1"></i>Shop</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('smart_shopping') }}"><i class="fas fa-wand-magic-sparkles me-1"></i>Assistant</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('compare_products') }}"><i class="fas fa-code-compare me-1"></i>Compare</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('about') }}"><i class="fas fa-info-circle me-1"></i>About</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('support') }}"><i class="fas fa-headset me-1"></i>Support</a>
+                    </li>
+                    {% if current_user.is_authenticated and not current_user.is_admin and seller_signup_enabled %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('seller_apply') }}"><i class="fas fa-id-card me-1"></i>Become a Seller</a>
+                    </li>
+                    {% endif %}
+                    {% if current_user.is_authenticated %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('storefront_apply') }}"><i class="fas fa-store me-1"></i>Storefront</a>
+                    </li>
+                    {% endif %}
+                </ul>
+                <ul class="navbar-nav align-items-center">
+                    <!-- Track Order - link to a page with form to enter order ID -->
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('orders') }}"><i class="fas fa-truck me-1"></i>My Orders</a>
+                    </li>
+                    {% if current_user.is_authenticated %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('notifications') }}"><i class="fas fa-bell me-1"></i>Notifications</a>
+                    </li>
+                    {% endif %}
+                    <!-- Cart -->
+                    <li class="nav-item">
+                        <a class="nav-link position-relative" href="{{ url_for('cart') }}">
+                            <i class="fas fa-shopping-cart me-1"></i>Cart
+                            {% if session.get('cart') %}
+                            <span class="badge rounded-pill bg-danger position-absolute top-0 start-100 translate-middle" style="font-size: 0.6rem;">
+                                {{ session['cart']|length }}
+                            </span>
+                            {% endif %}
+                        </a>
+                    </li>
+                    <!-- User Dropdown -->
+                    {% if current_user.is_authenticated %}
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown">
+                            <i class="fas fa-user me-1"></i>{{ current_user.username }}
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-end admin-scroll-dropdown">
+                            <li><a class="dropdown-item" href="{{ url_for('orders') }}"><i class="fas fa-box me-2"></i>My Orders</a></li>
+                            <li><a class="dropdown-item" href="{{ url_for('customer_rewards_card') }}"><i class="fas fa-credit-card me-2"></i>My Rewards Card</a></li>
+                            <li><a class="dropdown-item" href="{{ url_for('seller_withdrawals') }}"><i class="fas fa-wallet me-2"></i>Earnings</a></li>
+                            <li><a class="dropdown-item" href="{{ url_for('seller_ads') }}"><i class="fas fa-bullhorn me-2"></i>Ads</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            {% if current_user.is_admin %}
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_dashboard') }}"><i class="fas fa-shield-alt me-2"></i>Admin Panel</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_market_intelligence') }}"><i class="fas fa-chart-line me-2"></i>Interactive Analysis</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_market_news') }}"><i class="fas fa-newspaper me-2"></i>Price News</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_business_intelligence') }}"><i class="fas fa-brain me-2"></i>BI Dashboard</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_pos') }}"><i class="fas fa-cash-register me-2"></i>Point of Sale</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_shopping_cards') }}"><i class="fas fa-id-card me-2"></i>Shopping Cards</a></li>
+                            {% if current_user.admin_level == 'mvp' %}
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_bnpl') }}"><i class="fas fa-calendar-check me-2"></i>BNPL Console</a></li>
+                            {% endif %}
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_inventory') }}"><i class="fas fa-boxes-stacked me-2"></i>Inventory</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_ads') }}"><i class="fas fa-bullhorn me-2"></i>Ads Console</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_client_acquisition') }}"><i class="fas fa-user-plus me-2"></i>Client Acquisition</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_quality_management') }}"><i class="fas fa-award me-2"></i>Quality Management</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_automation_productivity') }}"><i class="fas fa-gears me-2"></i>Automation</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_carriers') }}"><i class="fas fa-truck-plane me-2"></i>Carrier Partners</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_phase_two') }}"><i class="fas fa-scale-balanced me-2"></i>Protection Desk</a></li>
+                            {% if current_user.admin_level == 'mvp' %}
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_intelligent_architecture') }}"><i class="fas fa-network-wired me-2"></i>Intelligent Architecture</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_disbursements') }}"><i class="fas fa-money-bill-transfer me-2"></i>Payment Disbursements</a></li>
+                            {% endif %}
+                            <li><hr class="dropdown-divider"></li>
+                            {% endif %}
+                            <li><a class="dropdown-item text-danger" href="{{ url_for('logout') }}"><i class="fas fa-sign-out-alt me-2"></i>Logout</a></li>
+                        </ul>
+                    </li>
+                    {% else %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('login') }}"><i class="fas fa-sign-in-alt me-1"></i>Login</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('register') }}"><i class="fas fa-user-plus me-1"></i>Register</a>
+                    </li>
+                    {% endif %}
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Flash Messages -->
+    <div class="container mt-3">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        {% for category, message in messages %}
+        <div class="alert alert-{{ category if category in ['success', 'danger', 'warning', 'info'] else 'info' }} alert-dismissible fade show">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        {% endfor %}
+        {% endif %}
+        {% endwith %}
+    </div>
+
+    <!-- Main Content -->
+    <main class="py-3">
+        {% block content %}{% endblock %}
+    </main>
+
+    {% if platform_ads and not current_user.is_admin %}
+    <div class="platform-ad-queue" id="platform-ad-queue" aria-live="polite">
+        {% for ad in platform_ads %}
+        <section class="platform-ad-pop" data-ad-card hidden>
+            <button type="button" class="platform-ad-close" aria-label="Close ad">&times;</button>
+            {% set ad_image = ad.creative_url or (ad.product.image_url if ad.product else '') %}
+            {% if ad_image %}
+            <img src="{{ ad_image }}" alt="{{ ad.product.name if ad.product else 'SMARKAFRICA offer' }}">
+            {% endif %}
+            <div class="platform-ad-body">
+                <span class="badge bg-warning text-dark">{{ ad.objective or 'Sponsored' }}</span>
+                <h5>{{ ad.product.name if ad.product else 'SMARKAFRICA Offer' }}</h5>
+                <p>{{ ad.ad_copy or 'Discover the latest offers on SMARKAFRICA.' }}</p>
+                <a href="{{ ad.destination_url or (url_for('product_page', slug=ad.product.slug) if ad.product else url_for('shop')) }}" class="btn btn-gold btn-sm">View</a>
+            </div>
+        </section>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if hot_sale_pop and not current_user.is_admin %}
+    <div class="hot-sale-pop" id="hot-sale-pop">
+        <button type="button" class="platform-ad-close" aria-label="Close hot sale">&times;</button>
+        {% if hot_sale_pop.image_url %}<img src="{{ hot_sale_pop.image_url }}" alt="{{ hot_sale_pop.name }}">{% endif %}
+        <div class="platform-ad-body">
+            <span class="badge bg-danger">Hot Sale</span>
+            <h5>{{ hot_sale_pop.name }}</h5>
+            <p>KSh {{ "%.2f"|format(hot_sale_pop.discounted_price or hot_sale_pop.selling_price) }}</p>
+            <a href="{{ url_for('product_page', slug=hot_sale_pop.slug) }}" class="btn btn-gold btn-sm">View Deal</a>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Footer -->
+    <footer class="bg-dark text-light py-4 mt-5">
+        <div class="container">
+            <div class="row">
+                <div class="col-md-4 mb-3">
+                    <h5 class="fw-bold">SMARKAFRICA</h5>
+                    <p class="small text-muted">Your trusted marketplace for digital and physical products across Africa.</p>
+                </div>
+                <div class="col-md-4 mb-3">
+                    <h6>Quick Links</h6>
+                    <ul class="list-unstyled small">
+                        <li><a href="{{ url_for('shop') }}" class="text-muted text-decoration-none">Shop</a></li>
+                        <li><a href="{{ url_for('about') }}" class="text-muted text-decoration-none">About Us</a></li>
+                        <li><a href="{{ url_for('orders') }}" class="text-muted text-decoration-none">Track Order</a></li>
+                        <li><a href="{{ url_for('terms') }}" class="text-muted text-decoration-none">Terms & Conditions</a></li>
+                    </ul>
+                </div>
+                <div class="col-md-4 mb-3">
+                    <h6>Contact</h6>
+                    <ul class="list-unstyled small text-muted">
+                        <li><i class="fas fa-envelope me-2"></i>{{ settings.get('contact_email', 'info@smarkafrica.africa') }}</li>
+                        <li><i class="fas fa-phone me-2"></i>{{ settings.get('contact_phone', '+254 700 000 000') }}</li>
+                        <li><i class="fas fa-map-marker-alt me-2"></i>{{ settings.get('contact_address', 'Nairobi, Kenya') }}</li>
+                    </ul>
+                </div>
+            </div>
+            <hr class="border-secondary">
+            <div class="text-center small text-muted">
+                &copy; 2025 SMARKAFRICA. All rights reserved.
+            </div>
+        </div>
+    </footer>
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='main.js') }}"></script>
+    {% if settings.get('google_analytics_id') %}
+    <script async src="https://www.googletagmanager.com/gtag/js?id={{ settings.get('google_analytics_id') }}"></script>
+    <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', '{{ settings.get('google_analytics_id') }}');
+    </script>
+    {% endif %}
+    {% block scripts %}{% endblock %}
+    <script>
+    (function () {
+        const cards = Array.from(document.querySelectorAll('[data-ad-card]'));
+        let index = 0;
+        function showNextAd() {
+            if (index >= cards.length) return;
+            const card = cards[index++];
+            card.hidden = false;
+            card.classList.add('is-visible');
+            let closed = false;
+            const close = () => {
+                if (closed) return;
+                closed = true;
+                card.remove();
+                setTimeout(showNextAd, 850);
+            };
+            card.querySelector('.platform-ad-close')?.addEventListener('click', close);
+            setTimeout(close, 12000 + Math.floor(Math.random() * 9000));
+        }
+        showNextAd();
+
+        const hotSale = document.getElementById('hot-sale-pop');
+        if (hotSale) {
+            const closeHotSale = () => hotSale.remove();
+            hotSale.querySelector('.platform-ad-close')?.addEventListener('click', closeHotSale);
+            setTimeout(closeHotSale, 6500);
+        }
+    })();
+    </script>
+</body>
+</html>
+

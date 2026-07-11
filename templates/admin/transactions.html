@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Transactions - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="fas fa-credit-card me-2"></i>Transactions</h2>
+    </div>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>ID</th>
+                            <th>Order</th>
+                            <th>Customer</th>
+                            <th>M-Pesa Code</th>
+                            <th>Phone</th>
+                            <th>Amount</th>
+                            <th>Status</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for txn in transactions %}
+                        <tr>
+                            <td>{{ txn.id }}</td>
+                            <td>
+                                <a href="{{ url_for('admin_order_detail', order_id=txn.order_id) }}">#{{ txn.order_id }}</a>
+                            </td>
+                            <td>{{ txn.order.user.first_name if txn.order else 'N/A' }}</td>
+                            <td><code>{{ txn.transaction_id or 'Pending' }}</code></td>
+                            <td>{{ txn.phone }}</td>
+                            <td class="fw-bold">KSh {{ "%.2f"|format(txn.amount) }}</td>
+                            <td>
+                                <span class="badge bg-{{ 'success' if txn.status == 'completed' else 'warning' if txn.status == 'pending' else 'danger' }}">
+                                    {{ txn.status }}
+                                </span>
+                            </td>
+                            <td>{{ txn.created_at.strftime('%d %b %Y %H:%M') }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="8" class="text-center text-muted py-4">No transactions yet</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}AI Training Coins - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-coins me-2"></i>Train Product AI</h2>
+            <div class="small text-muted">Upload product images, label them, and earn coins for future shopping offers.</div>
+        </div>
+        <div class="badge bg-warning text-dark fs-6">{{ current_user.ai_training_coins or 0 }} coins</div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-5">
+            <form method="POST" enctype="multipart/form-data" class="card border-0 shadow-sm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="card-header bg-white"><h5 class="mb-0">Training Submission</h5></div>
+                <div class="card-body">
+                    <label class="form-label">Product Image</label>
+                    <input type="file" name="training_image" class="form-control mb-3" accept="image/png,image/jpeg,image/gif,image/webp" required>
+                    <label class="form-label">Product Label</label>
+                    <input name="product_label" class="form-control mb-3" placeholder="Samsung phone, gaming headset, leather bag" required>
+                    <label class="form-label">Category Hint</label>
+                    <input name="category_hint" class="form-control mb-3" placeholder="Electronics, fashion, home">
+                    <label class="form-label">Visible Attributes</label>
+                    <textarea name="attributes" class="form-control mb-3" rows="4" placeholder="Color, brand marks, material, ports, condition, packaging"></textarea>
+                    <button class="btn btn-gold w-100">Submit & Earn Coins</button>
+                </div>
+            </form>
+        </div>
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Your Training History</h5></div>
+                <div class="card-body row g-3">
+                    {% for item in submissions %}
+                    <div class="col-md-6">
+                        <div class="border rounded overflow-hidden h-100">
+                            {% if item.image_url %}<img src="{{ item.image_url }}" alt="{{ item.product_label }}" class="w-100" style="height:160px;object-fit:cover;">{% endif %}
+                            <div class="p-3">
+                                <strong>{{ item.product_label }}</strong>
+                                <div class="small text-muted">{{ item.category_hint or 'General' }}</div>
+                                <span class="badge bg-success">+{{ item.coins_awarded }} coins</span>
+                                <span class="badge bg-secondary">{{ "%.0f"|format(item.quality_score) }} quality</span>
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="col-12 text-center text-muted py-5">No training submissions yet.</div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

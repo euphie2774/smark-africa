@@ -1,0 +1,641 @@
+{% extends "base.html" %}
+{% block title %}AI Support - Voice & Chat - {{ super() }}{% endblock %}
+
+{% block extra_head %}
+<style>
+.support-chat-log {
+    height: 400px;
+    overflow-y: auto;
+    background: #f8f9fa;
+    border-radius: 10px;
+    padding: 15px;
+    margin-bottom: 15px;
+}
+
+.support-bubble {
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    border-radius: 18px;
+    max-width: 80%;
+    word-wrap: break-word;
+    animation: fadeIn 0.3s ease-in;
+}
+
+.support-bubble.user {
+    background: #007bff;
+    color: white;
+    margin-left: auto;
+    text-align: right;
+}
+
+.support-bubble.bot {
+    background: white;
+    color: #333;
+    border: 1px solid #dee2e6;
+    margin-right: auto;
+}
+
+.support-bubble.bot strong {
+    color: #007bff;
+    font-weight: 600;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.voice-control {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.voice-btn {
+    padding: 12px 20px;
+    border-radius: 50px;
+    border: 2px solid #007bff;
+    background: white;
+    color: #007bff;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 500;
+}
+
+.voice-btn:hover {
+    background: #007bff;
+    color: white;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,123,255,0.3);
+}
+
+.voice-btn.recording {
+    background: #dc3545;
+    border-color: #dc3545;
+    color: white;
+    animation: pulse 1.5s infinite;
+}
+
+.voice-btn.speaking {
+    background: #28a745;
+    border-color: #28a745;
+    color: white;
+}
+
+.voice-btn.muted {
+    opacity: 0.6;
+    border-color: #6c757d;
+    color: #6c757d;
+}
+
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+}
+
+.typing-indicator {
+    display: none;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    border-radius: 18px;
+    background: white;
+    border: 1px solid #dee2e6;
+    max-width: 80px;
+}
+
+.typing-indicator.active {
+    display: block;
+}
+
+.typing-indicator span {
+    height: 8px;
+    width: 8px;
+    background: #007bff;
+    border-radius: 50%;
+    display: inline-block;
+    margin: 0 2px;
+    animation: typing 1.4s infinite;
+}
+
+.typing-indicator span:nth-child(2) {
+    animation-delay: 0.2s;
+}
+
+.typing-indicator span:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+@keyframes typing {
+    0%, 60%, 100% { transform: translateY(0); }
+    30% { transform: translateY(-10px); }
+}
+
+.quick-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.quick-action-btn {
+    padding: 6px 12px;
+    background: #e9ecef;
+    border: 1px solid #dee2e6;
+    border-radius: 15px;
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.quick-action-btn:hover {
+    background: #007bff;
+    color: white;
+    border-color: #007bff;
+}
+
+.voice-status {
+    padding: 8px 12px;
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    margin-bottom: 10px;
+    display: none;
+}
+
+.voice-status.active {
+    display: block;
+}
+
+.voice-wave {
+    display: none;
+    justify-content: center;
+    align-items: center;
+    gap: 4px;
+    margin-top: 10px;
+}
+
+.voice-wave.active {
+    display: flex;
+}
+
+.voice-wave span {
+    width: 3px;
+    height: 20px;
+    background: #007bff;
+    border-radius: 3px;
+    animation: wave 1s infinite;
+}
+
+.voice-wave span:nth-child(2) { animation-delay: 0.1s; }
+.voice-wave span:nth-child(3) { animation-delay: 0.2s; }
+.voice-wave span:nth-child(4) { animation-delay: 0.3s; }
+.voice-wave span:nth-child(5) { animation-delay: 0.4s; }
+
+@keyframes wave {
+    0%, 100% { height: 20px; }
+    50% { height: 40px; }
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="row g-4">
+        <!-- Support Form Column -->
+        <div class="col-lg-5">
+            <h2 class="mb-2"><i class="fas fa-headset me-2"></i>Support Center</h2>
+            <p class="text-muted">Get help with orders, payments, delivery, or account issues</p>
+
+            <a href="https://wa.me/254708615309" target="_blank" rel="noopener" class="btn btn-success w-100 mb-3">
+                <i class="fab fa-whatsapp me-1"></i> Urgent WhatsApp: 0708615309
+            </a>
+
+            <form method="POST" class="card border-0 shadow-sm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="card-body">
+                    <h5 class="card-title mb-3">Create Support Ticket</h5>
+
+                    <div class="mb-3">
+                        <label class="form-label">Subject</label>
+                        <input name="subject" class="form-control" required placeholder="Brief description of issue">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Severity</label>
+                        <select name="severity" class="form-select">
+                            <option value="normal">Normal - General inquiry</option>
+                            <option value="high">High - Affects order/payment</option>
+                            <option value="urgent">Urgent - Service disruption</option>
+                            <option value="complex">Complex - Technical issue</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Preferred Contact</label>
+                        <select name="channel" class="form-select">
+                            <option value="web">Web Portal</option>
+                            <option value="email">Email</option>
+                            <option value="whatsapp">WhatsApp</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Details</label>
+                        <textarea name="body" class="form-control" rows="6" required
+                                  placeholder="Describe your issue in detail. Include order numbers if applicable."></textarea>
+                        <small class="form-text text-muted">The more details you provide, the faster we can help.</small>
+                    </div>
+
+                    <button type="submit" class="btn btn-gold w-100">
+                        <i class="fas fa-paper-plane me-2"></i>Create Ticket
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- AI Chat Column -->
+        <div class="col-lg-7">
+            <!-- AI Chatbot -->
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-gradient-primary text-white">
+                    <h5 class="mb-0">
+                        <i class="fas fa-robot me-2"></i>AI Shopping Assistant
+                        <span class="badge bg-success float-end">Online</span>
+                    </h5>
+                    <small>Ask me anything or use voice commands</small>
+                </div>
+                <div class="card-body">
+                    <!-- Voice Controls -->
+                    <div class="voice-control">
+                        <button type="button" id="voice-input-btn" class="voice-btn flex-fill" title="Click to speak">
+                            <i class="fas fa-microphone"></i>
+                            <span id="voice-btn-text">Voice Input</span>
+                        </button>
+                        <button type="button" id="voice-output-toggle" class="voice-btn muted" title="Toggle voice responses">
+                            <i class="fas fa-volume-mute"></i>
+                        </button>
+                        <button type="button" id="clear-chat-btn" class="voice-btn" title="Clear chat">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+
+                    <!-- Voice Status -->
+                    <div id="voice-status" class="voice-status">
+                        <i class="fas fa-info-circle me-2"></i>
+                        <span id="voice-status-text">Ready</span>
+                    </div>
+
+                    <!-- Voice Wave Animation -->
+                    <div id="voice-wave" class="voice-wave">
+                        <span></span><span></span><span></span><span></span><span></span>
+                    </div>
+
+                    <!-- Chat Log -->
+                    <div id="support-chat-log" class="support-chat-log">
+                        <div class="support-bubble bot">
+                            👋 Hi! I'm your AI shopping assistant. I can help you:
+                            <br><br>
+                            🛍️ Find products<br>
+                            📦 Track orders<br>
+                            💳 Payment help<br>
+                            🏪 Seller info<br>
+                            <br>
+                            <strong>Try voice commands:</strong> "Show me laptops" or "Where is my order?"
+                        </div>
+                    </div>
+
+                    <!-- Typing Indicator -->
+                    <div id="typing-indicator" class="typing-indicator">
+                        <span></span><span></span><span></span>
+                    </div>
+
+                    <!-- Chat Input -->
+                    <form id="support-chat-form" class="input-group">
+                        <input id="support-chat-input" class="form-control"
+                               placeholder="Type a message or use voice..."
+                               autocomplete="off">
+                        <button type="submit" class="btn btn-gold">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </form>
+
+                    <!-- Quick Actions -->
+                    <div class="quick-actions">
+                        <button type="button" class="quick-action-btn" data-message="Track my order">
+                            📦 Track Order
+                        </button>
+                        <button type="button" class="quick-action-btn" data-message="Show me popular products">
+                            🔥 Popular Items
+                        </button>
+                        <button type="button" class="quick-action-btn" data-message="How do I pay?">
+                            💳 Payment Help
+                        </button>
+                        <button type="button" class="quick-action-btn" data-message="Refund policy">
+                            💰 Refunds
+                        </button>
+                        <button type="button" class="quick-action-btn" data-message="Become a seller">
+                            🏪 Sell on SMARKAFRICA
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Tickets -->
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0">
+                        <i class="fas fa-ticket-alt me-2"></i>My Recent Tickets
+                    </h5>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Subject</th>
+                                    <th>Severity</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for ticket in tickets %}
+                                <tr>
+                                    <td>{{ ticket.subject[:50] }}...</td>
+                                    <td>
+                                        <span class="badge bg-{{ 'danger' if ticket.severity == 'urgent' else 'warning' if ticket.severity == 'high' else 'secondary' }}">
+                                            {{ ticket.severity }}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <span class="badge bg-{{ 'success' if ticket.status == 'resolved' else 'primary' if ticket.status == 'in_progress' else 'secondary' }}">
+                                            {{ ticket.status.replace('_', ' ').title() }}
+                                        </span>
+                                    </td>
+                                    <td>{{ ticket.created_at.strftime('%d %b %H:%M') }}</td>
+                                </tr>
+                                {% else %}
+                                <tr>
+                                    <td colspan="4" class="text-center text-muted py-4">
+                                        <i class="fas fa-inbox fa-2x mb-2"></i><br>
+                                        No support tickets yet.<br>
+                                        <small>Use the chat assistant or create a ticket above.</small>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const form = document.getElementById('support-chat-form');
+    const input = document.getElementById('support-chat-input');
+    const log = document.getElementById('support-chat-log');
+    const typingIndicator = document.getElementById('typing-indicator');
+    const voiceInputBtn = document.getElementById('voice-input-btn');
+    const voiceOutputToggle = document.getElementById('voice-output-toggle');
+    const clearChatBtn = document.getElementById('clear-chat-btn');
+    const voiceStatus = document.getElementById('voice-status');
+    const voiceStatusText = document.getElementById('voice-status-text');
+    const voiceBtnText = document.getElementById('voice-btn-text');
+    const voiceWave = document.getElementById('voice-wave');
+
+    let voiceOutputEnabled = false;
+    let recognition = null;
+    let synthesis = window.speechSynthesis;
+
+    // Initialize Speech Recognition
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+            voiceInputBtn.classList.add('recording');
+            voiceBtnText.textContent = 'Listening...';
+            voiceWave.classList.add('active');
+            showVoiceStatus('🎤 Listening...', 'warning');
+        };
+
+        recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            input.value = transcript;
+            sendMessage(transcript);
+        };
+
+        recognition.onerror = (event) => {
+            console.error('Speech recognition error:', event.error);
+            showVoiceStatus('❌ Voice error: ' + event.error, 'danger');
+            resetVoiceButton();
+        };
+
+        recognition.onend = () => {
+            resetVoiceButton();
+        };
+    } else {
+        voiceInputBtn.disabled = true;
+        voiceInputBtn.title = 'Voice input not supported in this browser';
+    }
+
+    function resetVoiceButton() {
+        voiceInputBtn.classList.remove('recording');
+        voiceBtnText.textContent = 'Voice Input';
+        voiceWave.classList.remove('active');
+        hideVoiceStatus();
+    }
+
+    function showVoiceStatus(text, type = 'info') {
+        voiceStatusText.textContent = text;
+        voiceStatus.classList.add('active');
+        voiceStatus.className = `voice-status active alert-${type}`;
+    }
+
+    function hideVoiceStatus() {
+        setTimeout(() => {
+            voiceStatus.classList.remove('active');
+        }, 2000);
+    }
+
+    // Voice Input Button
+    voiceInputBtn.addEventListener('click', () => {
+        if (!recognition) {
+            alert('Voice input is not supported in your browser. Please use Chrome, Edge, or Safari.');
+            return;
+        }
+
+        if (voiceInputBtn.classList.contains('recording')) {
+            recognition.stop();
+        } else {
+            recognition.start();
+        }
+    });
+
+    // Voice Output Toggle
+    voiceOutputToggle.addEventListener('click', () => {
+        voiceOutputEnabled = !voiceOutputEnabled;
+        const icon = voiceOutputToggle.querySelector('i');
+
+        if (voiceOutputEnabled) {
+            icon.className = 'fas fa-volume-up';
+            voiceOutputToggle.classList.remove('muted');
+            showVoiceStatus('🔊 Voice responses enabled', 'success');
+        } else {
+            icon.className = 'fas fa-volume-mute';
+            voiceOutputToggle.classList.add('muted');
+            synthesis.cancel();
+            showVoiceStatus('🔇 Voice responses disabled', 'info');
+        }
+        hideVoiceStatus();
+    });
+
+    // Clear Chat Button
+    clearChatBtn.addEventListener('click', () => {
+        if (confirm('Clear chat history?')) {
+            log.innerHTML = '<div class="support-bubble bot">Chat cleared. How can I help you?</div>';
+            synthesis.cancel();
+        }
+    });
+
+    // Text-to-Speech Function
+    function speak(text) {
+        if (!voiceOutputEnabled || !synthesis) return;
+
+        synthesis.cancel(); // Stop any ongoing speech
+
+        // Remove markdown formatting for speech
+        const cleanText = text
+            .replace(/\*\*/g, '')
+            .replace(/\*/g, '')
+            .replace(/\n/g, '. ')
+            .replace(/•/g, '')
+            .replace(/✓/g, 'yes')
+            .replace(/✅/g, '')
+            .replace(/❌/g, '')
+            .replace(/📦/g, '')
+            .replace(/💳/g, '')
+            .replace(/🛍️/g, '')
+            .replace(/👋/g, '')
+            .replace(/🎤/g, '')
+            .replace(/🔊/g, '')
+            .replace(/\//g, ' ')
+            .substring(0, 300); // Limit length for TTS
+
+        const utterance = new SpeechSynthesisUtterance(cleanText);
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+
+        utterance.onstart = () => {
+            voiceOutputToggle.classList.add('speaking');
+        };
+
+        utterance.onend = () => {
+            voiceOutputToggle.classList.remove('speaking');
+        };
+
+        synthesis.speak(utterance);
+    }
+
+    // Add Chat Bubble
+    function addBubble(text, who) {
+        const bubble = document.createElement('div');
+        bubble.className = `support-bubble ${who}`;
+
+        // Convert markdown to HTML for bot messages
+        if (who === 'bot') {
+            text = text
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\n/g, '<br>');
+        }
+
+        bubble.innerHTML = text;
+        log.appendChild(bubble);
+        log.scrollTop = log.scrollHeight;
+
+        // Speak bot responses
+        if (who === 'bot') {
+            speak(text);
+        }
+    }
+
+    // Send Message Function
+    async function sendMessage(message) {
+        if (!message) return;
+
+        addBubble(message, 'user');
+        input.value = '';
+        typingIndicator.classList.add('active');
+
+        try {
+            const response = await fetch('{{ url_for("support_chatbot") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': '{{ csrf_token() }}'
+                },
+                body: JSON.stringify({ message })
+            });
+
+            const data = await response.json();
+            typingIndicator.classList.remove('active');
+
+            addBubble(data.reply, 'bot');
+
+            if (data.urgent) {
+                const link = document.createElement('a');
+                link.href = data.whatsapp_url;
+                link.target = '_blank';
+                link.rel = 'noopener';
+                link.className = 'btn btn-sm btn-success mt-2';
+                link.innerHTML = '<i class="fab fa-whatsapp me-1"></i>Urgent? Chat on WhatsApp';
+                log.appendChild(link);
+                log.scrollTop = log.scrollHeight;
+            }
+        } catch (error) {
+            console.error('Chat error:', error);
+            typingIndicator.classList.remove('active');
+            addBubble('Sorry, I encountered an error. Please try again or contact support.', 'bot');
+        }
+    }
+
+    // Form Submit
+    form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const message = input.value.trim();
+        sendMessage(message);
+    });
+
+    // Quick Action Buttons
+    document.querySelectorAll('.quick-action-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const message = btn.getAttribute('data-message');
+            input.value = message;
+            sendMessage(message);
+        });
+    });
+
+    // Keyboard Shortcut: Ctrl+Enter to send
+    input.addEventListener('keydown', (event) => {
+        if (event.ctrlKey && event.key === 'Enter') {
+            form.dispatchEvent(new Event('submit'));
+        }
+    });
+
+    console.log('🤖 AI Chat Assistant with Voice Support Loaded');
+})();
+</script>
+{% endblock %}

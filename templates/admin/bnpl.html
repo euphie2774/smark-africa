@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}BNPL Console - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-calendar-check me-2"></i>Buy Now, Pay Later Console</h2>
+            <div class="small text-muted">MVP-approved products, deposits, short terms, repayment tracking, reminders, and transparent remote functional lock control.</div>
+        </div>
+        <a href="{{ url_for('admin_intelligent_architecture') }}" class="btn btn-outline-warning"><i class="fas fa-network-wired me-1"></i> Architecture Hub</a>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Plans</div><div class="h3 mb-0">{{ bnpl_plans|length }}</div></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Locked Devices</div><div class="h3 mb-0">{{ bnpl_plans|selectattr('lock_status', 'equalto', 'locked')|list|length }}</div></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Enabled Policies</div><div class="h3 mb-0">{{ bnpl_policies|selectattr('is_enabled')|list|length }}</div></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Open Installments</div><div class="h3 mb-0">{{ bnpl_installments|rejectattr('status', 'equalto', 'paid')|list|length }}</div></div></div></div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-header bg-white"><h5 class="mb-0">Product BNPL Policy</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="bnpl_policy">
+                        <div class="col-md-5"><select name="product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:55] }}</option>{% endfor %}</select></div>
+                        <div class="col-md-2"><select name="is_enabled" class="form-select"><option value="1">Enable</option><option value="0">Disable</option></select></div>
+                        <div class="col-md-2"><input name="min_deposit_percent" type="number" min="10" max="20" class="form-control" placeholder="15%"></div>
+                        <div class="col-md-2"><input name="max_term_months" type="number" min="1" max="6" class="form-control" placeholder="3 mo"></div>
+                        <div class="col-md-1"><button class="btn btn-gold w-100"><i class="fas fa-save"></i></button></div>
+                        <div class="col-md-6"><input name="partner_name" class="form-control" placeholder="Microfinance/lending partner"></div>
+                        <div class="col-md-6"><input name="notes" class="form-control" placeholder="Eligibility, risk, or approval notes"></div>
+                    </form>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light"><tr><th>Product</th><th>Deposit</th><th>Term</th><th>Partner</th><th>Status</th></tr></thead>
+                        <tbody>
+                        {% for policy in bnpl_policies %}
+                        <tr><td>{{ policy.product.name if policy.product else 'Product' }}</td><td>{{ policy.min_deposit_percent }}%</td><td>{{ policy.max_term_months }} mo</td><td>{{ policy.partner_name or 'Internal MVP review' }}</td><td><span class="badge bg-{{ 'success' if policy.is_enabled else 'secondary' }}">{{ 'Enabled' if policy.is_enabled else 'Off' }}</span></td></tr>
+                        {% else %}<tr><td colspan="5" class="text-center text-muted py-4">No product policies configured.</td></tr>{% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-header bg-white"><h5 class="mb-0">Create Financing Plan</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="create_bnpl">
+                        <div class="col-md-3"><select name="user_id" class="form-select">{% for user in users %}<option value="{{ user.id }}">{{ user.username }}</option>{% endfor %}</select></div>
+                        <div class="col-md-3"><select name="product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:40] }}</option>{% endfor %}</select></div>
+                        <div class="col-md-2"><input name="deposit_percent" type="number" min="10" max="20" class="form-control" placeholder="15%"></div>
+                        <div class="col-md-2"><input name="term_months" type="number" min="1" max="6" class="form-control" placeholder="3 mo"></div>
+                        <div class="col-md-2"><button class="btn btn-gold w-100">Create</button></div>
+                        <div class="col-12"><input name="device_lock_code" class="form-control" placeholder="Remote functional lock code installed on financed device"></div>
+                    </form>
+                </div>
+                <div class="alert alert-warning rounded-0 mb-0 small">No location tracking is used. Overdue devices can be switched to calls/SMS-only plus payment reminder screen, then unlocked when payment clears.</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mt-4">
+        <div class="card-header bg-white"><h5 class="mb-0">Plans and Device Lock</h5></div>
+        <div class="table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+                <thead class="table-light"><tr><th>User</th><th>Product</th><th>Amount</th><th>Risk</th><th>Approval</th><th>Lock</th><th>Next Due</th><th></th></tr></thead>
+                <tbody>
+                {% for plan in bnpl_plans %}
+                <tr>
+                    <form method="POST">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="bnpl_lock">
+                        <input type="hidden" name="plan_id" value="{{ plan.id }}">
+                        <td>{{ plan.user.username if plan.user else 'User' }}</td>
+                        <td>{{ plan.product.name if plan.product else 'Product' }}</td>
+                        <td>KSh {{ "%.2f"|format(plan.principal_amount) }}<div class="small text-muted">{{ plan.deposit_percent }}% deposit / {{ plan.term_months }} mo</div></td>
+                        <td>{{ plan.risk_score }}</td>
+                        <td><span class="badge bg-{{ 'success' if plan.approval_status == 'approved' else 'warning text-dark' }}">{{ plan.approval_status|replace('_', ' ') }}</span></td>
+                        <td><select name="lock_status" class="form-select form-select-sm"><option value="unlocked" {{ 'selected' if plan.lock_status == 'unlocked' else '' }}>Unlocked</option><option value="locked" {{ 'selected' if plan.lock_status == 'locked' else '' }}>Calls/SMS Only</option></select><input name="device_lock_code" class="form-control form-control-sm mt-1" value="{{ plan.device_lock_code or '' }}" placeholder="Lock code"></td>
+                        <td>{{ plan.next_due_at.strftime('%d %b %Y') if plan.next_due_at else 'N/A' }}</td>
+                        <td><button class="btn btn-sm btn-outline-warning">Save</button></td>
+                    </form>
+                </tr>
+                {% else %}<tr><td colspan="8" class="text-center text-muted py-4">No BNPL plans yet.</td></tr>{% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mt-4">
+        <div class="card-header bg-white"><h5 class="mb-0">Installment Payments</h5></div>
+        <div class="card-body">
+            {% for item in bnpl_installments %}
+            <form method="POST" class="row g-2 align-items-center border-bottom py-2">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="hidden" name="action" value="bnpl_payment">
+                <input type="hidden" name="installment_id" value="{{ item.id }}">
+                <div class="col-md-4"><strong>{{ item.plan.user.username if item.plan and item.plan.user else 'Customer' }}</strong><div class="small text-muted">Plan #{{ item.plan_id }} / installment {{ item.sequence }} / {{ item.status }}</div></div>
+                <div class="col-md-3">Due {{ item.due_at.strftime('%d %b %Y') }}</div>
+                <div class="col-md-2">KSh {{ "%.2f"|format(item.amount_due - item.amount_paid) }}</div>
+                <div class="col-md-2"><input name="amount_paid" type="number" step="0.01" class="form-control form-control-sm" placeholder="Paid"></div>
+                <div class="col-md-1"><button class="btn btn-sm btn-outline-success w-100">Pay</button></div>
+            </form>
+            {% else %}<div class="text-muted text-center py-4">No installments scheduled.</div>{% endfor %}
+        </div>
+    </div>
+</div>
+{% endblock %}

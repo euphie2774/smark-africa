@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Manufacturers - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <h2 class="mb-4"><i class="fas fa-industry me-2"></i>MVP Manufacturer Portal</h2>
+    <div class="row g-3 mb-4">
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Wholesale manufacturers</div><h3>{{ supplier_counts.get('manufacturer', 0) }}</h3></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Marketplace seller leads</div><h3>{{ supplier_counts.get('marketplace_seller', 0) + supplier_counts.get('wholesale_marketplace', 0) }}</h3></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">China factory/directories</div><h3>{{ supplier_counts.get('china_factory_source', 0) + supplier_counts.get('manufacturer_directory', 0) + supplier_counts.get('verified_supplier_directory', 0) }}</h3></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Total partner leads</div><h3>{{ manufacturers|length }}</h3></div></div></div>
+    </div>
+    <form method="GET" class="card border-0 shadow-sm mb-4">
+        <div class="card-body row g-3 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label">Search</label>
+                <input name="q" class="form-control" value="{{ q }}" placeholder="toys, Ex-UK, mtumba...">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Country</label>
+                <select name="country" class="form-select">
+                    <option value="">All countries</option>
+                    {% for country in countries %}
+                    <option value="{{ country }}" {{ 'selected' if selected_country == country }}>{{ country }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Supplier Type</label>
+                <select name="supplier_type" class="form-select">
+                    <option value="">All types</option>
+                    {% for supplier_type in supplier_types %}
+                    <option value="{{ supplier_type }}" {{ 'selected' if selected_supplier_type == supplier_type }}>{{ (supplier_type.replace('_', ' ')|title)|platform_clean }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Preference</label>
+                <select name="category" class="form-select">
+                    <option value="">All categories</option>
+                    {% for item in ['Drones', 'Gaming pads', 'PC cooling', 'Phone accessories', 'Home appliances', 'Toys', 'Household', 'Textile', 'Clothing', 'Electronics', 'Packaging', 'Gift', 'Ex-UK', 'Mtumba'] %}
+                    <option value="{{ item }}" {{ 'selected' if selected_category == item }}>{{ item }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-gold w-100">Browse</button>
+            </div>
+        </div>
+    </form>
+
+    <div class="row g-4">
+        <div class="col-lg-8">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">Verified Manufacturers</h5></div>
+                <div class="card-body p-0 table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead><tr><th>Name</th><th>Type</th><th>Country</th><th>Categories</th><th>Rating</th><th>Legitimacy</th><th>Source</th></tr></thead>
+                        <tbody>{% for item in manufacturers %}<tr><td><strong>{{ item.name|platform_clean }}</strong><div class="small text-muted">{{ item.preference_tags|platform_clean }}</div></td><td><span class="badge bg-warning text-dark">{{ ((item.supplier_type or 'manufacturer').replace('_', ' ')|title)|platform_clean }}</span></td><td>{{ item.country }}</td><td>{{ item.product_categories }}</td><td>{{ item.rating }}</td><td>{{ item.legitimacy_score }}</td><td>{% set source_link = (item.website or item.source_url)|platform_clean_href %}{% if source_link %}<a href="{{ source_link }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-warning">Open</a>{% else %}<span class="badge bg-light text-muted">Saved lead</span>{% endif %}</td></tr>{% endfor %}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-4">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Recommended Shippers</h5></div>
+                <div class="card-body">
+                    {% for shipper in shippers %}
+                    <div class="d-flex justify-content-between border-bottom py-2">
+                        <span>{{ shipper.carrier_name or shipper.name }} <small class="text-muted">{{ shipper.regions }}</small></span>
+                        <strong>KSh {{ "%.2f"|format(shipper.base_cost) }}</strong>
+                    </div>
+                    {% else %}<p class="text-muted">Add shipping rates to see recommendations.</p>{% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

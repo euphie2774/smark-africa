@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Inventory - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-boxes-stacked me-2"></i>Inventory Management</h2>
+            <div class="small text-muted">Stock control, reorder awareness, physical-product readiness, and POS-linked inventory movement.</div>
+        </div>
+        <a href="{{ url_for('admin_pos') }}" class="btn btn-outline-warning"><i class="fas fa-cash-register me-1"></i> POS</a>
+    </div>
+
+    <div class="card border-0 shadow-sm">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light"><tr><th>Product</th><th>Stock</th><th>Sales</th><th>Weight</th><th>Status</th><th>Adjust</th></tr></thead>
+                <tbody>
+                {% for product in products %}
+                <tr>
+                    <td><strong>{{ product.name }}</strong><div class="small text-muted">{{ product.category.name if product.category else 'General' }}</div></td>
+                    <td><span class="badge bg-{{ 'danger' if not product.is_digital and (product.stock or 0) <= 5 else 'success' }}">{{ 'Digital' if product.is_digital else product.stock }}</span></td>
+                    <td>{{ product.sales_count or 0 }}</td>
+                    <td>{{ "%.2f"|format(product.weight_kg or 0) }} kg</td>
+                    <td>{{ 'Active' if product.is_active else 'Hidden' }}</td>
+                    <td>
+                        <form method="POST" class="d-flex gap-2">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input type="hidden" name="product_id" value="{{ product.id }}">
+                            <input name="adjustment" type="number" class="form-control form-control-sm" style="width:90px" placeholder="+/-">
+                            <input name="weight_kg" type="number" step="0.01" min="0" value="{{ product.weight_kg or 0 }}" class="form-control form-control-sm" style="width:95px">
+                            <select name="is_active" class="form-select form-select-sm" style="width:100px">
+                                <option value="1" {{ 'selected' if product.is_active }}>Active</option>
+                                <option value="0" {{ 'selected' if not product.is_active }}>Hidden</option>
+                            </select>
+                            <button class="btn btn-sm btn-outline-warning">Save</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

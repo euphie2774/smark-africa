@@ -1,0 +1,339 @@
+{% extends 'base.html' %}
+{% block title %}Checkout - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<h1 class="fw-bold mb-4">Checkout</h1>
+
+{% if polling and order %}
+<div class="row justify-content-center">
+    <div class="col-lg-7">
+        <div class="card border-0 shadow-sm text-center">
+            <div class="card-body p-5">
+                <div class="spinner-border text-warning mb-3" role="status"></div>
+                <h2 class="h4 fw-bold">Check your phone</h2>
+                <p class="text-muted">An M-Pesa STK push has been sent. Enter your PIN on your phone to complete payment.</p>
+                <p class="mb-1"><strong>Order:</strong> {{ order.order_number }}</p>
+                <p class="mb-4"><strong>Total:</strong> KSh {{ "%.2f"|format(order.amount_paid) }}</p>
+                <div id="payment-status" class="alert alert-info">Waiting for payment confirmation...</div>
+                <a href="{{ url_for('orders') }}" class="btn btn-outline-gold">View My Orders</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% else %}
+
+{% if not current_user.is_authenticated %}
+<div class="alert alert-warning">
+    Please <a href="{{ url_for('login') }}">login</a> or <a href="{{ url_for('register') }}">register</a> to checkout.
+</div>
+{% endif %}
+
+{% if cart_items %}
+<div class="row g-4">
+    <!-- Order Summary -->
+    <div class="col-md-5 order-md-2">
+        <div class="card border-0 shadow-sm">
+            <div class="card-body">
+                <h5 class="fw-bold mb-3">Order Summary</h5>
+                {% for item in cart_items %}
+                <div class="d-flex justify-content-between small mb-2">
+                    <span>{{ item.product.name[:40] }} × {{ item.quantity }}</span>
+                    {% if item.product %}
+<span>KSh {{ "%.2f"|format((item.product.discounted_price or item.product.selling_price) * item.quantity) }}</span>
+{% else %}
+<span class="text-danger">Product unavailable</span>
+{% endif %}
+                </div>
+                {% endfor %}
+                <hr>
+                <div class="d-flex justify-content-between fw-bold">
+                    <span>Subtotal</span>
+                    <span>KSh {{ "%.2f"|format(total) }}</span>
+                </div>
+
+                <!-- Shipping cost -->
+                {% if shipping_required and shipping_rates %}
+                <div class="mt-3">
+                    <label class="form-label fw-bold">Shipping Method</label>
+                    <select class="form-select form-select-sm" id="shipping-rate" onchange="updateShipping()">
+                        <option value="">Select shipping...</option>
+                        {% for rate in shipping_rates %}
+                        <option value="{{ rate.id }}" data-base="{{ rate.base_cost }}" data-perkg="{{ rate.cost_per_kg }}" data-days="{{ rate.estimated_days_min }}-{{ rate.estimated_days_max }}">
+                            {{ rate.name|platform_clean }} ({{ rate.estimated_days_min }}-{{ rate.estimated_days_max }} days) — KSh {{ "%.2f"|format(rate.base_cost) }} + KSh {{ "%.2f"|format(rate.cost_per_kg) }}/kg
+                        </option>
+                        {% endfor %}
+                    </select>
+                    <p class="small text-muted mt-2" id="shipping-detail"></p>
+                </div>
+                <div class="d-flex justify-content-between">
+                    <span>Shipping</span>
+                    <span id="shipping-cost-display">KSh 0.00</span>
+                </div>
+                <input type="hidden" id="shipping-cost-value" value="0">
+                <hr>
+                {% endif %}
+
+                <div class="d-flex justify-content-between fw-bold fs-5">
+                    <span>Total</span>
+                    <span id="grand-total" class="text-success">KSh {{ "%.2f"|format(total) }}</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Payment Form -->
+    <div class="col-md-7">
+        <div class="card border-0 shadow-sm">
+            <div class="card-body">
+                <h5 class="fw-bold mb-3">Payment via M-Pesa</h5>
+                <p class="text-muted small">Enter your M-Pesa registered phone number. You will receive an STK Push prompt on your phone.</p>
+
+                <form method="POST" action="{{ url_for('checkout') }}" id="checkout-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <input type="hidden" name="shipping_rate_id" id="selected-shipping-rate" value="">
+
+                    <div class="mb-3">
+                        <label for="phone" class="form-label">M-Pesa Phone Number</label>
+                        <div class="input-group input-group-lg phone-code-group">
+                            <span class="input-group-text phone-flag-wrap">
+                                <img class="phone-country-flag" src="https://flagcdn.com/24x18/ke.png" alt="KE flag">
+                            </span>
+                            <select class="form-select phone-country-select" name="phone_country_code" style="max-width: 190px;">
+                                {% for country in country_phone_codes %}
+                                <option value="{{ country.code }}" data-iso="{{ country.iso }}" data-flag="{{ country.flag_url }}" data-country="{{ country.name }}" {{ 'selected' if country.code == '+254' }}>{{ country.name }} {{ country.code }}</option>
+                                {% endfor %}
+                            </select>
+                            <input type="tel" class="form-control" id="phone" name="phone_local"
+                                   placeholder="712345678" value="" required>
+                        </div>
+                        <input type="hidden" name="phone" id="phone_full" value="{{ current_user.phone if current_user.is_authenticated else '' }}">
+                        <div class="form-text">Choose a country code, then enter the local number without the leading zero.</div>
+                    </div>
+
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label for="shipping_country" class="form-label">Country</label>
+                            <select class="form-select" id="shipping_country" name="shipping_country"></select>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="shipping_state" class="form-label">County / State</label>
+                            <select class="form-select" id="shipping_state" name="shipping_state"></select>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="shipping_city" class="form-label">City</label>
+                            <select class="form-select" id="shipping_city" name="shipping_city"></select>
+                        </div>
+                    </div>
+
+                    <div class="mb-3 mt-3">
+                        <label class="form-label">Delivery Option</label>
+                        <div class="d-flex flex-wrap gap-3">
+                            <label class="form-check">
+                                <input class="form-check-input" type="radio" name="delivery_method" value="doorstep" checked>
+                                <span class="form-check-label">Doorstep delivery</span>
+                            </label>
+                            <label class="form-check">
+                                <input class="form-check-input" type="radio" name="delivery_method" value="pickup_station">
+                                <span class="form-check-label">Pickup station</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="pickup_station" class="form-label">Pickup Station</label>
+                        <select class="form-select" id="pickup_station" name="pickup_station">
+                            <option value="">Select only if using pickup station</option>
+                            <option>Nairobi CBD pickup station</option>
+                            <option>Westlands pickup station</option>
+                            <option>Thika Road pickup station</option>
+                            <option>Mombasa Road pickup station</option>
+                            <option>Kisumu pickup station</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="shipping_address" class="form-label">
+                            Shipping Address <small class="text-muted">(required for physical products)</small>
+                        </label>
+                        <textarea class="form-control" id="shipping_address" name="shipping_address" rows="3" placeholder="Enter your delivery address">{{ current_user.shipping_address if current_user.is_authenticated else '' }}</textarea>
+                    </div>
+
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="agree" required>
+                        <label class="form-check-label" for="agree">I agree to the <a href="{{ url_for('terms') }}" target="_blank">Terms & Conditions</a></label>
+                    </div>
+
+                    <button type="submit" class="btn btn-warning btn-lg w-100 fw-bold" id="pay-button">
+                        Pay KSh <span id="pay-amount">{{ "%.2f"|format(total) }}</span> via M-Pesa
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <!-- M-Pesa Instructions -->
+        <div class="card border-0 shadow-sm mt-3 bg-light">
+            <div class="card-body">
+                <h6 class="fw-bold">How M-Pesa Payment Works:</h6>
+                <ol class="small mb-0">
+                    <li>Enter your M-Pesa registered phone number</li>
+                    <li>Click "Pay via M-Pesa"</li>
+                    <li>Check your phone for the STK Push prompt</li>
+                    <li>Enter your M-Pesa PIN to confirm payment</li>
+                    <li>You'll be redirected to your order page</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% else %}
+<div class="text-center py-5">
+    <h3 class="text-muted">Your cart is empty</h3>
+    <a href="{{ url_for('shop') }}" class="btn btn-warning btn-lg mt-3">Start Shopping</a>
+</div>
+{% endif %}
+{% endif %}
+
+<div class="modal fade" id="countryLaunchModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Checkout Expansion</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                {{ launch_soon_message or 'We are soon expanding our services to reach all Africans, please check back later' }}
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-gold" data-bs-dismiss="modal">Got it</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+{% if polling and order %}
+const paymentStatus = document.getElementById('payment-status');
+const pollPayment = () => {
+    fetch("{{ url_for('check_payment', order_id=order.id) }}")
+        .then(response => response.json())
+        .then(data => {
+            if (data.payment_status === 'completed') {
+                paymentStatus.className = 'alert alert-success';
+                paymentStatus.textContent = 'Payment completed. Redirecting to your order details...';
+                window.location.href = "{{ url_for('order_detail', order_id=order.id) }}";
+            } else if (data.payment_status === 'failed') {
+                paymentStatus.className = 'alert alert-warning';
+                paymentStatus.textContent = 'Payment was not completed. You can retry from My Orders.';
+            }
+        })
+        .catch(() => {
+            paymentStatus.className = 'alert alert-warning';
+            paymentStatus.textContent = 'Could not fetch payment status yet. Keep checking your phone or view My Orders.';
+        });
+};
+setInterval(pollPayment, 5000);
+pollPayment();
+{% else %}
+let totalBeforeShipping = {{ total|default(0) }};
+let shippingCost = 0;
+const addressBook = {{ address_book|default({})|tojson }};
+const showCountryLaunchPopup = {{ 'true' if show_country_launch_popup else 'false' }};
+const allowedCheckoutCountries = new Set({{ settings.get('checkout_allowed_countries', 'Kenya').split(',')|tojson }}.map(item => item.trim()).filter(Boolean));
+
+function fillSelect(select, values) {
+    select.innerHTML = '';
+    values.forEach(value => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = value;
+        select.appendChild(option);
+    });
+}
+
+function setupAddressSelectors() {
+    const country = document.getElementById('shipping_country');
+    const state = document.getElementById('shipping_state');
+    const city = document.getElementById('shipping_city');
+    if (!country || !state || !city) return;
+
+    fillSelect(country, Object.keys(addressBook));
+    country.addEventListener('change', () => {
+        fillSelect(state, Object.keys(addressBook[country.value] || {}));
+        state.dispatchEvent(new Event('change'));
+        const selectedCountry = country.value;
+        const acceptsAll = allowedCheckoutCountries.has('*');
+        const isAllowed = acceptsAll || allowedCheckoutCountries.has(selectedCountry);
+        if (showCountryLaunchPopup && selectedCountry && !isAllowed) {
+            const modal = new bootstrap.Modal(document.getElementById('countryLaunchModal'));
+            modal.show();
+        }
+    });
+    state.addEventListener('change', () => {
+        fillSelect(city, addressBook[country.value]?.[state.value] || []);
+        updateShipping();
+    });
+    city.addEventListener('change', updateShipping);
+    country.dispatchEvent(new Event('change'));
+}
+
+function updateShipping() {
+    const select = document.getElementById('shipping-rate');
+    const selected = select ? select.options[select.selectedIndex] : null;
+    const detail = document.getElementById('shipping-detail');
+    const display = document.getElementById('shipping-cost-display');
+    const grandTotal = document.getElementById('grand-total');
+    const payAmount = document.getElementById('pay-amount');
+    const shippingValue = document.getElementById('shipping-cost-value');
+    const hiddenRate = document.getElementById('selected-shipping-rate');
+
+    const country = document.getElementById('shipping_country')?.value || '';
+    const state = document.getElementById('shipping_state')?.value || '';
+    const city = document.getElementById('shipping_city')?.value || '';
+
+    if (country || state || city) {
+        const weightKg = {{ weight_kg|default(0) }};
+        fetch("{{ url_for('api_shipping_cost') }}", {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({country, state, city, weight_kg: weightKg})
+        }).then(r => r.json()).then(data => {
+            shippingCost = Number(data.shipping_cost || 0);
+            if (detail) detail.textContent = `Auto-calculated for ${city}, ${state}, ${country}`;
+            if (hiddenRate) hiddenRate.value = '';
+            if (shippingValue) shippingValue.value = shippingCost;
+            const newTotal = totalBeforeShipping + shippingCost;
+            if (display) display.textContent = `KSh ${shippingCost.toFixed(2)}`;
+            grandTotal.textContent = `KSh ${newTotal.toFixed(2)}`;
+            payAmount.textContent = newTotal.toFixed(2);
+        }).catch(()=>{});
+        return;
+    }
+
+    if (selected && selected.value) {
+        const base = parseFloat(selected.dataset.base) || 0;
+        const perKg = parseFloat(selected.dataset.perkg) || 0;
+        const days = selected.dataset.days || '';
+        const weightKg = {{ weight_kg|default(0) }};
+        shippingCost = base + (perKg * weightKg);
+        if (detail) detail.textContent = `Estimated delivery: ${days} business days`;
+        if (hiddenRate) hiddenRate.value = selected.value;
+    } else {
+        shippingCost = 0;
+        if (detail) detail.textContent = '';
+        if (hiddenRate) hiddenRate.value = '';
+    }
+
+    if (shippingValue) shippingValue.value = shippingCost;
+    const newTotal = totalBeforeShipping + shippingCost;
+    if (display) display.textContent = `KSh ${shippingCost.toFixed(2)}`;
+    grandTotal.textContent = `KSh ${newTotal.toFixed(2)}`;
+    payAmount.textContent = newTotal.toFixed(2);
+}
+setupAddressSelectors();
+{% endif %}
+</script>
+{% endblock %}

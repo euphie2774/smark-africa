@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}{{ category.name }} - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('home') }}">Home</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('shop') }}">Shop</a></li>
+            <li class="breadcrumb-item active">{{ category.name }}</li>
+        </ol>
+    </nav>
+
+    <div class="mb-4">
+        <h1 class="h2">{{ category.name }}</h1>
+        {% if category.description %}
+        <p class="text-muted">{{ category.description }}</p>
+        {% endif %}
+    </div>
+
+    {% if is_music_category %}
+    <div class="row g-3 mb-4">
+        <div class="col-lg-7">
+            <div class="p-3 border rounded bg-light h-100">
+                <h2 class="h5 mb-2">Tracks, beats, mixes, and audio files</h2>
+                <p class="mb-0 text-muted">Sellers can list MP3 or MP4 music files, recorded tracks, beats, DJ mixes, and related downloadable audio products. Buyers can preview supported media before checkout and download the full file after payment.</p>
+            </div>
+        </div>
+        <div class="col-lg-5">
+            <div class="p-3 border rounded h-100">
+                <h2 class="h5 mb-3">Voice-over experts</h2>
+                {% if voiceover_experts %}
+                {% for expert in voiceover_experts[:4] %}
+                <div class="d-flex justify-content-between align-items-center gap-3 py-2 border-bottom">
+                    <div>
+                        <strong>{{ expert.name }}</strong>
+                        <div class="small text-muted">{{ "%.1f"|format(expert.average_rating or 0) }} stars · {{ ((expert.average_rating or 0) / 5 * 100)|round|int }}% rating</div>
+                    </div>
+                    <div class="text-end">
+                        <div class="fw-bold">KSh {{ "%.2f"|format(expert.discounted_price or expert.selling_price) }}</div>
+                        <a href="{{ url_for('product_page', slug=expert.slug) }}" class="btn btn-sm btn-outline-primary">Select</a>
+                    </div>
+                </div>
+                {% endfor %}
+                {% else %}
+                <p class="text-muted mb-0">Voice-over listings will appear here when approved sellers add services with prices and ratings.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if products %}
+    <div class="row g-4">
+        {% for product in products %}
+        <div class="col-sm-6 col-md-4 col-lg-3">
+            <div class="card h-100 shadow-sm border-0">
+                {% if product.image_url %}
+                <img src="{{ product.image_url }}" class="card-img-top" alt="{{ product.name }}" style="height: 200px; object-fit: cover;">
+                {% else %}
+                <div class="bg-light d-flex align-items-center justify-content-center" style="height: 200px;">
+                    <i class="fas fa-box fa-4x text-muted"></i>
+                </div>
+                {% endif %}
+                <div class="card-body d-flex flex-column">
+                    <h5 class="card-title">{{ product.name }}</h5>
+                    <p class="card-text small text-muted flex-grow-1">{{ product.description[:80] }}{% if product.description|length > 80 %}...{% endif %}</p>
+                    <div class="d-flex justify-content-between align-items-center mt-2">
+                        <span class="fw-bold text-primary">KSh {{ "%.2f"|format(product.selling_price) }}</span>
+                        <a href="{{ url_for('product_page', slug=product.slug) }}" class="btn btn-sm btn-outline-primary">View</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-center py-5">
+        <i class="fas fa-box-open fa-4x text-muted mb-3"></i>
+        <p class="text-muted">No products in this category yet.</p>
+        <a href="{{ url_for('shop') }}" class="btn btn-primary">Browse All Products</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

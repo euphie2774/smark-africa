@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Admin Messages - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h2 class="mb-4"><i class="fas fa-comments me-2"></i>Admin-MVP Messages</h2>
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-body">
+            <form method="POST" class="row g-3">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="col-md-4"><input name="subject" class="form-control" placeholder="Subject"></div>
+                <div class="col-md-4">
+                    <select name="recipient_id" class="form-select">
+                        <option value="">All admins</option>
+                        {% for admin in admins %}<option value="{{ admin.id }}">{{ admin.username }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-4"><button class="btn btn-gold w-100">Send</button></div>
+                <div class="col-12"><textarea name="body" class="form-control" rows="3" required></textarea></div>
+            </form>
+        </div>
+    </div>
+    {% for msg in messages %}
+    <div class="card border-0 shadow-sm mb-2">
+        <div class="card-body">
+            <strong>{{ msg.subject or 'Message' }}</strong>
+            <span class="text-muted small">from {{ msg.sender.username if msg.sender else '-' }} on {{ msg.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+            <p class="mb-0">{{ msg.body }}</p>
+        </div>
+    </div>
+    {% else %}<p class="text-muted">No messages yet.</p>{% endfor %}
+</div>
+{% endblock %}

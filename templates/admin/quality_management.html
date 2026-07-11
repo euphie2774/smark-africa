@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Quality Management - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-award me-2"></i>Total Quality Management</h2>
+            <div class="small text-muted">Continuous improvement across AI, customer satisfaction, trends, marketing, technology, and operational quality.</div>
+        </div>
+    </div>
+
+    <form method="POST" class="card border-0 shadow-sm mb-4">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+        <div class="card-body row g-3">
+            <div class="col-lg-5"><input name="finding" class="form-control" placeholder="Quality finding or improvement opportunity"></div>
+            <div class="col-lg-5"><input name="action" class="form-control" placeholder="Action to improve platform efficiency"></div>
+            <div class="col-lg-2"><button class="btn btn-gold w-100">Record</button></div>
+        </div>
+    </form>
+
+    <div class="row g-4">
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Improvement Backlog</h5></div>
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light"><tr><th>Source</th><th>Finding</th><th>Action</th><th>Impact</th></tr></thead>
+                        <tbody>
+                        {% for log in logs %}
+                        <tr><td>{{ log.source.replace('_', ' ')|title }}</td><td>{{ log.finding }}</td><td>{{ log.action }}</td><td><span class="badge bg-warning text-dark">{{ "%.0f"|format(log.impact_score) }}</span></td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-5">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">Customer Satisfaction Signals</h5></div>
+                <div class="card-body">
+                    {% for item in feedback %}
+                    <div class="border-bottom py-2">
+                        <strong>{{ item.satisfaction_rating }}/5 satisfaction</strong>
+                        <div class="small text-muted">{{ item.improvement_text or 'No written note' }}</div>
+                    </div>
+                    {% else %}<p class="text-muted">No feedback yet.</p>{% endfor %}
+                </div>
+            </div>
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">AI Efficiency Tasks</h5></div>
+                <div class="card-body">
+                    {% for task in tasks %}
+                    <div class="d-flex justify-content-between border-bottom py-2"><span>{{ task.name }}</span><span class="badge bg-success">{{ "%.0f"|format(task.efficiency_score) }}%</span></div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Manage Reviews - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="fas fa-star me-2"></i>Manage Reviews</h2>
+    </div>
+
+    {% if edit_review %}
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-body">
+            <h5>Write Admin Review</h5>
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="hidden" name="product_id" value="{{ edit_review.id }}">
+                <div class="mb-3">
+                    <label class="form-label">Product: <strong>{{ edit_review.name }}</strong></label>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Rating</label>
+                    <select name="rating" class="form-select w-auto">
+                        {% for i in range(5, 0, -1) %}
+                        <option value="{{ i }}">{{ i }} Star{{ 's' if i > 1 }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Comment</label>
+                    <textarea name="comment" class="form-control" rows="4" required></textarea>
+                </div>
+                <div class="form-check mb-3">
+                    <input class="form-check-input" type="checkbox" name="is_admin_review" id="is_admin_review" value="1" checked>
+                    <label class="form-check-label" for="is_admin_review">Admin Review</label>
+                </div>
+                <button type="submit" class="btn btn-success"><i class="fas fa-plus me-1"></i> Post Review</button>
+                <a href="{{ url_for('admin_reviews') }}" class="btn btn-outline-secondary">Cancel</a>
+            </form>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>ID</th>
+                            <th>Product</th>
+                            <th>Author</th>
+                            <th>Rating</th>
+                            <th>Comment</th>
+                            <th>Admin</th>
+                            <th>Visible</th>
+                            <th>Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for review in reviews %}
+                        <tr>
+                            <td>{{ review.id }}</td>
+                            <td>{{ review.product.name[:30] if review.product else 'Deleted' }}</td>
+                            <td>{{ review.author.username if review.author else 'Anonymous' }}</td>
+                            <td>{% for s in range(review.rating or 0) %}&#9733;{% endfor %}</td>
+                            <td>{{ (review.comment or '')[:50] }}{{ '...' if (review.comment or '')|length > 50 }}</td>
+                            <td>
+                                <span class="badge bg-{{ 'warning' if review.is_admin_review else 'secondary' }}">
+                                    {{ 'Yes' if review.is_admin_review else 'No' }}
+                                </span>
+                            </td>
+                            <td>
+                                <span class="badge bg-{{ 'success' if review.is_visible else 'danger' }}">
+                                    {{ 'Visible' if review.is_visible else 'Hidden' }}
+                                </span>
+                            </td>
+                            <td>{{ review.created_at.strftime('%d %b %Y') if review.created_at else '-' }}</td>
+                            <td>
+                                <div class="btn-group btn-group-sm">
+                                    <form method="POST" action="{{ url_for('admin_toggle_review', rid=review.id) }}" style="display:inline;">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button type="submit" class="btn btn-{{ 'success' if not review.is_visible else 'warning' }}" title="{{ 'Show' if not review.is_visible else 'Hide' }}">
+                                            <i class="fas fa-{{ 'eye' if not review.is_visible else 'eye-slash' }}"></i>
+                                        </button>
+                                    </form>
+                                    <form method="POST" action="{{ url_for('admin_delete_review', rid=review.id) }}" style="display:inline;" onsubmit="return confirm('Delete this review?');">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button type="submit" class="btn btn-outline-danger"><i class="fas fa-trash"></i></button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="9" class="text-center text-muted py-4">No reviews found</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

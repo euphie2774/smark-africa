@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Shopping Card - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-id-card me-2"></i>Smark-Africa Shopping Card</h2>
+            <div class="text-muted">Use earned credits or funded cash at Smark-Africa POS terminals.</div>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-5">
+            {% if card %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <div class="rounded bg-dark text-warning p-4 mb-3">
+                        <div class="small text-uppercase">SMARK-AFRICA</div>
+                        <h4 class="mt-3 mb-4">{{ card.display_name or current_user.username }}</h4>
+                        <div class="fs-5">{{ card.card_number[:4] }} {{ card.card_number[4:8] }} {{ card.card_number[8:12] }} {{ card.card_number[12:] }}</div>
+                        <div class="d-flex justify-content-between mt-4">
+                            <span>VALID CARD</span>
+                            <span>•••• {{ card.card_last4 }}</span>
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-between">
+                        <span>Credits</span>
+                        <strong>{{ card.credit_balance|int }} credits / KSh {{ "%.2f"|format((card.credit_balance or 0) / 100) }}</strong>
+                    </div>
+                    <div class="d-flex justify-content-between">
+                        <span>Cash funded</span>
+                        <strong>KSh {{ "%.2f"|format(card.cash_balance or 0) }}</strong>
+                    </div>
+                    <div class="d-flex justify-content-between">
+                        <span>Status</span>
+                        <strong>{{ card.status|title }}</strong>
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5>Request Card</h5>
+                    <p class="text-muted">You need {{ issue_threshold|int }} credits to request a card. Admins can also issue one after recording the KSh {{ "%.0f"|format(issue_fee) }} issue fee.</p>
+                    <div class="alert alert-info">Current earned credits: <strong>{{ loyalty_credits|int }}</strong></div>
+                    <form method="POST">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input name="display_name" class="form-control mb-3" placeholder="Name to print on card" value="{{ current_user.username }}">
+                        <button class="btn btn-gold w-100">Request Card</button>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Card Activity</h5></div>
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light"><tr><th>Date</th><th>Type</th><th>Credits</th><th>Cash</th><th>Note</th></tr></thead>
+                        <tbody>
+                        {% for txn in transactions %}
+                        <tr>
+                            <td>{{ txn.created_at.strftime('%d %b %Y') }}</td>
+                            <td>{{ txn.transaction_type|replace('_', ' ')|title }}</td>
+                            <td>{{ txn.credit_amount }}</td>
+                            <td>KSh {{ "%.2f"|format(txn.cash_amount or 0) }}</td>
+                            <td>{{ txn.note or '' }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="5" class="text-center text-muted py-4">No card activity yet.</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

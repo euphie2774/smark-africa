@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block title %}Phone Barcode Scanner - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center gap-3 mb-3">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-barcode me-2"></i>Phone Barcode Scanner</h2>
+            <div class="small text-muted">{{ paired_terminal or 'Scan here and the barcode is sent to your active POS sale page.' }}</div>
+        </div>
+        <a href="{{ url_for('admin_pos') }}" class="btn btn-outline-warning"><i class="fas fa-cash-register me-1"></i> POS</a>
+    </div>
+
+    <div class="card border-0 shadow-sm scanner-card">
+        <div class="card-body">
+            <div class="alert alert-warning small">
+                {% if pair_mode %}
+                Point the phone camera at the pair code displayed on the PC POS. No POS login is required on this phone.
+                {% elif pairing_error %}
+                {{ pairing_error }}
+                {% else %}
+                This phone is paired to the PC POS terminal. Product scans will go directly into the PC checkout cart.
+                {% endif %}
+            </div>
+            <video id="scanner-video" class="scanner-video" playsinline muted></video>
+            <div class="scanner-frame" aria-hidden="true"></div>
+            <div id="scanner-status" class="alert alert-info mt-3 mb-0">Tap Start Camera to scan with your phone.</div>
+            <div class="d-flex flex-wrap gap-2 mt-3">
+                <button id="start-scanner" class="btn btn-gold" type="button" {{ 'disabled' if pairing_error }}><i class="fas fa-camera me-1"></i> Start Camera</button>
+                <button id="stop-scanner" class="btn btn-outline-secondary" type="button"><i class="fas fa-stop me-1"></i> Stop</button>
+            </div>
+        </div>
+    </div>
+
+    <form id="manual-scan-form" class="card border-0 shadow-sm mt-4">
+        <div class="card-header bg-white"><h5 class="mb-0">Manual Barcode</h5></div>
+        <div class="card-body row g-2">
+            <div class="col-md-9"><input id="manual-barcode" class="form-control" placeholder="{{ 'Type pair code' if pair_mode else 'Type or paste barcode' }}"></div>
+            <div class="col-md-3"><button class="btn btn-outline-success w-100">Send</button></div>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const video = document.getElementById('scanner-video');
+    const statusBox = document.getElementById('scanner-status');
+    const startButton = document.getElementById('start-scanner');
+    const stopButton = document.getElementById('stop-scanner');
+    const manualForm = document.getElementById('manual-scan-form');
+    const manualInput = document.getElementById('manual-barcode');
+    let stream = null;
+    let detector = null;
+    let scanning = false;
+    let lastCode = '';
+    let lastSentAt = 0;
+    const pairMode = {{ 'true' if pair_mode else 'false' }};
+    const pairRedirectBase = {{ (pair_redirect_base or '')|tojson }};
+    const scanUrl = {{ (scan_url or '')|tojson }};
+
+    function setStatus(message, type = 'info') {
+        statusBox.className = `alert alert-${type} mt-3 mb-0`;
+        statusBox.textContent = message;
+    }
+
+    async function sendBarcode(rawCode) {
+        const barcode = String(rawCode || '').trim();
+        if (!barcode) return;
+        if (pairMode) {
+            const token = barcode.toUpperCase().replace(/[^A-F0-9]/g, '').slice(0, 32);
+            if (token.length < 8) {
+                setStatus('That does not look like a POS pair code.', 'warning');
+                return;
+            }
+            window.location.href = pairRedirectBase + token;
+            return;
+        }
+        if (!scanUrl) {
+            setStatus('This scanner is not paired to a POS terminal.', 'danger');
+            return;
+        }
+        const now = Date.now();
+        if (barcode === lastCode && now - lastSentAt < 2500) return;
+        lastCode = barcode;
+        lastSentAt = now;
+        const response = await fetch(scanUrl, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({barcode})
+        });
+        const data = await response.json();
+        if (data.success) {
+            setStatus(data.product ? `Sent ${data.product} to POS.` : `Sent ${barcode} to POS.`, 'success');
+            if (navigator.vibrate) navigator.vibrate(90);
+        } else {
+            setStatus(data.error || 'Could not send barcode.', 'warning');
+        }
+    }
+
+    async function scanLoop() {
+        if (!scanning || !detector) return;
+        try {
+            const codes = await detector.detect(video);
+            if (codes && codes.length) {
+                await sendBarcode(codes[0].rawValue);
+            }
+        } catch (error) {
+            setStatus('Camera is active. If scanning does not work, use the manual barcode box below.', 'warning');
+        }
+        requestAnimationFrame(scanLoop);
+    }
+
+    startButton.addEventListener('click', async () => {
+        if (!('BarcodeDetector' in window)) {
+            setStatus('This browser does not support camera barcode detection. Use the manual barcode box below.', 'warning');
+            return;
+        }
+        try {
+            detector = new BarcodeDetector({formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code', 'upc_a', 'upc_e']});
+            stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment'}, audio: false});
+            video.srcObject = stream;
+            await video.play();
+            scanning = true;
+            setStatus('Scanning. Point the camera at a barcode.', 'info');
+            scanLoop();
+        } catch (error) {
+            setStatus('Camera permission failed. Use the manual barcode box below.', 'danger');
+        }
+    });
+
+    stopButton.addEventListener('click', () => {
+        scanning = false;
+        if (stream) stream.getTracks().forEach(track => track.stop());
+        stream = null;
+        video.srcObject = null;
+        setStatus('Scanner stopped.', 'secondary');
+    });
+
+    manualForm.addEventListener('submit', async event => {
+        event.preventDefault();
+        await sendBarcode(manualInput.value);
+        manualInput.value = '';
+        manualInput.focus();
+    });
+})();
+</script>
+{% endblock %}

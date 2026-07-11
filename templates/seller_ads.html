@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Seller Ads - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h1 class="fw-bold">Paid Ads</h1>
+    <div class="row g-4">
+        <div class="col-lg-4">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <form method="POST">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <label class="form-label">Product</label>
+                        <select name="product_id" class="form-select mb-3">
+                            {% for product in products %}<option value="{{ product.id }}">{{ product.name }}</option>{% endfor %}
+                        </select>
+                        <label class="form-label">Campaign Channel</label>
+                        <select name="platform" class="form-select mb-3">
+                            <option>SMARKAFRICA Homepage</option><option>SMARKAFRICA Category Page</option><option>SMARKAFRICA Buyer Retargeting</option><option>SMARKAFRICA Managed Outreach</option>
+                        </select>
+                        <label class="form-label">Ad Budget</label>
+                        <input type="number" step="0.01" name="budget" class="form-control mb-3" required>
+                        <button class="btn btn-gold w-100">Create Ad Request</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-8">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5>Campaigns</h5>
+                    {% for ad in campaigns %}
+                    <div class="d-flex justify-content-between border-bottom py-2">
+                        <span>{{ ad.platform }} <small class="text-muted">{{ ad.status }}</small></span>
+                        <strong>KSh {{ "%.2f"|format(ad.total_charged) }}</strong>
+                    </div>
+                    {% else %}
+                    <p class="text-muted">No campaigns yet.</p>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

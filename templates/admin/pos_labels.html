@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}POS Barcode Labels - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex justify-content-between align-items-center gap-3 mb-4 no-print">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-barcode me-2"></i>Barcode Labels</h2>
+            <div class="small text-muted">Print labels individually or in bulk. Every label uses the product's unique barcode.</div>
+        </div>
+        <div class="d-flex gap-2">
+            <button class="btn btn-gold" onclick="window.print()"><i class="fas fa-print me-1"></i>Print</button>
+            <a href="{{ url_for('admin_pos') }}" class="btn btn-outline-secondary">Back to POS</a>
+        </div>
+    </div>
+
+    <div class="barcode-label-grid">
+        {% for product in products %}
+        <div class="barcode-label">
+            <div class="fw-bold label-name">{{ product.name }}</div>
+            <div class="label-price">KSh {{ "%.2f"|format(product.discounted_price or product.selling_price) }}</div>
+            <svg class="label-barcode" data-barcode="{{ product.pos_barcode }}"></svg>
+            <div class="small">{{ product.pos_barcode }}</div>
+        </div>
+        {% else %}
+        <div class="text-muted">No physical products available for barcode labels.</div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const code39 = {
+        '0': 'nnnwwnwnn', '1': 'wnnwnnnnw', '2': 'nnwwnnnnw', '3': 'wnwwnnnnn',
+        '4': 'nnnwwnnnw', '5': 'wnnwwnnnn', '6': 'nnwwwnnnn', '7': 'nnnwnnwnw',
+        '8': 'wnnwnnwnn', '9': 'nnwwnnwnn', 'A': 'wnnnnwnnw', 'B': 'nnwnnwnnw',
+        'C': 'wnwnnwnnn', 'D': 'nnnnwwnnw', 'E': 'wnnnwwnnn', 'F': 'nnwnwwnnn',
+        'G': 'nnnnnwwnw', 'H': 'wnnnnwwnn', 'I': 'nnwnnwwnn', 'J': 'nnnnwwwnn',
+        'K': 'wnnnnnnww', 'L': 'nnwnnnnww', 'M': 'wnwnnnnwn', 'N': 'nnnnwnnww',
+        'O': 'wnnnwnnwn', 'P': 'nnwnwnnwn', 'Q': 'nnnnnnwww', 'R': 'wnnnnnwwn',
+        'S': 'nnwnnnwwn', 'T': 'nnnnwnwwn', 'U': 'wwnnnnnnw', 'V': 'nwwnnnnnw',
+        'W': 'wwwnnnnnn', 'X': 'nwnnwnnnw', 'Y': 'wwnnwnnnn', 'Z': 'nwwnwnnnn',
+        '-': 'nwnnnnwnw', '.': 'wwnnnnwnn', ' ': 'nwwnnnwnn', '$': 'nwnwnwnnn',
+        '/': 'nwnwnnnwn', '+': 'nwnnnwnwn', '%': 'nnnwnwnwn', '*': 'nwnnwnwnn'
+    };
+    function drawBarcode(svg) {
+        const code = `*${String(svg.dataset.barcode || '').toUpperCase().replace(/[^A-Z0-9 .\-$/+%]/g, '')}*`;
+        const narrow = 2;
+        const wide = 5;
+        const gap = 2;
+        const width = Math.max(220, code.length * 34);
+        const height = 70;
+        svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+        svg.innerHTML = '';
+        let x = 6;
+        for (let index = 0; index < code.length; index++) {
+            const pattern = code39[code[index]];
+            if (!pattern) continue;
+            for (let part = 0; part < pattern.length; part++) {
+                const isBar = part % 2 === 0;
+                const barWidth = pattern[part] === 'w' ? wide : narrow;
+                if (isBar) {
+                    const line = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                    line.setAttribute('x', x);
+                    line.setAttribute('y', 6);
+                    line.setAttribute('width', barWidth);
+                    line.setAttribute('height', 58);
+                    line.setAttribute('fill', '#111');
+                    svg.appendChild(line);
+                }
+                x += barWidth;
+            }
+            x += gap;
+        }
+    }
+    document.querySelectorAll('.label-barcode').forEach(drawBarcode);
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,82 @@
+﻿{% extends "base.html" %}
+{% block title %}Market News - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-newspaper me-2"></i>Marketplace Intelligence Engine</h2>
+            <div class="small text-muted">Category-wide market, pricing, supplier, logistics, and demand signals across the marketplace</div>
+        </div>
+        <div class="d-flex gap-2">
+            <a href="{{ url_for('admin_product_trends') }}" class="btn btn-outline-warning"><i class="fas fa-images me-1"></i> Image Trends</a>
+            <form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/><input type="hidden" name="action" value="send_followers"><button class="btn btn-outline-success"><i class="fas fa-envelope me-1"></i> Email Followers</button></form>
+            <form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/><input type="hidden" name="action" value="generate"><button class="btn btn-gold"><i class="fas fa-rotate me-1"></i> Generate Now</button></form>
+            <form method="POST" onsubmit="return confirm('Clear all visible market news?');"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/><input type="hidden" name="action" value="clear"><button class="btn btn-outline-danger"><i class="fas fa-trash me-1"></i> Clear News</button></form>
+        </div>
+    </div>
+
+    <div class="row g-3">
+        {% for card in news_cards %}
+        {% set item = card.item %}
+        <div class="col-lg-6">
+            <div class="card border-0 shadow-sm h-100 border-start border-{{ 'danger' if item.direction == 'increase' else 'success' if item.direction == 'drop' else 'secondary' }} border-4">
+                <img src="{{ card.image_url }}" data-candidates='{{ card.image_candidates|default([])|tojson }}' data-fallback="{{ card.fallback_image }}" alt="{{ item.product_name or item.title }}" class="card-img-top market-news-image" onerror="marketNewsImageFallback(this)">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between gap-3">
+                        <h5>{{ item.title }}</h5>
+                        <span class="badge bg-{{ 'danger' if item.direction == 'increase' else 'success' if item.direction == 'drop' else 'secondary' }}">{{ item.direction }}</span>
+                    </div>
+                    {% if item.product_name %}<div class="small text-warning mb-2">{{ item.product_name }} Â· {{ item.generated_by|replace('_', ' ')|title }}</div>{% endif %}
+                    <p>{{ item.body }}</p>
+                    <div class="small text-muted">{{ item.region }} - {{ item.created_at.strftime('%d %b %Y %H:%M') }}</div>
+                    {% if item.source_url %}<a href="{{ item.source_url }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-warning mt-2">Open Source</a>{% endif %}
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="col-12">
+            <div class="card border-0 shadow-sm"><div class="card-body text-center text-muted py-5">No market news yet.</div></div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="card border-0 shadow-sm mt-4">
+        <div class="card-header bg-white">
+            <h5 class="mb-0">Verified Product Reference Ranges</h5>
+            <div class="small text-muted">Used as one trusted source inside the broader marketplace intelligence stream</div>
+        </div>
+        <div class="card-body p-0 table-responsive">
+            <table class="table table-hover mb-0">
+                <thead class="table-light"><tr><th>Product</th><th>Kenya Range</th><th>World Range</th><th>Source</th></tr></thead>
+                <tbody>
+                    {% for item in references %}
+                    <tr>
+                        <td>{{ item.label }}</td>
+                        <td>KSh {{ "%.2f"|format(item.kenya_low) }} - KSh {{ "%.2f"|format(item.kenya_high) }}</td>
+                        <td>{{ item.world_currency }} {{ "%.2f"|format(item.world_low) }} - {{ item.world_currency }} {{ "%.2f"|format(item.world_high) }}</td>
+                        <td><a href="{{ item.source_url }}" target="_blank" rel="noopener">{{ item.source }}</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+<script>
+function marketNewsImageFallback(img) {
+    let candidates = [];
+    try { candidates = JSON.parse(img.dataset.candidates || '[]'); } catch (e) {}
+    const attempted = Number(img.dataset.attempted || '0');
+    if (attempted < candidates.length) {
+        img.dataset.attempted = String(attempted + 1);
+        img.src = candidates[attempted];
+        return;
+    }
+    if (img.dataset.fallback && img.src !== img.dataset.fallback) {
+        img.src = img.dataset.fallback;
+    }
+}
+</script>
+{% endblock %}
+

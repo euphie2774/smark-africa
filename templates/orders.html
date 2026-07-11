@@ -1,0 +1,65 @@
+{% extends 'base.html' %}
+{% block title %}My Orders - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<h1 class="fw-bold mb-4">My Orders</h1>
+
+{% if orders %}
+<div class="row g-3">
+    {% for order in orders %}
+    <div class="col-12">
+        <div class="card border-0 shadow-sm">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-start flex-wrap">
+                    <div>
+                        <h6 class="fw-bold mb-1">Order #{{ order.id }}</h6>
+                        <small class="text-muted">{{ order.created_at.strftime('%d %b %Y at %I:%M %p') }}</small>
+                    </div>
+                    <div class="text-end">
+                        <span class="badge bg-{{ 'success' if order.payment_status == 'completed' else 'warning' }} fs-6">
+                            {{ order.payment_status }}
+                        </span>
+                        <span class="badge bg-info fs-6">{{ order.status }}</span>
+                    </div>
+                </div>
+                <hr>
+                <div class="row">
+                    <div class="col-md-8">
+                        {% for item in order.items %}
+                        <div class="d-flex justify-content-between small mb-1">
+                            <span>{{ item.product.name if item.product else 'Unknown' }} × {{ item.quantity }}</span>
+                            <span>KSh {{ "%.2f"|format(item.price * item.quantity) }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <div class="col-md-4 text-md-end">
+                        <h5 class="text-success fw-bold">KSh {{ "%.2f"|format(order.total) }}</h5>
+                        {% if order.shipping_status %}
+                        <small class="text-muted">Shipping: {{ order.shipping_status }}</small>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="d-flex gap-2 mt-3">
+                    <a href="{{ url_for('order_detail', order_id=order.id) }}" class="btn btn-outline-primary btn-sm">View Details</a>
+                    {% if order.payment_status != 'completed' %}
+                    <form method="POST" action="{{ url_for('retry_payment', order_id=order.id) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <button class="btn btn-warning btn-sm">Retry M-Pesa</button>
+                    </form>
+                    {% endif %}
+                    {% if order.tracking_number %}
+                    <a href="{{ url_for('track_order', order_id=order.id) }}" class="btn btn-outline-secondary btn-sm">Track</a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="text-center py-5">
+    <h3 class="text-muted">No orders yet</h3>
+    <a href="{{ url_for('shop') }}" class="btn btn-warning btn-lg mt-3">Start Shopping</a>
+</div>
+{% endif %}
+{% endblock %}

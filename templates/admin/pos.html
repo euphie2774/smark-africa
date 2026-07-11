@@ -1,0 +1,742 @@
+{% extends "base.html" %}
+{% block title %}Point of Sale - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-cash-register me-2"></i>All-in-One Point of Sale</h2>
+            <div class="small text-muted">Role: {{ pos_permissions.role }}. Create assisted sales, invoices, receipts, customer documents, inventory updates, and phone-scanner checkout from one desk.</div>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="{{ url_for('admin_pos_mobile_scanner') }}" class="btn btn-gold" target="_blank" rel="noopener"><i class="fas fa-mobile-screen-button me-1"></i> Use Phone Scanner</a>
+            <a href="{{ url_for('admin_pos_labels') }}" class="btn btn-outline-success" target="_blank" rel="noopener"><i class="fas fa-barcode me-1"></i> Print Barcodes</a>
+            <a href="{{ url_for('admin_pos_reports') }}" class="btn btn-outline-primary"><i class="fas fa-chart-column me-1"></i> Reports</a>
+            <a href="{{ url_for('admin_inventory') }}" class="btn btn-outline-warning"><i class="fas fa-boxes-stacked me-1"></i> Inventory</a>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-7">
+            <form method="POST" class="card border-0 shadow-sm" id="pos-sale-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="card-header bg-white"><h5 class="mb-0">New Sale</h5></div>
+                <div class="card-body">
+                    <div class="alert alert-info small d-flex flex-wrap justify-content-between align-items-center gap-2">
+                        <span><i class="fas fa-barcode me-1"></i> Phone scanner bridge is <strong id="pos-scan-status">listening</strong>. Scanned products are added to this PC cart automatically.</span>
+                        <a href="{{ url_for('admin_pos_mobile_scanner') }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-primary">Open Scanner</a>
+                    </div>
+                    <div class="pos-pairing-box mb-3">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
+                            <div>
+                                <h6 class="mb-1">Pair Phone Scanner Without Login</h6>
+                                <div class="small text-muted">Scan/open this pairing link on the phone. It expires automatically and only feeds this PC cashier cart.</div>
+                                <div class="small text-break"><strong>Scanner link:</strong> {{ scanner_pairing.scanner_url }}</div>
+                                <details class="small mt-1"><summary>Backup pairing token</summary>{{ scanner_pairing.token }}</details>
+                            </div>
+                            <div class="pairing-code-card">
+                                <img src="{{ url_for('admin_pos_scanner_qr', token=scanner_pairing.token) }}" class="pairing-qr" alt="Phone scanner pairing QR">
+                                <div class="small text-center">Scan to open scanner</div>
+                            </div>
+                        </div>
+                        <div class="small text-muted mt-2">A normal phone camera should open the scanner directly from this QR. If the PC is on localhost, the QR uses the PC LAN address when available; wired scanners can use the field below.</div>
+                    </div>
+                    <div class="pos-wired-box mb-3">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <div>
+                                <h6 class="mb-1">Wired / USB Scanner Mode</h6>
+                                <div class="small text-muted">Use this when a USB scanner, Bluetooth scanner, or phone scanner app acts as a keyboard. Click the field once, then scan.</div>
+                            </div>
+                            <span class="badge bg-dark">Keyboard-wedge input</span>
+                        </div>
+                        <input id="wired-scanner-input" class="form-control form-control-lg" inputmode="none" autocomplete="off" placeholder="Focus here, then scan with wired/USB/Bluetooth keyboard scanner">
+                    </div>
+                    <div class="pos-terminal mb-3">
+                        <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                            <h6 class="mb-0">Live Checkout Cart</h6>
+                            <span class="badge bg-success" id="pos-cart-count">{{ terminal_payload.count }} item(s)</span>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                                <thead class="table-light"><tr><th>Product</th><th>Barcode</th><th>Qty</th><th>Stock</th><th class="text-end">Total</th></tr></thead>
+                                <tbody id="pos-cart-body">
+                                {% for item in terminal_payload['items'] %}
+                                <tr>
+                                    <td>{{ item.name }}<input type="hidden" name="cart_product_id" value="{{ item.product_id }}"></td>
+                                    <td>{{ item.barcode }}</td>
+                                    <td><input name="cart_quantity" type="number" min="0" value="{{ item.quantity }}" class="form-control form-control-sm pos-cart-qty"></td>
+                                    <td><span class="badge bg-{{ 'danger' if item.low_stock else 'secondary' }}">{{ item.stock }}</span></td>
+                                    <td class="text-end">KSh {{ "%.2f"|format(item.line_total) }}</td>
+                                </tr>
+                                {% else %}
+                                <tr><td colspan="5" class="text-center text-muted py-3">Scan a barcode from your phone or enter one below.</td></tr>
+                                {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="d-flex justify-content-between align-items-center mt-2">
+                            <div class="fw-bold">Subtotal: <span id="pos-cart-subtotal">KSh {{ "%.2f"|format(terminal_payload.subtotal) }}</span></div>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-sm btn-outline-secondary" name="action" value="terminal_update"><i class="fas fa-rotate me-1"></i>Update Cart</button>
+                                <button class="btn btn-sm btn-outline-danger" name="action" value="terminal_clear"><i class="fas fa-trash me-1"></i>Clear</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-4"><input name="customer_name" class="form-control" placeholder="Customer name"></div>
+                        <div class="col-md-4"><input name="customer_email" type="email" class="form-control" placeholder="Email for receipt"></div>
+                        <div class="col-md-4"><input name="customer_phone" class="form-control" placeholder="Phone"></div>
+                    </div>
+
+                    {% for i in range(5) %}
+                    <div class="row g-2 align-items-end mb-2">
+                        <div class="col-md-8">
+                            <label class="form-label small">Product {{ i + 1 }}</label>
+                            <select name="product_id" class="form-select">
+                                <option value="">Select product or scan barcode below</option>
+                                {% for product in products %}
+                                <option value="{{ product.id }}">{{ product.name }} - KSh {{ "%.2f"|format(product.discounted_price or product.selling_price) }} / Barcode {{ product.pos_barcode }}{% if not product.is_digital %} / Stock {{ product.stock or 0 }}{% endif %}</option>
+                                {% endfor %}
+                            </select>
+                            <input name="product_id" class="form-control mt-1 pos-barcode-input" placeholder="Barcode scanner input">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Quantity</label>
+                            <input name="quantity" type="number" min="1" value="1" class="form-control">
+                        </div>
+                    </div>
+                    {% endfor %}
+
+                    <div class="row g-3 mt-3">
+                        <div class="col-md-3"><input name="discount_amount" type="number" step="0.01" min="0" class="form-control" placeholder="Discount KSh"></div>
+                        <div class="col-md-3"><input name="tax_amount" type="number" step="0.01" min="0" class="form-control" placeholder="Tax KSh"></div>
+                        <div class="col-md-3">
+                            <select name="payment_method" class="form-select">
+                                <option value="cash">Cash</option>
+                                <option value="mobile_money">Mobile Money</option>
+                                <option value="mpesa">M-Pesa</option>
+                                <option value="debit_card">Debit Card</option>
+                                <option value="credit_card">Credit Card</option>
+                                <option value="card">Card</option>
+                                <option value="smark_card">Smark-Africa Card</option>
+                                <option value="bank">Bank</option>
+                                <option value="bank_transfer">Bank Transfer</option>
+                                <option value="split">Split Payment</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <select name="payment_status" class="form-select">
+                                <option value="paid">Paid</option>
+                                <option value="pending">Pending</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="row g-2 mt-2">
+                        <div class="col-md-3"><input name="split_cash" type="number" step="0.01" min="0" class="form-control" placeholder="Cash part"></div>
+                        <div class="col-md-3"><input name="split_mobile_money" type="number" step="0.01" min="0" class="form-control" placeholder="Mobile money part"></div>
+                        <div class="col-md-3"><input name="split_card" type="number" step="0.01" min="0" class="form-control" placeholder="Card part"></div>
+                        <div class="col-md-3"><input name="split_bank" type="number" step="0.01" min="0" class="form-control" placeholder="Bank part"></div>
+                    </div>
+                    <div class="row g-2 mt-2" id="mpesa-phone-section" style="display:none;">
+                        <div class="col-md-6">
+                            <input name="mpesa_phone" id="mpesa_phone" class="form-control" inputmode="tel" placeholder="M-Pesa phone number (e.g. 0712345678)">
+                        </div>
+                        <div class="col-md-6">
+                            <small class="text-muted mt-2 d-block">STK Push will be sent to this number for payment confirmation.</small>
+                        </div>
+                    </div>
+                    <div class="row g-2 mt-2" id="bank-card-section" style="display:none;">
+                        <div class="col-12">
+                            <div class="alert alert-light border mb-2">
+                                <h6 class="mb-2"><i class="fas fa-credit-card me-2"></i>Bank Card Payment (Visa / Mastercard)</h6>
+                                <div class="row g-2">
+                                    <div class="col-md-6">
+                                        <input name="bank_card_number" class="form-control" inputmode="numeric" placeholder="Card Number" maxlength="19">
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input name="bank_card_expiry_month" class="form-control" inputmode="numeric" placeholder="MM" maxlength="2">
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input name="bank_card_expiry_year" class="form-control" inputmode="numeric" placeholder="YY" maxlength="2">
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input name="bank_card_cvv" class="form-control" inputmode="numeric" placeholder="CVV" maxlength="4" type="password">
+                                    </div>
+                                </div>
+                                <small class="text-muted mt-1 d-block">Card will be charged via Flutterwave. Customer may receive OTP for 3D Secure verification.</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row g-2 mt-2" id="smark-card-section">
+                        <div class="col-12">
+                            <div class="alert alert-light border mb-2">
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <h6 class="mb-0"><i class="fas fa-credit-card me-2"></i>Smark-Africa Rewards Card Payment</h6>
+                                    <button type="button" class="btn btn-sm btn-outline-primary" id="scan-card-btn">
+                                        <i class="fas fa-barcode me-1"></i>Scan Card Barcode
+                                    </button>
+                                </div>
+                                <div id="card-scan-status" class="small text-muted mb-2" style="display: none;"></div>
+                                <div id="card-info-display" class="card border-success mb-2" style="display: none;">
+                                    <div class="card-body py-2">
+                                        <div class="row g-2 small">
+                                            <div class="col-md-6">
+                                                <strong>Card:</strong> <span id="card-display-number">••••</span>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <strong>Customer:</strong> <span id="card-display-name">-</span>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <strong>Balance:</strong> <span id="card-display-balance" class="text-success">KSh 0.00</span>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <strong>Status:</strong> <span id="card-display-status" class="badge bg-success">Active</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-8">
+                            <input name="shopping_card_number" id="shopping_card_number" class="form-control" inputmode="numeric" placeholder="Smark-Africa card number or scan barcode">
+                        </div>
+                        <div class="col-md-4">
+                            <input name="shopping_card_pin" id="shopping_card_pin" type="password" class="form-control" inputmode="numeric" maxlength="4" placeholder="Scratch PIN">
+                        </div>
+                    </div>
+                    <div class="row g-2 mt-2" id="bank-card-section" style="display: none;">
+                        <div class="col-12">
+                            <div class="alert alert-light border mb-2">
+                                <h6 class="mb-0"><i class="fas fa-credit-card me-2"></i>Bank Card Payment (Visa/Mastercard)</h6>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <input name="bank_card_number" id="bank_card_number" class="form-control" inputmode="numeric" maxlength="19" placeholder="Card number">
+                        </div>
+                        <div class="col-md-2">
+                            <input name="bank_card_expiry_month" id="bank_card_expiry_month" class="form-control" inputmode="numeric" maxlength="2" placeholder="MM">
+                        </div>
+                        <div class="col-md-2">
+                            <input name="bank_card_expiry_year" id="bank_card_expiry_year" class="form-control" inputmode="numeric" maxlength="2" placeholder="YY">
+                        </div>
+                        <div class="col-md-2">
+                            <input name="bank_card_cvv" id="bank_card_cvv" type="password" class="form-control" inputmode="numeric" maxlength="4" placeholder="CVV">
+                        </div>
+                        <div class="col-12">
+                            <button type="button" class="btn btn-primary w-100" id="charge-bank-card-btn">
+                                <i class="fas fa-lock me-1"></i>Charge Card via Flutterwave
+                            </button>
+                            <div id="bank-card-status" class="small text-muted mt-1" style="display: none;"></div>
+                        </div>
+                    </div>
+
+                    <textarea name="notes" class="form-control mt-3" rows="2" placeholder="Sale notes, warranty, delivery, pickup, serial numbers"></textarea>
+                    <label class="form-check mt-3">
+                        <input class="form-check-input" type="checkbox" name="send_document" value="1" checked>
+                        <span class="form-check-label">Email receipt to customer when email is provided</span>
+                    </label>
+                </div>
+                <div class="card-footer bg-white">
+                    <button class="btn btn-gold btn-lg" name="action" value="sale"><i class="fas fa-file-invoice me-1"></i> Complete Sale</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="col-xl-5">
+            {% if 'products' in pos_permissions.allowed %}
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">Register Product and Barcode</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="quick_product">
+                        <div class="col-md-7"><input name="name" class="form-control" placeholder="Product name" required></div>
+                        <div class="col-md-5"><select name="category_id" class="form-select"><option value="">Category</option>{% for category in categories %}<option value="{{ category.id }}">{{ category.name }}</option>{% endfor %}</select></div>
+                        <div class="col-md-4"><input name="buying_price" type="number" step="0.01" min="0" class="form-control" placeholder="Cost"></div>
+                        <div class="col-md-4"><input name="selling_price" type="number" step="0.01" min="0" class="form-control" placeholder="Selling" required></div>
+                        <div class="col-md-4"><input name="stock" type="number" min="0" class="form-control" placeholder="Stock"></div>
+                        <div class="col-md-8"><input name="barcode" class="form-control" placeholder="Barcode optional; auto-generated if blank"></div>
+                        <div class="col-md-4"><input name="weight_kg" type="number" step="0.01" min="0" class="form-control" placeholder="Kg"></div>
+                        <div class="col-12"><input name="short_description" class="form-control" placeholder="SKU, supplier code, brand, pack size"></div>
+                        <div class="col-12"><button class="btn btn-gold w-100"><i class="fas fa-plus me-1"></i>Save Product</button></div>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if 'inventory' in pos_permissions.allowed %}
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">Goods Received</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="receive_stock">
+                        <div class="col-6"><select name="receive_product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:45] }}</option>{% endfor %}</select></div>
+                        <div class="col-3"><input name="receive_quantity" type="number" min="1" class="form-control" placeholder="Qty"></div>
+                        <div class="col-3"><button class="btn btn-outline-success w-100">Receive</button></div>
+                        <div class="col-12"><input name="receive_note" class="form-control" placeholder="Supplier invoice, batch, condition notes"></div>
+                    </form>
+                </div>
+            </div>
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">Bulk Goods Received</h5></div>
+                <div class="card-body">
+                    <form method="POST">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="bulk_receive">
+                        <div class="row g-2 mb-2">
+                            <div class="col-8"><select name="bulk_supplier_id" class="form-select"><option value="">Supplier</option>{% for supplier in suppliers %}<option value="{{ supplier.id }}">{{ supplier.name }}</option>{% endfor %}</select></div>
+                            <div class="col-4"><input name="received_at" type="date" class="form-control"></div>
+                        </div>
+                        {% for i in range(5) %}
+                        <div class="row g-2 mb-2">
+                            <div class="col-6"><select name="bulk_product_id" class="form-select"><option value="">Product</option>{% for product in products %}<option value="{{ product.id }}">{{ product.name[:35] }}</option>{% endfor %}</select></div>
+                            <div class="col-3"><input name="bulk_quantity" type="number" min="0" class="form-control" placeholder="Qty"></div>
+                            <div class="col-3"><input name="bulk_unit_cost" type="number" min="0" step="0.01" class="form-control" placeholder="Cost"></div>
+                        </div>
+                        {% endfor %}
+                        <button class="btn btn-outline-success w-100"><i class="fas fa-boxes-packing me-1"></i>Receive Bulk Stock</button>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if 'inventory' in pos_permissions.allowed %}
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">Dispatch / Reconcile</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2 mb-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="dispatch_stock">
+                        <div class="col-6"><select name="dispatch_product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:45] }}</option>{% endfor %}</select></div>
+                        <div class="col-3"><input name="dispatch_quantity" type="number" min="1" class="form-control" placeholder="Qty"></div>
+                        <div class="col-3"><button class="btn btn-outline-warning w-100">Dispatch</button></div>
+                        <div class="col-12"><input name="dispatch_note" class="form-control" placeholder="Transfer, damaged goods, delivery handoff"></div>
+                    </form>
+                    <form method="POST" class="row g-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="reconcile_stock">
+                        <div class="col-6"><select name="reconcile_product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:45] }}</option>{% endfor %}</select></div>
+                        <div class="col-3"><input name="counted_stock" type="number" min="0" class="form-control" placeholder="Count"></div>
+                        <div class="col-3"><button class="btn btn-outline-dark w-100">Reconcile</button></div>
+                        <div class="col-12"><input name="reconcile_note" class="form-control" placeholder="Physical stock count notes"></div>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Smark-Africa Cards</h5>
+                    <a href="{{ url_for('admin_shopping_cards') }}" class="btn btn-sm btn-outline-success"><i class="fas fa-id-card me-1"></i>Manage</a>
+                </div>
+                <div class="card-body small text-muted">
+                    Issue printable cards, fund customer cash balances, and review card transactions from the card desk.
+                </div>
+            </div>
+
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">Low Inventory Alerts</h5></div>
+                <div class="card-body">
+                    {% for product in low_stock[:8] %}
+                    <div class="d-flex justify-content-between border-bottom py-2"><span>{{ product.name }}</span><span class="badge bg-danger">{{ product.stock }} left</span></div>
+                    {% else %}<p class="text-muted">No low stock alerts.</p>{% endfor %}
+                </div>
+            </div>
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Recent POS Sales</h5></div>
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light"><tr><th>Receipt</th><th>Customer</th><th>Total</th></tr></thead>
+                        <tbody>
+                        {% for sale in recent_sales %}
+                        <tr><td><a href="{{ url_for('admin_pos_sale', sale_id=sale.id) }}">{{ sale.receipt_number }}</a></td><td>{{ sale.customer_name or 'Walk-in' }}</td><td>KSh {{ "%.2f"|format(sale.total_amount) }}</td></tr>
+                        {% else %}<tr><td colspan="3" class="text-center text-muted py-4">No POS sales yet.</td></tr>{% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4 mt-1">
+        <div class="col-xl-4">
+            {% if 'suppliers' in pos_permissions.allowed %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Suppliers</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2 mb-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="supplier">
+                        <div class="col-6"><input name="name" class="form-control" placeholder="Supplier name"></div>
+                        <div class="col-6"><input name="contact" class="form-control" placeholder="Contact"></div>
+                        <div class="col-6"><input name="country" class="form-control" placeholder="Country"></div>
+                        <div class="col-6"><input name="categories" class="form-control" placeholder="Categories"></div>
+                        <div class="col-12"><button class="btn btn-gold w-100">Save Supplier</button></div>
+                    </form>
+                    {% for supplier in suppliers %}
+                    <div class="small border-bottom py-1">{{ supplier.name }} · {{ supplier.country or 'Local' }}</div>
+                    {% else %}<div class="text-muted small">No suppliers saved.</div>{% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        <div class="col-xl-4">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Purchase Orders</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2 mb-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="purchase_order">
+                        <div class="col-6"><select name="supplier_id" class="form-select">{% for supplier in suppliers %}<option value="{{ supplier.id }}">{{ supplier.name }}</option>{% endfor %}</select></div>
+                        <div class="col-6"><select name="po_product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:35] }}</option>{% endfor %}</select></div>
+                        <div class="col-4"><input name="po_quantity" type="number" min="1" class="form-control" placeholder="Qty"></div>
+                        <div class="col-4"><input name="po_unit_cost" type="number" min="0" step="0.01" class="form-control" placeholder="Cost"></div>
+                        <div class="col-4"><button class="btn btn-outline-success w-100">Create</button></div>
+                        <div class="col-12"><input name="po_notes" class="form-control" placeholder="Expected delivery, payment terms"></div>
+                    </form>
+                    {% for po in purchase_orders %}
+                    <div class="small border-bottom py-1">PO #{{ po.id }} · {{ po.supplier.name if po.supplier else 'Supplier' }} · {{ po.status }}</div>
+                    {% else %}<div class="text-muted small">No purchase orders.</div>{% endfor %}
+                </div>
+            </div>
+        </div>
+        <div class="col-xl-4">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Stock Movements</h5></div>
+                <div class="card-body">
+                    {% for movement in stock_movements %}
+                    <div class="small border-bottom py-1">{{ movement.product.name if movement.product else 'Product' }} · {{ movement.movement_type }} · {{ movement.quantity }} · {{ movement.after_stock }}</div>
+                    {% else %}<div class="text-muted small">No stock movements yet.</div>{% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const status = document.getElementById('pos-scan-status');
+    const cartBody = document.getElementById('pos-cart-body');
+    const cartSubtotal = document.getElementById('pos-cart-subtotal');
+    const cartCount = document.getElementById('pos-cart-count');
+    function money(value) {
+        return 'KSh ' + Number(value || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    }
+    function renderCart(cart) {
+        if (!cartBody || !cart) return;
+        cartCount.textContent = `${cart.count || 0} item(s)`;
+        cartSubtotal.textContent = money(cart.subtotal || 0);
+        if (!cart.items || !cart.items.length) {
+            cartBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">Scan a barcode from your phone or enter one below.</td></tr>';
+            return;
+        }
+        cartBody.innerHTML = cart.items.map(item => `
+            <tr>
+                <td>${item.name}<input type="hidden" name="cart_product_id" value="${item.product_id}"></td>
+                <td>${item.barcode || ''}</td>
+                <td><input name="cart_quantity" type="number" min="0" value="${item.quantity}" class="form-control form-control-sm pos-cart-qty"></td>
+                <td><span class="badge bg-${item.low_stock ? 'danger' : 'secondary'}">${item.stock}</span></td>
+                <td class="text-end">${money(item.line_total)}</td>
+            </tr>
+        `).join('');
+    }
+    async function pollPhoneScanner() {
+        try {
+            const response = await fetch('{{ url_for("admin_pos_latest_scan") }}', {cache: 'no-store'});
+            if (!response.ok) return;
+            const data = await response.json();
+            if (!data.success) return;
+            if (data.cart) renderCart(data.cart);
+            if (status) status.textContent = data.product_name ? `received ${data.product_name}` : `received ${data.barcode}`;
+        } catch (error) {
+            if (status) status.textContent = 'offline';
+        }
+    }
+    async function refreshCart() {
+        try {
+            const response = await fetch('{{ url_for("admin_pos_cart") }}', {cache: 'no-store'});
+            if (!response.ok) return;
+            const data = await response.json();
+            if (data.success) renderCart(data.cart);
+        } catch (error) {}
+    }
+    document.querySelectorAll('.pos-barcode-input').forEach(input => {
+        input.addEventListener('change', async () => {
+            const barcode = input.value.trim();
+            if (!barcode) return;
+            const response = await fetch('{{ url_for("admin_pos_cart_add") }}', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({barcode})
+            });
+            const data = await response.json();
+            if (data.success) {
+                renderCart(data.cart);
+                input.value = '';
+                if (status) status.textContent = 'added from barcode input';
+            } else if (status) {
+                status.textContent = data.error || 'barcode not found';
+            }
+        });
+    });
+    const wiredInput = document.getElementById('wired-scanner-input');
+    async function submitScannerBarcode(barcode, sourceLabel) {
+        const clean = String(barcode || '').trim();
+        if (!clean) return;
+        const response = await fetch('{{ url_for("admin_pos_cart_add") }}', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({barcode: clean})
+        });
+        const data = await response.json();
+        if (data.success) {
+            renderCart(data.cart);
+            if (status) status.textContent = `added from ${sourceLabel}`;
+        } else if (status) {
+            status.textContent = data.error || 'barcode not found';
+        }
+    }
+    if (wiredInput) {
+        wiredInput.addEventListener('keydown', async event => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            const barcode = wiredInput.value;
+            wiredInput.value = '';
+            await submitScannerBarcode(barcode, 'wired scanner');
+            wiredInput.focus();
+        });
+    }
+    setInterval(pollPhoneScanner, 1800);
+    setInterval(refreshCart, 6000);
+
+    // ========== SMARK-AFRICA CARD BARCODE SCANNING ==========
+    const scanCardBtn = document.getElementById('scan-card-btn');
+    const cardNumberInput = document.getElementById('shopping_card_number');
+    const cardPinInput = document.getElementById('shopping_card_pin');
+    const cardScanStatus = document.getElementById('card-scan-status');
+    const cardInfoDisplay = document.getElementById('card-info-display');
+    const paymentMethodSelect = document.querySelector('select[name="payment_method"]');
+    const customerNameInput = document.querySelector('input[name="customer_name"]');
+    const customerEmailInput = document.querySelector('input[name="customer_email"]');
+    const customerPhoneInput = document.querySelector('input[name="customer_phone"]');
+
+    async function scanShoppingCard(barcodeValue) {
+        try {
+            cardScanStatus.style.display = 'block';
+            cardScanStatus.className = 'small text-muted mb-2';
+            cardScanStatus.textContent = 'Scanning card...';
+
+            const response = await fetch('{{ url_for("admin_pos_scan_card") }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': document.querySelector('input[name="csrf_token"]').value
+                },
+                body: JSON.stringify({barcode: barcodeValue})
+            });
+
+            const data = await response.json();
+
+            if (data.success && data.card) {
+                // Card found - populate fields
+                cardNumberInput.value = data.card.card_number;
+                cardScanStatus.className = 'small text-success mb-2';
+                cardScanStatus.textContent = '✓ Card scanned successfully! Enter PIN to authorize payment.';
+
+                // Display card info
+                document.getElementById('card-display-number').textContent = '•••• ' + data.card.card_last4;
+                document.getElementById('card-display-name').textContent = data.card.display_name || data.card.customer_name;
+                document.getElementById('card-display-balance').textContent = 'KSh ' + Number(data.card.total_balance).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                document.getElementById('card-display-status').textContent = data.card.status;
+                cardInfoDisplay.style.display = 'block';
+
+                // Auto-fill customer info if not already filled
+                if (!customerNameInput.value && data.card.customer_name) {
+                    customerNameInput.value = data.card.customer_name;
+                }
+                if (!customerEmailInput.value && data.card.customer_email) {
+                    customerEmailInput.value = data.card.customer_email;
+                }
+                if (!customerPhoneInput.value && data.card.customer_phone) {
+                    customerPhoneInput.value = data.card.customer_phone;
+                }
+
+                // Auto-select Smark card payment method
+                if (paymentMethodSelect) {
+                    paymentMethodSelect.value = 'smark_card';
+                }
+
+                // Focus on PIN input
+                cardPinInput.focus();
+
+            } else {
+                // Card not found
+                cardScanStatus.className = 'small text-danger mb-2';
+                cardScanStatus.textContent = '✗ ' + (data.error || 'Card not found or inactive');
+                cardInfoDisplay.style.display = 'none';
+            }
+        } catch (error) {
+            cardScanStatus.style.display = 'block';
+            cardScanStatus.className = 'small text-danger mb-2';
+            cardScanStatus.textContent = '✗ Error scanning card: ' + error.message;
+            cardInfoDisplay.style.display = 'none';
+        }
+    }
+
+    // Manual card scan button
+    if (scanCardBtn) {
+        scanCardBtn.addEventListener('click', async function(e) {
+            e.preventDefault();
+            const barcode = prompt('Enter or paste card barcode number:');
+            if (barcode && barcode.trim()) {
+                await scanShoppingCard(barcode.trim());
+            }
+        });
+    }
+
+    // Auto-detect card barcode when typed/scanned into card number field
+    if (cardNumberInput) {
+        let cardBarcodeBuffer = '';
+        let cardBarcodeTimeout = null;
+
+        cardNumberInput.addEventListener('input', function(e) {
+            clearTimeout(cardBarcodeTimeout);
+            cardBarcodeBuffer = e.target.value;
+
+            // If input looks like a complete barcode (typically 12-16 digits), auto-scan
+            if (cardBarcodeBuffer.length >= 12 && /^\d+$/.test(cardBarcodeBuffer)) {
+                cardBarcodeTimeout = setTimeout(async function() {
+                    await scanShoppingCard(cardBarcodeBuffer);
+                }, 300); // Wait 300ms after last input
+            }
+        });
+    }
+
+    // Integrate card scanning with wired scanner
+    const originalWiredHandler = wiredInput ? wiredInput.onkeydown : null;
+    if (wiredInput) {
+        wiredInput.addEventListener('keydown', async function(event) {
+            if (event.key !== 'Enter') return;
+
+            const scannedValue = wiredInput.value.trim();
+
+            // Check if this looks like a card barcode (starts with card prefix, typically 6078XX)
+            if (scannedValue.startsWith('607') && scannedValue.length >= 12) {
+                event.preventDefault();
+                wiredInput.value = '';
+                await scanShoppingCard(scannedValue);
+                wiredInput.focus();
+            }
+            // Otherwise, let it be handled as a product barcode by existing handler
+        });
+    }
+
+    // Toggle payment method sections
+    const mpesaSection = document.getElementById('mpesa-phone-section');
+    const smarkCardSection = document.getElementById('smark-card-section');
+    const bankCardSection = document.getElementById('bank-card-section');
+
+    function togglePaymentSections() {
+        const method = paymentMethodSelect ? paymentMethodSelect.value : '';
+        if (mpesaSection) mpesaSection.style.display = (method === 'mpesa') ? '' : 'none';
+        if (smarkCardSection) smarkCardSection.style.display = (method === 'smark_card') ? '' : 'none';
+        if (bankCardSection) bankCardSection.style.display = (['debit_card', 'credit_card', 'card'].includes(method)) ? '' : 'none';
+    }
+
+    if (paymentMethodSelect) {
+        paymentMethodSelect.addEventListener('change', togglePaymentSections);
+        togglePaymentSections();
+    }
+
+    // ========== BANK CARD (FLUTTERWAVE) CHARGE ==========
+    const chargeCardBtn = document.getElementById('charge-bank-card-btn');
+    const bankCardStatus = document.getElementById('bank-card-status');
+
+    if (chargeCardBtn) {
+        chargeCardBtn.addEventListener('click', async function(e) {
+            e.preventDefault();
+            const cardNum = document.getElementById('bank_card_number').value.trim();
+            const expMonth = document.getElementById('bank_card_expiry_month').value.trim();
+            const expYear = document.getElementById('bank_card_expiry_year').value.trim();
+            const cvv = document.getElementById('bank_card_cvv').value.trim();
+
+            if (!cardNum || !expMonth || !expYear || !cvv) {
+                bankCardStatus.style.display = 'block';
+                bankCardStatus.className = 'small text-danger mt-1';
+                bankCardStatus.textContent = 'Please fill in all card fields.';
+                return;
+            }
+
+            // Collect amount from the cart total displayed on page
+            const totalEl = document.querySelector('.cart-total, #cart-total, [data-cart-total]');
+            let amount = 0;
+            if (totalEl) {
+                amount = parseFloat(totalEl.textContent.replace(/[^0-9.]/g, '')) || 0;
+            }
+            if (!amount) {
+                // Try discount/tax adjusted total from form inputs
+                const discountInput = document.querySelector('input[name="discount_amount"]');
+                const taxInput = document.querySelector('input[name="tax_amount"]');
+                bankCardStatus.style.display = 'block';
+                bankCardStatus.className = 'small text-danger mt-1';
+                bankCardStatus.textContent = 'Cannot determine charge amount. Add items to cart first.';
+                return;
+            }
+
+            const email = (customerEmailInput ? customerEmailInput.value : '').trim();
+            const phone = (customerPhoneInput ? customerPhoneInput.value : '').trim();
+
+            chargeCardBtn.disabled = true;
+            bankCardStatus.style.display = 'block';
+            bankCardStatus.className = 'small text-muted mt-1';
+            bankCardStatus.textContent = 'Processing card payment...';
+
+            try {
+                const response = await fetch('{{ url_for("admin_pos_charge_card") }}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': document.querySelector('input[name="csrf_token"]').value
+                    },
+                    body: JSON.stringify({
+                        amount: amount,
+                        email: email,
+                        phone: phone,
+                        card_number: cardNum,
+                        cvv: cvv,
+                        expiry_month: expMonth,
+                        expiry_year: expYear
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    bankCardStatus.className = 'small text-success mt-1';
+                    if (result.requires_validation) {
+                        bankCardStatus.textContent = 'Card requires additional verification (' + (result.auth_mode || 'redirect') + '). Check redirect or OTP.';
+                        if (result.data && result.data.redirect) {
+                            window.open(result.data.redirect, '_blank');
+                        }
+                    } else {
+                        bankCardStatus.textContent = 'Card charge initiated successfully! Ref: ' + result.tx_ref;
+                    }
+                } else {
+                    bankCardStatus.className = 'small text-danger mt-1';
+                    bankCardStatus.textContent = result.error || 'Card charge failed.';
+                }
+            } catch (err) {
+                bankCardStatus.className = 'small text-danger mt-1';
+                bankCardStatus.textContent = 'Error: ' + err.message;
+            } finally {
+                chargeCardBtn.disabled = false;
+            }
+        });
+    }
+})();
+</script>
+{% endblock %}

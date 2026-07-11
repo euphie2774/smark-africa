@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Admin Ads - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-bullhorn me-2"></i>Admin/MVP Ads Console</h2>
+            <div class="small text-muted">Run SMARKAFRICA campaigns. Public ads stay branded to SMARKAFRICA while external channel handling remains internal.</div>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-4">
+            <form method="POST" class="card border-0 shadow-sm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="card-body">
+                    <label class="form-label">Product</label>
+                    <select name="product_id" class="form-select mb-3">
+                        <option value="">General brand campaign</option>
+                        {% for product in products %}<option value="{{ product.id }}">{{ product.name }}</option>{% endfor %}
+                    </select>
+                    <label class="form-label">Placement</label>
+                    <select name="placement" class="form-select mb-3">
+                        <option value="social">Social media</option>
+                        <option value="smarkafrica">SMARKAFRICA platform</option>
+                    </select>
+                    <label class="form-label">Campaign Channel</label>
+                    <select name="platform" class="form-select mb-3">
+                        <option>SMARKAFRICA Homepage</option><option>SMARKAFRICA Category Page</option><option>SMARKAFRICA Buyer Retargeting</option><option>SMARKAFRICA Managed Outreach</option>
+                    </select>
+                    <label class="form-label">Objective</label>
+                    <select name="objective" class="form-select mb-3">
+                        <option>Traffic</option><option>Sales</option><option>Launch Awareness</option><option>Price Drop Campaign</option><option>Retargeting</option>
+                    </select>
+                    <label class="form-label">Audience</label>
+                    <input name="audience" class="form-control mb-3" placeholder="Kenya phone buyers, students, gaming PC builders...">
+                    <label class="form-label">Budget / Social Spend</label>
+                    <input type="number" step="0.01" min="0" name="budget" class="form-control mb-3" value="0">
+                    <label class="form-label">Creative URL</label>
+                    <input type="url" name="creative_url" class="form-control mb-3" placeholder="Image/video URL">
+                    <label class="form-label">Destination URL</label>
+                    <input type="url" name="destination_url" class="form-control mb-3" placeholder="Product, category, or landing page">
+                    <label class="form-label">Ad Copy</label>
+                    <textarea name="ad_copy" class="form-control mb-3" rows="4" placeholder="Write the caption, offer, CTA, hashtags..."></textarea>
+                    <button class="btn btn-gold w-100">Create Campaign</button>
+                </div>
+            </form>
+        </div>
+        <div class="col-xl-8">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Campaigns</h5></div>
+                <div class="card-body p-0 table-responsive">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead class="table-light"><tr><th>Campaign</th><th>Platform</th><th>Budget</th><th>Charge</th><th>Status</th><th>Copy</th><th>Actions</th></tr></thead>
+                        <tbody>
+                            {% for ad in campaigns %}
+                            <tr>
+                                <td>{{ ad.product.name if ad.product else 'General campaign' }}<div class="small text-muted">{{ ad.objective or 'Traffic' }}</div></td>
+                                <td>{{ ad.platform }}<div class="small text-muted">{{ ad.placement }}</div></td>
+                                <td>KSh {{ "%.2f"|format(ad.budget or 0) }}</td>
+                                <td>KSh {{ "%.2f"|format(ad.total_charged or 0) }}</td>
+                                <td><span class="badge bg-{{ 'success' if ad.status == 'active' else 'warning' }}">{{ ad.status }}</span></td>
+                                <td class="small">{{ (ad.ad_copy or '')[:120] }}</td>
+                                <td>
+                                    <div class="d-flex gap-1">
+                                        {% if ad.product_id %}
+                                        <form method="POST" action="{{ url_for('admin_remove_ad_product', ad_id=ad.id) }}">
+                                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                            <button class="btn btn-sm btn-outline-warning">Remove Product</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if ad.status == 'active' %}
+                                        <form method="POST" action="{{ url_for('admin_stop_ad', ad_id=ad.id) }}">
+                                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                            <button class="btn btn-sm btn-outline-danger">Stop</button>
+                                        </form>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                            </tr>
+                            {% else %}<tr><td colspan="7" class="text-center text-muted py-4">No campaigns yet.</td></tr>{% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

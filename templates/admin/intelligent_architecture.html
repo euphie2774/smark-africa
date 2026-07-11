@@ -1,0 +1,224 @@
+﻿{% extends "base.html" %}
+{% block title %}Intelligent Architecture - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-network-wired me-2"></i>Intelligent Architecture Hub</h2>
+            <div class="small text-muted">Commerce, Growth, Intelligence, Automation, and Trust engine controls</div>
+        </div>
+        <a href="{{ url_for('admin_market_news') }}" class="btn btn-outline-warning"><i class="fas fa-newspaper me-1"></i> Marketplace Intelligence</a>
+    </div>
+
+    <div class="row g-3 mb-4">
+        {% for engine, data in snapshot.items() %}
+        <div class="col-lg col-md-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <h6 class="text-uppercase text-muted">{{ engine }}</h6>
+                    {% for label, value in data.items() %}
+                    <div class="d-flex justify-content-between border-bottom py-1 small">
+                        <span>{{ label|replace('_', ' ')|title }}</span><strong>{{ value }}</strong>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="row g-3">
+        <div class="col-xl-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-header bg-white"><h5 class="mb-0">Exchange Rates</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2 mb-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="exchange_rate">
+                        <div class="col-3"><input name="quote_currency" class="form-control" placeholder="USD" maxlength="3"></div>
+                        <div class="col-4"><input name="rate" type="number" step="0.0001" class="form-control" placeholder="Rate"></div>
+                        <div class="col-3"><input name="source" class="form-control" placeholder="Source"></div>
+                        <div class="col-2"><button class="btn btn-gold w-100">Save</button></div>
+                    </form>
+                    {% for rate in exchange_rates %}
+                    <div class="d-flex justify-content-between small border-bottom py-1">
+                        <span>{{ rate.base_currency }}/{{ rate.quote_currency }}</span><strong>{{ rate.rate }}</strong>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-header bg-white"><h5 class="mb-0">Support SLA</h5></div>
+                <div class="card-body">
+                    {% for ticket in tickets %}
+                    <form method="POST" class="border-bottom py-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="resolve_ticket">
+                        <input type="hidden" name="ticket_id" value="{{ ticket.id }}">
+                        <div class="fw-bold">{{ ticket.subject }}</div>
+                        <div class="small text-muted">{{ ticket.severity }} - due {{ ticket.resolution_due_at.strftime('%d %b %H:%M') if ticket.resolution_due_at else 'N/A' }}</div>
+                        <div class="input-group input-group-sm mt-2">
+                            <select name="status" class="form-select">
+                                <option value="open" {{ 'selected' if ticket.status == 'open' else '' }}>Open</option>
+                                <option value="escalated" {{ 'selected' if ticket.status == 'escalated' else '' }}>Escalated</option>
+                                <option value="resolved" {{ 'selected' if ticket.status == 'resolved' else '' }}>Resolved</option>
+                            </select>
+                            <button class="btn btn-outline-success">Update</button>
+                        </div>
+                    </form>
+                    {% else %}
+                    <div class="text-muted text-center py-4">No support tickets.</div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-header bg-white"><h5 class="mb-0">Loyalty Points</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2 mb-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="loyalty_points">
+                        <div class="col-5"><select name="user_id" class="form-select">{% for user in users %}<option value="{{ user.id }}">{{ user.username }}</option>{% endfor %}</select></div>
+                        <div class="col-3"><input name="points" type="number" class="form-control" placeholder="Pts"></div>
+                        <div class="col-4"><button class="btn btn-gold w-100">Award</button></div>
+                        <div class="col-12"><input name="description" class="form-control" placeholder="Reason"></div>
+                    </form>
+                    {% for row in loyalty_rows %}
+                    <div class="small border-bottom py-1">{{ row.user.username if row.user else 'User' }} - {{ row.points }} pts - {{ row.description }}</div>
+                    {% else %}
+                    <div class="text-muted text-center py-4">No loyalty activity.</div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-6">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">BNPL Device Lock Controls</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2 mb-3 border-bottom pb-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="bnpl_policy">
+                        <div class="col-md-4"><select name="product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:40] }}</option>{% endfor %}</select></div>
+                        <div class="col-md-2"><select name="is_enabled" class="form-select"><option value="1">Enable</option><option value="0">Disable</option></select></div>
+                        <div class="col-md-2"><input name="min_deposit_percent" type="number" min="10" max="20" class="form-control" placeholder="15%"></div>
+                        <div class="col-md-2"><input name="max_term_months" type="number" min="1" max="6" class="form-control" placeholder="3 mo"></div>
+                        <div class="col-md-2"><button class="btn btn-outline-warning w-100">Policy</button></div>
+                        <div class="col-md-6"><input name="partner_name" class="form-control" placeholder="Microfinance/lending partner"></div>
+                        <div class="col-md-6"><input name="notes" class="form-control" placeholder="Eligibility notes"></div>
+                    </form>
+                    <form method="POST" class="row g-2 mb-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="create_bnpl">
+                        <div class="col-md-3"><select name="user_id" class="form-select">{% for user in users %}<option value="{{ user.id }}">{{ user.username }}</option>{% endfor %}</select></div>
+                        <div class="col-md-3"><select name="product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:35] }}</option>{% endfor %}</select></div>
+                        <div class="col-md-2"><input name="deposit_percent" type="number" min="10" max="20" class="form-control" placeholder="15%"></div>
+                        <div class="col-md-2"><input name="term_months" type="number" min="1" max="6" class="form-control" placeholder="3 mo"></div>
+                        <div class="col-md-2"><button class="btn btn-gold w-100">Create</button></div>
+                        <div class="col-12"><input name="device_lock_code" class="form-control" placeholder="Remote functional lock code for financed device"></div>
+                    </form>
+                </div>
+                <div class="p-0 table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light"><tr><th>User</th><th>Product</th><th>Risk</th><th>Lock</th><th></th></tr></thead>
+                        <tbody>
+                            {% for plan in bnpl_plans %}
+                            <tr>
+                                <form method="POST">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                    <input type="hidden" name="action" value="bnpl_lock">
+                                    <input type="hidden" name="plan_id" value="{{ plan.id }}">
+                                    <td>{{ plan.user.username if plan.user else 'User' }}</td>
+                                    <td>{{ plan.product.name if plan.product else 'Product' }}</td>
+                                    <td>{{ plan.risk_score }}</td>
+                                    <td>
+                                        <select name="lock_status" class="form-select form-select-sm">
+                                            <option value="unlocked" {{ 'selected' if plan.lock_status == 'unlocked' else '' }}>Unlocked</option>
+                                            <option value="locked" {{ 'selected' if plan.lock_status == 'locked' else '' }}>Calls/SMS Only</option>
+                                        </select>
+                                        <input name="device_lock_code" class="form-control form-control-sm mt-1" value="{{ plan.device_lock_code or '' }}" placeholder="Device lock code">
+                                    </td>
+                                    <td><button class="btn btn-sm btn-outline-warning">Save</button></td>
+                                </form>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="5" class="text-center text-muted py-4">No BNPL plans yet.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-6">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">BNPL Installments</h5></div>
+                <div class="card-body">
+                    {% for item in bnpl_installments %}
+                    <form method="POST" class="row g-2 align-items-center border-bottom py-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="bnpl_payment">
+                        <input type="hidden" name="installment_id" value="{{ item.id }}">
+                        <div class="col-md-5"><strong>{{ item.plan.user.username if item.plan and item.plan.user else 'Customer' }}</strong><div class="small text-muted">Plan #{{ item.plan_id }} · installment {{ item.sequence }} · {{ item.status }}</div></div>
+                        <div class="col-md-3">KSh {{ "%.2f"|format(item.amount_due - item.amount_paid) }}</div>
+                        <div class="col-md-2"><input name="amount_paid" type="number" step="0.01" class="form-control form-control-sm" placeholder="Paid"></div>
+                        <div class="col-md-2"><button class="btn btn-sm btn-outline-success w-100">Pay</button></div>
+                    </form>
+                    {% else %}
+                    <div class="text-muted text-center py-4">No BNPL installments yet.</div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-6">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Trust Scores</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-2 mb-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="trust_score">
+                        <div class="col-md-3"><select name="entity_type" class="form-select"><option value="seller">Seller</option><option value="product">Product</option><option value="carrier">Carrier</option><option value="business">Business</option></select></div>
+                        <div class="col-md-3"><input name="entity_id" type="number" class="form-control" placeholder="Entity ID"></div>
+                        <div class="col-md-2"><input name="score" type="number" min="0" max="100" class="form-control" placeholder="Score"></div>
+                        <div class="col-md-4"><button class="btn btn-gold w-100">Save Trust Score</button></div>
+                        <div class="col-12"><input name="factors" class="form-control" placeholder="Signals: verification, reviews, disputes, response time"></div>
+                    </form>
+                    {% for score in trust_scores %}
+                    <div class="d-flex justify-content-between small border-bottom py-1">
+                        <span>{{ score.entity_type }} #{{ score.entity_id }} - {{ score.status }}</span><strong>{{ score.score }}</strong>
+                    </div>
+                    {% else %}
+                    <div class="text-muted text-center py-4">No trust scores yet.</div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Engine Automation Tasks</h5></div>
+                <div class="card-body row g-2">
+                    {% for task in tasks %}
+                    <div class="col-md-6 col-xl-3">
+                        <div class="border rounded p-3 h-100">
+                            <div class="fw-bold">{{ task.name }}</div>
+                            <div class="small text-muted">{{ task.task_type }} - {{ task.cadence }}</div>
+                            <div class="small mt-2">{{ task.last_result }}</div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+

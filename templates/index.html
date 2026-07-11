@@ -1,0 +1,239 @@
+{% extends 'base.html' %}
+{% block title %}SMARKAFRICA - Gold Marketplace{% endblock %}
+
+{% block content %}
+<section class="market-hero mb-4">
+    <div class="container">
+        <div class="market-topbar">
+            <div>
+                <span class="market-kicker">SMARKAFRICA</span>
+                <h1>Shop deals across Africa</h1>
+                <p>{{ settings.get('site_description', 'Your Premium Digital & Physical Marketplace') }}</p>
+            </div>
+            {% if not current_user.is_authenticated %}
+            <div class="auth-hero-actions">
+                <a href="{{ url_for('login') }}" class="btn btn-outline-gold">Login</a>
+                <a href="{{ url_for('register') }}" class="btn btn-gold">Sign Up</a>
+            </div>
+            {% else %}
+            <a href="{{ url_for('orders') }}" class="btn btn-outline-gold">My Orders</a>
+            {% endif %}
+        </div>
+
+        <form class="market-search" action="{{ url_for('shop') }}" method="GET">
+            <input type="search" name="search" placeholder="Search phones, books, downloads, accessories..." aria-label="Search products">
+            <button type="submit"><i class="fas fa-search me-2"></i>Search</button>
+        </form>
+
+        <div class="market-actions">
+            <a href="{{ url_for('shop') }}" class="btn btn-gold btn-lg">Start Shopping</a>
+            <a href="{{ url_for('shop', sort='popular') }}" class="btn btn-soft-dark btn-lg">Popular Deals</a>
+            {% if current_user.is_authenticated %}
+            <a href="{{ url_for('orders') }}" class="btn btn-outline-gold btn-lg">My Orders</a>
+            {% endif %}
+        </div>
+    </div>
+</section>
+
+<section class="container marketplace-shell mb-4">
+    <aside class="market-category-rail">
+        <h2>Categories</h2>
+        <a href="{{ url_for('shop') }}" class="market-category-link active"><i class="fas fa-border-all"></i> All Products</a>
+        {% for cat in categories[:10] %}
+        <a href="{{ url_for('shop', category=cat.slug) }}" class="market-category-link"><i class="fas fa-tag"></i> {{ cat.name }}</a>
+        {% endfor %}
+    </aside>
+
+    <div class="market-promo">
+        <span class="promo-label">Gold Week</span>
+        <h2>Fresh finds, quick checkout, M-Pesa ready.</h2>
+        <p>Browse digital and physical products with clean prices, category filters, and fast cart actions.</p>
+        <a href="{{ url_for('shop') }}" class="btn btn-gold">Browse the store</a>
+    </div>
+</section>
+
+{% if featured_products %}
+<section class="container hot-deals mb-4" aria-label="Hot deals">
+    <div class="section-heading">
+        <div>
+            <span>Hot Deals</span>
+            <h2>Sliding picks for today</h2>
+        </div>
+        <a href="{{ url_for('shop', sort='popular') }}">See more</a>
+    </div>
+    <div class="hot-deals-track">
+        <div class="hot-deals-strip">
+            {% for product in featured_products %}
+            <a href="{{ url_for('product_page', slug=product.slug) }}" class="hot-deal-card">
+                <span class="hot-deal-media">
+                    {% if product.image_url %}
+                    <img src="{{ product.image_url }}" alt="{{ product.name }}">
+                    {% else %}
+                    <span>{{ product.name[:24] }}</span>
+                    {% endif %}
+                    {% if product.is_hot_sale %}
+                    <strong class="hot-sale-tag">Hot Sale</strong>
+                    {% elif product.discount_percent and product.discount_percent > 0 %}
+                    <strong class="deal-badge">-{{ product.discount_percent|int }}%</strong>
+                    {% endif %}
+                    {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
+                    {% if product.seller and product.seller.is_verified_seller %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+                </span>
+                <span class="hot-deal-copy">
+                    <strong>{{ product.name[:44] }}</strong>
+                    <small>KSh {{ "%.2f"|format(product.discounted_price or product.selling_price) }}</small>
+                </span>
+            </a>
+            {% endfor %}
+            {% for product in featured_products %}
+            <a href="{{ url_for('product_page', slug=product.slug) }}" class="hot-deal-card" aria-hidden="true">
+                <span class="hot-deal-media">
+                    {% if product.image_url %}
+                    <img src="{{ product.image_url }}" alt="">
+                    {% else %}
+                    <span>{{ product.name[:24] }}</span>
+                    {% endif %}
+                    {% if product.is_hot_sale %}
+                    <strong class="hot-sale-tag">Hot Sale</strong>
+                    {% elif product.discount_percent and product.discount_percent > 0 %}
+                    <strong class="deal-badge">-{{ product.discount_percent|int }}%</strong>
+                    {% endif %}
+                    {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
+                    {% if product.seller and product.seller.is_verified_seller %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+                </span>
+                <span class="hot-deal-copy">
+                    <strong>{{ product.name[:44] }}</strong>
+                    <small>KSh {{ "%.2f"|format(product.discounted_price or product.selling_price) }}</small>
+                </span>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+</section>
+{% endif %}
+
+{% if current_user.is_authenticated and current_user.is_admin %}
+<section class="container row text-center mb-4 g-3" id="stats-counter">
+    <div class="col-md-4">
+        <div class="market-stat">
+            <h2 id="product-count">0</h2>
+            <p>Products</p>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="market-stat">
+            <h2 id="order-count">0</h2>
+            <p>Orders Completed</p>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="market-stat">
+            <h2 id="user-count">0</h2>
+            <p>Happy Customers</p>
+        </div>
+    </div>
+</section>
+{% else %}
+<section class="container feedback-strip mb-4">
+    <form method="POST" action="{{ url_for('customer_feedback') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+        <div>
+            <h2>Your Store Experience</h2>
+            <p>Tap the stars and tell us what would make shopping better.</p>
+        </div>
+        <div>
+            <label class="form-label fw-semibold">Rate your experience</label>
+            <div class="star-rating" aria-label="Rate your experience">
+                {% for i in range(5, 0, -1) %}
+                <label>
+                    <input type="radio" name="experience_rating" value="{{ i }}" {{ 'checked' if i == 5 else '' }}>
+                    <span aria-hidden="true">&#9733;</span>
+                </label>
+                {% endfor %}
+            </div>
+        </div>
+        <div>
+            <label class="form-label fw-semibold">How satisfied are you?</label>
+            <div class="star-rating" aria-label="How satisfied are you?">
+                {% for i in range(5, 0, -1) %}
+                <label>
+                    <input type="radio" name="satisfaction_rating" value="{{ i }}" {{ 'checked' if i == 5 else '' }}>
+                    <span aria-hidden="true">&#9733;</span>
+                </label>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="feedback-text">
+            <label for="improvement_text" class="form-label fw-semibold">What should we improve?</label>
+            <textarea id="improvement_text" name="improvement_text" class="form-control" rows="2"></textarea>
+        </div>
+        <button type="submit" class="btn btn-gold">Send Feedback</button>
+    </form>
+</section>
+{% endif %}
+
+<section class="container">
+    <div class="section-heading">
+        <div>
+            <span>Featured</span>
+            <h2>Recommended products</h2>
+        </div>
+        <a href="{{ url_for('shop') }}">View all</a>
+    </div>
+
+    {% if featured_products %}
+    <div class="market-product-grid">
+        {% for product in featured_products %}
+        <article class="market-product-card">
+            <a href="{{ url_for('product_page', slug=product.slug) }}" class="product-media">
+                {% if product.image_url %}
+                <img src="{{ product.image_url }}" alt="{{ product.name }}">
+                {% else %}
+                <span>{{ product.name[:30] }}</span>
+                {% endif %}
+                {% if product.is_hot_sale %}
+                <strong class="hot-sale-tag">Hot Sale</strong>
+                {% elif product.discount_percent and product.discount_percent > 0 %}
+                <strong class="deal-badge">-{{ product.discount_percent|int }}%</strong>
+                {% endif %}
+                {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
+                {% if product.seller and product.seller.is_verified_seller %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+            </a>
+            <div class="product-copy">
+                <a href="{{ url_for('product_page', slug=product.slug) }}" class="product-title">{{ product.name[:70] }}</a>
+                <div class="product-price">
+                    {% if product.discount_percent and product.discount_percent > 0 %}
+                    <span>KSh {{ "%.2f"|format(product.discounted_price) }}</span>
+                    <small>KSh {{ "%.2f"|format(product.selling_price) }}</small>
+                    {% else %}
+                    <span>KSh {{ "%.2f"|format(product.selling_price) }}</span>
+                    {% endif %}
+                </div>
+                <div class="product-meta">
+                    <span>{{ product.category.name if product.category else 'General' }}</span>
+                    {% if product.is_digital %}<span>Digital</span>{% endif %}
+                </div>
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-market">
+        <h3>No products yet</h3>
+        <a href="{{ url_for('shop') }}" class="btn btn-gold">Open shop</a>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+fetch('/api/stats').then(r=>r.json()).then(d=>{
+    if (!document.getElementById('stats-counter')) return;
+    document.getElementById('product-count').textContent = d.products || 0;
+    document.getElementById('order-count').textContent = d.orders || 0;
+    document.getElementById('user-count').textContent = d.users || 0;
+}).catch(()=>{});
+</script>
+{% endblock %}

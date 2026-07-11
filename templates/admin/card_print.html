@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Print Smark-Africa Rewards Card {{ card.card_last4 }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        @page { size: A4; margin: 12mm; }
+        body { background: #f6f6f6; font-family: Arial, sans-serif; }
+        .sheet { max-width: 800px; margin: 0 auto; }
+
+        /* Card dimensions - standard CR80 size */
+        .print-card {
+            width: 336px;
+            height: 212px;
+            border-radius: 14px;
+            box-shadow: 0 8px 24px rgba(0,0,0,.18);
+            position: relative;
+            overflow: hidden;
+            page-break-inside: avoid;
+            margin-bottom: 20px;
+        }
+
+        /* FRONT OF CARD */
+        .card-front {
+            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 50%, #1a1a1a 100%);
+            color: #f4c542;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            height: 100%;
+        }
+
+        .card-front::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(244,197,66,0.08) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .card-header-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            z-index: 1;
+        }
+
+        .card-logo {
+            width: 56px;
+            height: 56px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 3px 10px rgba(244,197,66,0.4);
+            overflow: hidden;
+            background: #000;
+        }
+
+        .card-logo img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            image-rendering: -webkit-optimize-contrast;
+            image-rendering: crisp-edges;
+        }
+
+        .card-brand-info {
+            flex: 1;
+        }
+
+        .card-brand {
+            font-size: 21px;
+            font-weight: bold;
+            letter-spacing: 1.5px;
+            line-height: 1.2;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .card-type {
+            font-size: 10px;
+            color: rgba(255,255,255,0.7);
+            margin-top: 3px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .card-chip {
+            width: 42px;
+            height: 32px;
+            background: linear-gradient(135deg, #d4af37 0%, #f4c542 50%, #d4af37 100%);
+            border-radius: 6px;
+            margin: 12px 0 6px 0;
+            z-index: 1;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+        }
+
+        .card-number {
+            font-size: 17px;
+            letter-spacing: 3px;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+            z-index: 1;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.4);
+            font-weight: 500;
+        }
+
+        .card-holder-section {
+            z-index: 1;
+            margin-top: 8px;
+        }
+
+        .card-holder-label {
+            font-size: 8px;
+            color: rgba(255,255,255,0.5);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+
+        .card-holder {
+            font-size: 14px;
+            color: rgba(255,255,255,0.95);
+            text-transform: uppercase;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+
+        .card-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 9px;
+            color: rgba(255,255,255,0.6);
+            z-index: 1;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 10px;
+        }
+
+        /* BACK OF CARD */
+        .card-back {
+            background: linear-gradient(135deg, #2d2d2d 0%, #1a1a1a 50%, #2d2d2d 100%);
+            color: #f4c542;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+
+        .magnetic-stripe {
+            width: 100%;
+            height: 40px;
+            background: linear-gradient(180deg, #1a1a1a 0%, #0a0a0a 50%, #1a1a1a 100%);
+            margin-top: 16px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+        }
+
+        .card-back-content {
+            padding: 14px 20px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .card-tagline {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .cart-icon {
+            width: 34px;
+            height: 34px;
+            background: #f4c542;
+            border-radius: 7px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #1a1a1a;
+            font-size: 19px;
+            flex-shrink: 0;
+            box-shadow: 0 2px 6px rgba(244,197,66,0.3);
+        }
+
+        .tagline-text {
+            font-size: 10.5px;
+            font-weight: 600;
+            line-height: 1.35;
+            color: #f4c542;
+            letter-spacing: 0.3px;
+        }
+
+        .card-barcode {
+            background: white;
+            padding: 6px 8px;
+            border-radius: 6px;
+            text-align: center;
+            margin: 6px 0;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+        }
+
+        .card-barcode img {
+            max-width: 100%;
+            height: 55px;
+            display: block;
+            margin: 0 auto;
+            image-rendering: -webkit-optimize-contrast;
+            image-rendering: crisp-edges;
+        }
+
+        .card-terms {
+            font-size: 7px;
+            color: rgba(255,255,255,0.65);
+            line-height: 1.5;
+            text-align: justify;
+            margin-top: auto;
+            padding-top: 6px;
+        }
+
+        /* PIN SCRATCH SLIP */
+        .scratch {
+            border: 2px dashed #222;
+            background: #eee;
+            padding: 18px;
+            width: 336px;
+            border-radius: 8px;
+            page-break-inside: avoid;
+        }
+
+        .scratch-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .scratch-pin {
+            display: inline-block;
+            background: #c0c0c0;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 24px;
+            font-weight: bold;
+            letter-spacing: 3px;
+            font-family: 'Courier New', monospace;
+            color: #333;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .scratch-instruction {
+            font-size: 11px;
+            color: #666;
+            margin-top: 12px;
+            line-height: 1.4;
+        }
+
+        /* UTILITIES */
+        .no-print { margin: 20px 0; }
+
+        .instructions-box {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+        }
+
+        .instructions-box h6 {
+            color: #333;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+
+        .instructions-box ul {
+            font-size: 12px;
+            color: #666;
+            margin: 0;
+            padding-left: 20px;
+        }
+
+        .card-label {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+
+        @media print {
+            body { background: white; }
+            .no-print { display: none; }
+            .sheet { margin: 0; }
+            .instructions-box { display: none; }
+            .page-break { page-break-before: always; }
+        }
+    </style>
+</head>
+<body>
+<div class="sheet py-4">
+    <!-- Screen Controls (not printed) -->
+    <div class="no-print d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <button class="btn btn-warning btn-lg" onclick="window.print()">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-printer me-2" viewBox="0 0 16 16">
+                    <path d="M2.5 8a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1z"/>
+                    <path d="M5 1a2 2 0 0 0-2 2v2H2a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1v1a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-1h1a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1V3a2 2 0 0 0-2-2H5zM4 3a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2H4V3zm1 5a2 2 0 0 0-2 2v1H2a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v-1a2 2 0 0 0-2-2H5zm7 2v3a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1z"/>
+                </svg>
+                Print Card (Both Sides) & PIN
+            </button>
+        </div>
+        <div>
+            <span class="badge bg-secondary me-2">Card: •••• {{ card.card_last4 }}</span>
+            <a class="btn btn-outline-secondary" href="{{ url_for('admin_shopping_cards') }}">Back to Cards</a>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <!-- CARD FRONT -->
+        <div class="col-md-6">
+            <div class="card-label">🔷 CARD FRONT (Customer Side)</div>
+            <section class="print-card">
+                <div class="card-front">
+                    <!-- Header with Logo and Brand -->
+                    <div class="card-header-section">
+                        <div class="card-logo">
+                            <img src="{{ url_for('static', filename='images/smark-africa-logo.png') }}" alt="Smark-Africa Logo">
+                        </div>
+                        <div class="card-brand-info">
+                            <div class="card-brand">SMARK-AFRICA</div>
+                            <div class="card-type">Rewards Card</div>
+                        </div>
+                    </div>
+
+                    <!-- EMV Chip -->
+                    <div class="card-chip"></div>
+
+                    <!-- Card Number -->
+                    <div class="card-number">{{ card.card_number[:4] }} {{ card.card_number[4:8] }} {{ card.card_number[8:12] }} {{ card.card_number[12:] }}</div>
+
+                    <!-- Card Holder -->
+                    <div class="card-holder-section">
+                        <div class="card-holder-label">Cardholder</div>
+                        <div class="card-holder">{{ card.display_name or card.user.username }}</div>
+                    </div>
+
+                    <!-- Footer -->
+                    <div class="card-footer">
+                        <span>Rewards Program</span>
+                        <span>•••• {{ card.card_last4 }}</span>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- CARD BACK -->
+        <div class="col-md-6">
+            <div class="card-label">🔶 CARD BACK (Barcode Side)</div>
+            <section class="print-card">
+                <div class="card-back">
+                    <!-- Magnetic Stripe -->
+                    <div class="magnetic-stripe"></div>
+
+                    <!-- Back Content -->
+                    <div class="card-back-content">
+                        <!-- Tagline with Cart Icon -->
+                        <div class="card-tagline">
+                            <div class="cart-icon">
+                                🛒
+                            </div>
+                            <div class="tagline-text">
+                                Your Premium Digital<br>&amp; Physical Marketplace
+                            </div>
+                        </div>
+
+                        <!-- Barcode -->
+                        <div class="card-barcode">
+                            <img src="{{ url_for('admin_card_barcode', card_id=card.id) }}" alt="Card Barcode" style="max-width: 290px; height: 55px;">
+                        </div>
+
+                        <!-- Terms and Conditions -->
+                        <div class="card-terms">
+                            The use of this card is subject to the terms and conditions of Smark-Africa's card agreement. This card can only be used on a Smark-Africa POS terminal only.
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <!-- PIN Scratch Slip -->
+    <div class="row mt-4">
+        <div class="col-12">
+            <div class="card-label">🔒 PIN SCRATCH SLIP (Separate from Card)</div>
+        </div>
+        <div class="col-md-6">
+            <section class="scratch">
+                <div class="scratch-header">
+                    <h5 class="mb-0">Card PIN</h5>
+                    <span class="badge bg-dark">CONFIDENTIAL</span>
+                </div>
+                {% if scratch_pin %}
+                <div class="text-center mb-3">
+                    <div class="scratch-pin">{{ scratch_pin }}</div>
+                </div>
+                <div class="alert alert-warning mb-2" style="font-size: 11px; padding: 8px;">
+                    <strong>⚠️ Security Notice:</strong> Cover this PIN with scratch-off material or opaque sticker before giving to customer.
+                </div>
+                {% else %}
+                <div class="alert alert-info mb-2" style="font-size: 12px;">
+                    <strong>ℹ️ PIN Not Available</strong>
+                    <p class="mb-0 mt-2">PIN is only shown immediately after issuing a card. To print a new PIN slip, you must reissue or reset the card PIN.</p>
+                </div>
+                {% endif %}
+                <div class="scratch-instruction">
+                    <strong>How to Use:</strong>
+                    <ol class="mb-0 mt-1" style="padding-left: 16px;">
+                        <li>Scratch panel to reveal PIN</li>
+                        <li>Present card at Smark-Africa POS</li>
+                        <li>Cashier scans card barcode (on back)</li>
+                        <li>Enter 4-digit PIN to authorize payment</li>
+                    </ol>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <!-- Printing Instructions (visible on screen only) -->
+    <div class="instructions-box no-print">
+        <h6>📋 Card Printing Instructions</h6>
+        <ul>
+            <li><strong>Card Size:</strong> Standard CR80 (85.6mm × 53.98mm) - same as credit card</li>
+            <li><strong>Two-Sided Printing:</strong>
+                <ul>
+                    <li>FRONT: Logo, platform name, card number, cardholder name</li>
+                    <li>BACK: Tagline with cart icon, barcode, terms and conditions</li>
+                </ul>
+            </li>
+            <li><strong>Card Stock:</strong> Print on PVC card stock (recommended: white or light-colored)</li>
+            <li><strong>Barcode Location:</strong> On the BACK of the card - must be clearly scannable</li>
+            <li><strong>Logo:</strong> The "SA" in gold box represents Smark-Africa logo</li>
+            <li><strong>PIN Protection:</strong> Apply scratch-off material over PIN on separate slip</li>
+            <li><strong>Quality Check:</strong> Test barcode scanning on the BACK of card before distribution</li>
+            <li><strong>Card Issued:</strong> {{ card.issued_at.strftime('%d %b %Y') if card.issued_at else 'N/A' }}</li>
+            <li><strong>Customer:</strong> {{ card.user.username }} ({{ card.user.email }}{% if card.user.phone %} | {{ card.user.phone }}{% endif %})</li>
+            <li><strong>Balance:</strong> Credits: {{ (card.credit_balance or 0) // 100 }} KSh {{ ((card.credit_balance or 0) % 100) / 100 }} | Cash: KSh {{ card.cash_balance or 0 }}</li>
+        </ul>
+        <div class="alert alert-info mt-3 mb-0" style="font-size: 12px;">
+            <strong>📌 Important:</strong> The barcode is on the BACK of the card. Cashiers should flip the card over to scan the barcode when processing payments.
+        </div>
+    </div>
+</div>
+</body>
+</html>

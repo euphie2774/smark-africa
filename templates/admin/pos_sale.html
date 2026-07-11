@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}{{ sale.receipt_number }} - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-receipt me-2"></i>{{ sale.receipt_number }}</h2>
+            <div class="small text-muted">Invoice {{ sale.invoice_number }} - {{ sale.created_at.strftime('%d %b %Y %H:%M') }}</div>
+        </div>
+        <div class="d-flex gap-2 no-print">
+            <button class="btn btn-gold" onclick="window.print()"><i class="fas fa-print me-1"></i>Print Receipt</button>
+            <a href="{{ url_for('admin_pos') }}" class="btn btn-outline-secondary">Back to POS</a>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body">
+            <div class="row mb-4">
+                <div class="col-md-6">
+                    <h5>Customer</h5>
+                    <div>{{ sale.customer_name or 'Walk-in customer' }}</div>
+                    <div class="text-muted">{{ sale.customer_email or '' }}</div>
+                    <div class="text-muted">{{ sale.customer_phone or '' }}</div>
+                </div>
+                <div class="col-md-6 text-md-end">
+                    <h5>Payment</h5>
+                    <div>{{ sale.payment_method|title }} / {{ sale.payment_status|title }}</div>
+                    <div class="fw-bold fs-4 text-success">KSh {{ "%.2f"|format(sale.total_amount) }}</div>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead class="table-light"><tr><th>Product</th><th>Quantity</th><th>Unit</th><th>Total</th></tr></thead>
+                    <tbody>
+                    {% for item in sale.items %}
+                    <tr><td>{{ item.product_name }}</td><td>{{ item.quantity }}</td><td>KSh {{ "%.2f"|format(item.unit_price) }}</td><td>KSh {{ "%.2f"|format(item.line_total) }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                    <tfoot>
+                    <tr><td colspan="3" class="text-end">Subtotal</td><td>KSh {{ "%.2f"|format(sale.subtotal) }}</td></tr>
+                    <tr><td colspan="3" class="text-end">Discount</td><td>KSh {{ "%.2f"|format(sale.discount_amount) }}</td></tr>
+                    <tr><td colspan="3" class="text-end">Tax</td><td>KSh {{ "%.2f"|format(sale.tax_amount) }}</td></tr>
+                    <tr class="table-secondary"><td colspan="3" class="text-end fw-bold">Total</td><td class="fw-bold">KSh {{ "%.2f"|format(sale.total_amount) }}</td></tr>
+                    </tfoot>
+                </table>
+            </div>
+            {% if sale.notes %}<div class="alert alert-info">{{ sale.notes }}</div>{% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

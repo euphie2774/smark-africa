@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Register - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card shadow-sm">
+                <div class="card-body p-4">
+                    <h3 class="card-title text-center mb-4"><i class="fas fa-user-plus me-2"></i>Create Account</h3>
+
+                    {% if pending_registration %}
+                    <form method="POST">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="verification_step" value="confirm">
+                        <div class="alert alert-info">
+                            Enter the 6-digit code sent to {{ pending_registration.email }}.
+                        </div>
+                        <div class="mb-3">
+                            <label for="verification_code" class="form-label">Verification Code</label>
+                            <input type="text" class="form-control form-control-lg text-center" id="verification_code" name="verification_code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required>
+                        </div>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-success btn-lg">Verify and Create Account</button>
+                        </div>
+                    </form>
+                    {% else %}
+                    <form method="POST">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label for="first_name" class="form-label">First Name</label>
+                                <input type="text" class="form-control" id="first_name" name="first_name" required>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label for="last_name" class="form-label">Last Name</label>
+                                <input type="text" class="form-control" id="last_name" name="last_name" required>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="email" class="form-label">Email Address</label>
+                            <input type="email" class="form-control" id="email" name="email" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="phone" class="form-label">Phone Number (M-Pesa)</label>
+                            <div class="input-group phone-code-group">
+                                <span class="input-group-text phone-flag-wrap">
+                                    <img class="phone-country-flag" src="https://flagcdn.com/24x18/ke.png" alt="KE flag">
+                                </span>
+                                <select class="form-select phone-country-select" name="phone_country_code" style="max-width: 180px;">
+                                    {% for country in country_phone_codes %}
+                                    <option value="{{ country.code }}" data-iso="{{ country.iso }}" data-flag="{{ country.flag_url }}" data-country="{{ country.name }}" {{ 'selected' if country.code == '+254' }}>{{ country.name }} {{ country.code }}</option>
+                                    {% endfor %}
+                                </select>
+                                <input type="tel" class="form-control" id="phone" name="phone_local" placeholder="712345678" required>
+                            </div>
+                            <div class="form-text">Choose a country code, then enter the local number without the leading zero.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="username" class="form-label">Username</label>
+                            <input type="text" class="form-control" id="username" name="username" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="password" class="form-label">Password</label>
+                            <input type="password" class="form-control" id="password" name="password" required minlength="6">
+                        </div>
+                        <div class="mb-3">
+                            <label for="confirm_password" class="form-label">Confirm Password</label>
+                            <input type="password" class="form-control" id="confirm_password" name="confirm_password" required>
+                        </div>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-success btn-lg">Send Verification Code</button>
+                        </div>
+                    </form>
+                    {% endif %}
+
+                    <hr class="my-4">
+                    <p class="text-center mb-0">
+                        Already have an account? <a href="{{ url_for('login') }}">Sign in</a>
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

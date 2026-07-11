@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Compare Products - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h1 class="h2 mb-1">Compare Products</h1>
+            <p class="text-muted mb-0">Compare price, stock, ratings, live market ranges, and web-sourced specifications before choosing.</p>
+        </div>
+    </div>
+
+    <form method="GET" class="card border-0 shadow-sm mb-4" id="compare-form">
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">Category</label>
+                    <select name="category_id" class="form-select" onchange="this.form.submit()">
+                        <option value="">All categories</option>
+                        {% for category in categories %}
+                        <option value="{{ category.id }}" {{ 'selected' if selected_category_id == category.id }}>{{ category.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-8">
+                    <label class="form-label">Select up to 4 items</label>
+                    <div class="row g-2">
+                        {% for index in range(4) %}
+                        <div class="col-md-6">
+                            <select name="products" class="form-select">
+                                <option value="">Choose product...</option>
+                                {% for product in products %}
+                                <option value="{{ product.id }}" {{ 'selected' if selected_ids|length > index and selected_ids[index] == product.id }}>{{ product.name }}{% if not product.is_digital and (product.stock or 0) <= 0 %} (out of stock){% endif %}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            <div class="d-flex gap-2 mt-3">
+                <button class="btn btn-gold">Compare</button>
+                <button type="button" class="btn btn-outline-warning" id="fetch-web-specs">Fetch Live Web Data</button>
+            </div>
+            <div id="compare-status" class="form-text mt-2"></div>
+        </div>
+    </form>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body p-0 table-responsive">
+            <table class="table table-hover align-middle mb-0" id="compare-table">
+                <thead class="table-light">
+                    <tr>
+                        <th>Feature</th>
+                        {% for item in comparison %}
+                        <th><a href="{{ item.url }}">{{ item.name }}</a></th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><th>Price</th>{% for item in comparison %}<td>KSh {{ "%.2f"|format(item.price or 0) }}</td>{% endfor %}</tr>
+                    <tr><th>Stock</th>{% for item in comparison %}<td><span class="badge bg-{{ 'success' if item.in_stock else 'secondary' }}">{{ 'In stock' if item.in_stock else 'Out of stock' }}</span><div class="small text-muted">{{ item.stock }}</div></td>{% endfor %}</tr>
+                    <tr><th>Rating</th>{% for item in comparison %}<td>{{ "%.1f"|format(item.rating or 0) }} / 5</td>{% endfor %}</tr>
+                    {% for key in spec_keys %}
+                    <tr><th>{{ key }}</th>{% for item in comparison %}<td>{{ item.specs.get(key, 'Not found yet') }}</td>{% endfor %}</tr>
+                    {% endfor %}
+                    {% if not comparison %}
+                    <tr><td colspan="5" class="text-center text-muted py-5">Select products above to compare.</td></tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+const fetchButton = document.getElementById('fetch-web-specs');
+const statusBox = document.getElementById('compare-status');
+fetchButton?.addEventListener('click', () => {
+    const ids = [...document.querySelectorAll('select[name="products"]')]
+        .map(select => select.value)
+        .filter(Boolean);
+    if (!ids.length) {
+        statusBox.textContent = 'Select products first.';
+        return;
+    }
+    statusBox.textContent = 'Fetching specifications and market prices from the web...';
+    fetch("{{ url_for('api_compare_specs') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({product_ids: ids})
+    }).then(response => response.json()).then(data => {
+        renderComparison(data.items || [], data.spec_keys || []);
+        statusBox.textContent = 'Updated with available web specifications and market price ranges.';
+    }).catch(() => {
+        statusBox.textContent = 'Could not fetch live web data right now. Store details remain available.';
+    });
+});
+
+function renderComparison(items, specKeys) {
+    const table = document.getElementById('compare-table');
+    const headers = ['<th>Feature</th>'].concat(items.map(item => `<th><a href="${item.url}">${item.name}</a></th>`)).join('');
+    const rows = [
+        `<tr><th>Price</th>${items.map(item => `<td>KSh ${Number(item.price || 0).toFixed(2)}</td>`).join('')}</tr>`,
+        `<tr><th>Live Market Range</th>${items.map(item => {
+            const market = item.market || {};
+            if (!market.kenya_high) return `<td>${market.message || 'Checking market sources'}</td>`;
+            return `<td>KSh ${Number(market.kenya_low || 0).toFixed(2)} - KSh ${Number(market.kenya_high || 0).toFixed(2)}<div class="small text-muted">${market.source || ''}</div></td>`;
+        }).join('')}</tr>`,
+        `<tr><th>Stock</th>${items.map(item => `<td><span class="badge bg-${item.in_stock ? 'success' : 'secondary'}">${item.in_stock ? 'In stock' : 'Out of stock'}</span><div class="small text-muted">${item.stock}</div></td>`).join('')}</tr>`,
+        `<tr><th>Rating</th>${items.map(item => `<td>${Number(item.rating || 0).toFixed(1)} / 5</td>`).join('')}</tr>`
+    ];
+    specKeys.forEach(key => {
+        rows.push(`<tr><th>${key}</th>${items.map(item => `<td>${item.specs?.[key] || 'Not found yet'}</td>`).join('')}</tr>`);
+    });
+    rows.push(`<tr><th>Web Sources</th>${items.map(item => `<td>${(item.sources || []).map(src => `<a href="${src}" target="_blank" rel="noopener">Source</a>`).join('<br>') || 'Store details only'}</td>`).join('')}</tr>`);
+    table.innerHTML = `<thead class="table-light"><tr>${headers}</tr></thead><tbody>${rows.join('')}</tbody>`;
+}
+</script>
+{% endblock %}

@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block title %}My Rewards Card - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="row">
+        <div class="col-lg-8 mx-auto">
+            <h2 class="mb-3"><i class="fas fa-credit-card me-2"></i>Smark-Africa Rewards Card</h2>
+
+            {% if card %}
+            <!-- User Has Active Card -->
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-start mb-3">
+                        <div>
+                            <h5 class="mb-1">Your Active Card</h5>
+                            <p class="text-muted small mb-0">Use this card at any Smark-Africa POS terminal</p>
+                        </div>
+                        <span class="badge bg-success">Active</span>
+                    </div>
+
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="p-3 bg-light rounded">
+                                <div class="small text-muted mb-1">Card Number</div>
+                                <div class="fw-bold">•••• •••• •••• {{ card.card_last4 }}</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 bg-light rounded">
+                                <div class="small text-muted mb-1">Cardholder</div>
+                                <div class="fw-bold">{{ card.display_name or current_user.username }}</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 bg-light rounded">
+                                <div class="small text-muted mb-1">Shopping Credits</div>
+                                <div class="fw-bold text-success">{{ (card.credit_balance or 0) // 100 }} credits</div>
+                                <div class="small">≈ KSh {{ "%.2f"|format((card.credit_balance or 0) / 100) }}</div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 bg-light rounded">
+                                <div class="small text-muted mb-1">Cash Balance</div>
+                                <div class="fw-bold text-primary">KSh {{ "%.2f"|format(card.cash_balance or 0) }}</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="alert alert-info mt-3 mb-0">
+                        <i class="fas fa-info-circle me-2"></i>
+                        <strong>Total Available:</strong> KSh {{ "%.2f"|format(((card.credit_balance or 0) / 100) + (card.cash_balance or 0)) }}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pending Authorization Requests -->
+            {% if pending_auths %}
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-warning text-dark">
+                    <h5 class="mb-0"><i class="fas fa-mobile-alt me-2"></i>Pending Payment Authorizations</h5>
+                </div>
+                <div class="card-body">
+                    {% for auth in pending_auths %}
+                    <div class="alert alert-warning mb-3">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <h6 class="mb-1">Payment Request</h6>
+                                <p class="mb-2">
+                                    <strong>Amount:</strong> KSh {{ "%.2f"|format(auth.amount) }}<br>
+                                    <strong>Merchant:</strong> {{ auth.merchant_name }}<br>
+                                    <strong>Time:</strong> {{ auth.created_at.strftime('%d %b %Y %H:%M') }}<br>
+                                    <strong>Expires:</strong> {{ auth.expires_at.strftime('%H:%M:%S') }}
+                                </p>
+                            </div>
+                            <div>
+                                <form method="POST" action="{{ url_for('authorize_card_payment', auth_id=auth.id) }}" class="d-inline">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                    <input type="hidden" name="action" value="approve">
+                                    <button class="btn btn-success btn-sm mb-2"><i class="fas fa-check me-1"></i>Approve</button>
+                                </form>
+                                <form method="POST" action="{{ url_for('authorize_card_payment', auth_id=auth.id) }}" class="d-inline">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                    <input type="hidden" name="action" value="decline">
+                                    <button class="btn btn-danger btn-sm"><i class="fas fa-times me-1"></i>Decline</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Transaction History -->
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0">Recent Transactions</h5>
+                </div>
+                <div class="card-body">
+                    {% if transactions %}
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Balance</th></tr></thead>
+                            <tbody>
+                            {% for txn in transactions %}
+                            <tr>
+                                <td class="small">{{ txn.created_at.strftime('%d %b %H:%M') }}</td>
+                                <td class="small">{{ txn.transaction_type|replace('_', ' ')|title }}</td>
+                                <td class="small">
+                                    {% if txn.credit_amount %}
+                                    <span class="{{ 'text-success' if txn.credit_amount > 0 else 'text-danger' }}">
+                                        {{ '+' if txn.credit_amount > 0 else '' }}{{ txn.credit_amount }} credits
+                                    </span>
+                                    {% endif %}
+                                    {% if txn.cash_amount %}
+                                    <span class="{{ 'text-success' if txn.cash_amount > 0 else 'text-danger' }}">
+                                        {{ '+' if txn.cash_amount > 0 else '' }}KSh {{ "%.2f"|format(txn.cash_amount) }}
+                                    </span>
+                                    {% endif %}
+                                </td>
+                                <td class="small">KSh {{ "%.2f"|format((txn.balance_after_credits or 0) / 100 + (txn.balance_after_cash or 0)) }}</td>
+                            </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <p class="text-muted mb-0">No transactions yet.</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% else %}
+            <!-- User Does Not Have Card - Registration Form -->
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="mb-0"><i class="fas fa-star me-2"></i>Register for Your Rewards Card</h5>
+                </div>
+                <div class="card-body">
+                    <p class="mb-3">Get your physical Smark-Africa Rewards Card and start paying with your earned shopping credits!</p>
+
+                    <div class="alert alert-info">
+                        <h6><i class="fas fa-coins me-2"></i>Your Current Balance</h6>
+                        <p class="mb-2"><strong>Available Credits:</strong> {{ loyalty_balance // 100 }} credits (KSh {{ "%.2f"|format(loyalty_balance / 100) }})</p>
+                        <p class="mb-0 small">You need {{ issue_threshold }} credits to get a free card, or you can pay the KSh {{ "%.0f"|format(issue_fee) }} issue fee.</p>
+                    </div>
+
+                    <form method="POST" class="mt-4">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="register">
+
+                        <div class="mb-3">
+                            <label class="form-label">Name on Card</label>
+                            <input type="text" name="display_name" class="form-control" value="{{ current_user.username }}" required>
+                            <div class="form-text">This will be printed on your physical card</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">Payment Method</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="payment_method" id="pay_credits" value="credits" checked>
+                                <label class="form-check-label" for="pay_credits">
+                                    <strong>Use My Loyalty Credits</strong> (Free if you have {{ issue_threshold }} credits)
+                                </label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="payment_method" id="pay_mpesa" value="mpesa">
+                                <label class="form-check-label" for="pay_mpesa">
+                                    <strong>Pay KSh {{ "%.0f"|format(issue_fee) }}</strong> via M-Pesa
+                                </label>
+                            </div>
+                        </div>
+
+                        {% if not current_user.phone %}
+                        <div class="mb-3">
+                            <label class="form-label"><i class="fas fa-phone me-1"></i>Phone Number <span class="text-danger">*</span></label>
+                            <input type="tel" name="phone_number" class="form-control" placeholder="+254..." required>
+                            <div class="form-text">Required for PIN setup and transaction authorization via SMS</div>
+                        </div>
+                        {% endif %}
+
+                        <div class="alert alert-warning">
+                            <h6><i class="fas fa-exclamation-triangle me-2"></i>Important Information</h6>
+                            <ul class="mb-0 small">
+                                <li>Your physical card will be printed and delivered to you</li>
+                                <li>A PIN setup link will be sent to: <strong>{{ current_user.phone or 'the number you provide above' }}</strong></li>
+                                <li>You will create your own secure 4-digit PIN via SMS prompt</li>
+                                <li>The card can only be used at Smark-Africa POS terminals</li>
+                                <li>All POS transactions require authorization via SMS to your phone</li>
+                            </ul>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-lg w-100">
+                            <i class="fas fa-credit-card me-2"></i>Register for Rewards Card
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- How It Works -->
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0">How It Works</h5>
+                </div>
+                <div class="card-body">
+                    <h6 class="text-primary mb-2"><i class="fas fa-key me-2"></i>PIN Setup (During Card Creation)</h6>
+                    <ol class="mb-4">
+                        <li class="mb-2"><strong>Register:</strong> Apply for your Smark-Africa Rewards Card above</li>
+                        <li class="mb-2"><strong>Receive SMS:</strong> You'll get an SMS with a link to set your PIN</li>
+                        <li class="mb-2"><strong>Create Your PIN:</strong> Choose your own secure 4-digit PIN</li>
+                        <li class="mb-0"><strong>Card Activated:</strong> Once PIN is set, your card is active and ready to use</li>
+                    </ol>
+
+                    <h6 class="text-primary mb-2"><i class="fas fa-shopping-cart me-2"></i>Using Your Card at POS</h6>
+                    <ol>
+                        <li class="mb-2"><strong>Present Card:</strong> Show your Smark-Africa Rewards Card at the POS terminal</li>
+                        <li class="mb-2"><strong>Barcode Scanned:</strong> The cashier scans the barcode on the back of your card</li>
+                        <li class="mb-2"><strong>SMS Authorization:</strong> You receive an SMS prompt to authorize the payment amount</li>
+                        <li class="mb-2"><strong>Approve Payment:</strong> Approve or decline the transaction from your phone</li>
+                        <li class="mb-0"><strong>Done:</strong> Once approved, the amount is deducted from your card balance</li>
+                    </ol>
+                    <div class="alert alert-success mt-3 mb-0">
+                        <i class="fas fa-shield-alt me-2"></i>
+                        <strong>Double Security:</strong> Your card is protected by a physical barcode AND mobile SMS authorization. Only you can approve payments from your registered phone.
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

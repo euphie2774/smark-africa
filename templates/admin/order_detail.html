@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Order #{{ order.id }} - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('admin_orders') }}">Orders</a></li>
+            <li class="breadcrumb-item active">Order #{{ order.id }}</li>
+        </ol>
+    </nav>
+
+    <div class="row g-4">
+        <div class="col-md-8">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between mb-3">
+                        <h4 class="mb-0">Order #{{ order.id }}</h4>
+                        <div>
+                            <span class="badge bg-{{ 'success' if order.payment_status == 'Paid' else 'warning' }}">{{ order.payment_status }}</span>
+                            <span class="badge bg-{{ 'success' if order.status == 'Delivered' else 'primary' }}">{{ order.status }}</span>
+                        </div>
+                    </div>
+
+                    <p class="text-muted">{{ order.created_at.strftime('%d %b %Y at %I:%M %p') }}</p>
+
+                    {% if order.notes %}
+                    <div class="alert alert-info">{{ order.notes }}</div>
+                    {% endif %}
+
+                    <form method="POST" action="{{ url_for('admin_update_order', order_id=order.id) }}" class="row g-3 mt-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <div class="col-md-4">
+                            <label class="form-label">Order Status</label>
+                            <select name="status" class="form-select">
+                                <option value="Pending" {{ 'selected' if order.status == 'Pending' }}>Pending</option>
+                                <option value="Processing" {{ 'selected' if order.status == 'Processing' }}>Processing</option>
+                                <option value="Shipped" {{ 'selected' if order.status == 'Shipped' }}>Shipped</option>
+                                <option value="Delivered" {{ 'selected' if order.status == 'Delivered' }}>Delivered</option>
+                                <option value="Cancelled" {{ 'selected' if order.status == 'Cancelled' }}>Cancelled</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Payment Status</label>
+                            <select name="payment_status" class="form-select">
+                                <option value="Pending" {{ 'selected' if order.payment_status == 'Pending' }}>Pending</option>
+                                <option value="Paid" {{ 'selected' if order.payment_status == 'Paid' }}>Paid</option>
+                                <option value="Failed" {{ 'selected' if order.payment_status == 'Failed' }}>Failed</option>
+                                <option value="Refunded" {{ 'selected' if order.payment_status == 'Refunded' }}>Refunded</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Shipping Status</label>
+                            <select name="shipping_status" class="form-select">
+                                <option value="">None</option>
+                                <option value="Processing" {{ 'selected' if order.shipping_status == 'Processing' }}>Processing</option>
+                                <option value="In Transit" {{ 'selected' if order.shipping_status == 'In Transit' }}>In Transit</option>
+                                <option value="Out for Delivery" {{ 'selected' if order.shipping_status == 'Out for Delivery' }}>Out for Delivery</option>
+                                <option value="Delivered" {{ 'selected' if order.shipping_status == 'Delivered' }}>Delivered</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Tracking Number</label>
+                            <input type="text" name="tracking_number" class="form-control" value="{{ order.tracking_number if order.tracking_number else '' }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Estimated Delivery</label>
+                            <input type="date" name="estimated_delivery" class="form-control" value="{{ order.estimated_delivery.strftime('%Y-%m-%d') if order.estimated_delivery else '' }}">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">Admin Notes (internal)</label>
+                            <textarea name="notes" class="form-control" rows="2">{{ order.notes if order.notes else '' }}</textarea>
+                        </div>
+                        <div class="col-12">
+                            <button type="submit" class="btn btn-success"><i class="fas fa-save me-1"></i> Update Order</button>
+                        </div>
+                    </form>
+
+                    <h5 class="mt-4">Items</h5>
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead>
+                                <tr>
+                                    <th>Product</th>
+                                    <th>Qty</th>
+                                    <th>Price</th>
+                                    <th>Subtotal</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for item in order.items %}
+                                <tr>
+                                    <td>{{ item.product.name if item.product else 'Deleted' }}</td>
+                                    <td>{{ item.quantity }}</td>
+                                    <td>KSh {{ "%.2f"|format(item.price) }}</td>
+                                    <td>KSh {{ "%.2f"|format(item.price * item.quantity) }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                            <tfoot>
+                                <tr class="fw-bold">
+                                    <td colspan="3" class="text-end">Total:</td>
+                                    <td>KSh {{ "%.2f"|format(order.total_amount) }}</td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body">
+                    <h5 class="mb-3">Customer</h5>
+                    <p class="mb-1"><strong>{{ order.user.first_name }} {{ order.user.last_name }}</strong></p>
+                    <p class="mb-1">Email: {{ order.user.email }}</p>
+                    <p class="mb-1">Phone: {{ order.user.phone }}</p>
+                </div>
+            </div>
+
+            {% if order.shipping_address %}
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body">
+                    <h5 class="mb-3">Shipping Address</h5>
+                    <p class="mb-0">{{ order.shipping_address }}</p>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if order.transaction %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="mb-3">Transaction</h5>
+                    <p class="mb-1">M-Pesa Code: {{ order.transaction.transaction_id }}</p>
+                    <p class="mb-1">Amount: KSh {{ "%.2f"|format(order.transaction.amount) }}</p>
+                    <p class="mb-0">Date: {{ order.transaction.created_at.strftime('%d %b %Y %H:%M') }}</p>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

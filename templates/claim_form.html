@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}File Claim - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h1 class="fw-bold">File Payment Protection Claim</h1>
+    <div class="card border-0 shadow-sm">
+        <div class="card-body">
+            <p class="text-muted">Order {{ order.order_number }} refund reviews target 3-7 business days and may extend depending on the case.</p>
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="mb-3">
+                    <label class="form-label">Reason</label>
+                    <select name="reason" class="form-select">
+                        <option value="not_delivered">Product not delivered</option>
+                        <option value="payment_issue">Payment issue</option>
+                        <option value="wrong_item">Wrong or defective item</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Details</label>
+                    <textarea name="details" class="form-control" rows="5" required></textarea>
+                </div>
+                <button class="btn btn-warning">Submit Claim</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

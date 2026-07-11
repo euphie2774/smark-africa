@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}BNPL Application - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="row g-4">
+        <div class="col-lg-5">
+            <h2 class="mb-2"><i class="fas fa-calendar-check me-2"></i>Buy Now, Pay Later</h2>
+            <p class="text-muted">Apply for short-term instalments on MVP-approved products. Device controls use a transparent functional lock code, not location tracking.</p>
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5>{{ product.name }}</h5>
+                    <div class="h4 text-success">KSh {{ "%.2f"|format(product.discounted_price or product.selling_price) }}</div>
+                    <div class="small text-muted">Your current risk score: {{ risk_score }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-7">
+            <form method="POST" class="card border-0 shadow-sm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="card-header bg-white"><h5 class="mb-0">Financing Terms</h5></div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label">Deposit %</label>
+                            <input name="deposit_percent" type="number" min="{{ policy.min_deposit_percent }}" max="20" value="{{ policy.min_deposit_percent }}" class="form-control">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Term Months</label>
+                            <input name="term_months" type="number" min="1" max="{{ policy.max_term_months }}" value="{{ policy.max_term_months }}" class="form-control">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Device Lock Code</label>
+                            <input name="device_lock_code" class="form-control" placeholder="Code installed on device">
+                        </div>
+                    </div>
+                    <div class="alert alert-warning small mt-3 mb-0">
+                        If instalments become overdue, the financed device may be restricted to calls/SMS and a payment reminder screen until payment clears.
+                    </div>
+                </div>
+                <div class="card-footer bg-white"><button class="btn btn-gold">Submit BNPL Application</button></div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

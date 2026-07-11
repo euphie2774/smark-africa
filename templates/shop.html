@@ -1,0 +1,153 @@
+{% extends 'base.html' %}
+{% block title %}Shop - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<section class="shop-head">
+    <div class="container">
+        <span class="market-kicker">SMARKAFRICA Store</span>
+        <h1>Shop products</h1>
+        <form class="market-search" action="{{ url_for('shop') }}" method="GET">
+            {% if current_category %}<input type="hidden" name="category" value="{{ current_category.slug }}">{% endif %}
+            {% if current_type %}<input type="hidden" name="type" value="{{ current_type }}">{% endif %}
+            <input type="search" name="search" value="{{ request.args.get('search', '') }}" placeholder="Shoes for rainy weather, phone with best battery life..." aria-label="Search products">
+            <button type="submit"><i class="fas fa-search me-2"></i>Search</button>
+        </form>
+        <a href="{{ url_for('smart_shopping') }}" class="btn btn-gold mt-3"><i class="fas fa-wand-magic-sparkles me-1"></i> Ask AI Shopping Assistant</a>
+        <form class="image-inspo-search" action="{{ url_for('shop_image_search') }}" method="POST" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+            <label for="inspo_image"><i class="fas fa-camera me-2"></i>Find similar products from an image</label>
+            <div>
+                <input type="file" id="inspo_image" name="inspo_image" accept="image/png,image/jpeg,image/gif,image/webp" required>
+                <button type="submit"><i class="fas fa-wand-magic-sparkles me-2"></i>Match</button>
+            </div>
+        </form>
+    </div>
+</section>
+
+<div class="container shop-layout">
+    <aside class="shop-filter-panel">
+        <h2>Categories</h2>
+        <a href="{{ url_for('shop') }}" class="filter-link {{ 'active' if not current_category }}">All Products</a>
+        {% for cat in categories %}
+        <a href="{{ url_for('shop', category=cat.slug, type=current_type or None, sort=request.args.get('sort') or None) }}" class="filter-link {{ 'active' if current_category and current_category.id == cat.id }}">
+            {{ cat.name }}
+        </a>
+        {% endfor %}
+
+        <hr>
+        <h2>Type</h2>
+        <a href="{{ url_for('shop', category=current_category.slug if current_category else None, sort=request.args.get('sort') or None) }}" class="filter-link {{ 'active' if not current_type }}">All</a>
+        <a href="{{ url_for('shop', category=current_category.slug if current_category else None, type='digital', sort=request.args.get('sort') or None) }}" class="filter-link {{ 'active' if current_type == 'digital' }}">Digital</a>
+        <a href="{{ url_for('shop', category=current_category.slug if current_category else None, type='physical', sort=request.args.get('sort') or None) }}" class="filter-link {{ 'active' if current_type == 'physical' }}">Physical</a>
+    </aside>
+
+    <section class="shop-results">
+        <div class="results-toolbar">
+            <div>
+                <span>{{ pagination.total if pagination else products|length }} items</span>
+                <h2>{{ 'Image matches' if uploaded_image_url is defined else (current_category.name if current_category else 'All products') }}</h2>
+                {% if image_search_summary is defined %}
+                <p class="image-match-note">{{ image_search_summary }}</p>
+                {% endif %}
+            </div>
+            <form action="{{ url_for('shop') }}" method="GET">
+                {% if current_category %}<input type="hidden" name="category" value="{{ current_category.slug }}">{% endif %}
+                {% if current_type %}<input type="hidden" name="type" value="{{ current_type }}">{% endif %}
+                {% if request.args.get('search') %}<input type="hidden" name="search" value="{{ request.args.get('search') }}">{% endif %}
+                <select name="sort" class="form-select" onchange="this.form.submit()">
+                    <option value="newest" {{ 'selected' if request.args.get('sort', 'newest') == 'newest' }}>Newest</option>
+                    <option value="popular" {{ 'selected' if request.args.get('sort') == 'popular' }}>Popular</option>
+                    <option value="price_low" {{ 'selected' if request.args.get('sort') == 'price_low' }}>Price: Low to High</option>
+                    <option value="price_high" {{ 'selected' if request.args.get('sort') == 'price_high' }}>Price: High to Low</option>
+                </select>
+            </form>
+        </div>
+
+        {% if products %}
+        {% if uploaded_image_url is defined %}
+        <div class="image-match-preview">
+            <img src="{{ uploaded_image_url }}" alt="Uploaded inspiration image">
+            <div>
+                <strong>Uploaded inspiration</strong>
+                <span>{{ products|length }} closest store matches found</span>
+            </div>
+        </div>
+        {% endif %}
+        <div class="market-product-grid shop-grid">
+            {% for product in products %}
+            <article class="market-product-card">
+                <a href="{{ url_for('product_page', slug=product.slug) }}" class="product-media">
+                    {% if product.image_url %}
+                    <img src="{{ product.image_url }}" alt="{{ product.name }}">
+                    {% else %}
+                    <span>{{ product.name[:30] }}</span>
+                    {% endif %}
+                    {% if product.is_hot_sale %}
+                    <strong class="hot-sale-tag">Hot Sale</strong>
+                    {% elif product.discount_percent and product.discount_percent > 0 %}
+                    <strong class="deal-badge">-{{ product.discount_percent|int }}%</strong>
+                    {% endif %}
+                    {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
+                    {% if product.seller and product.seller.is_verified_seller %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+                </a>
+                <div class="product-copy">
+                    <a href="{{ url_for('product_page', slug=product.slug) }}" class="product-title">{{ product.name[:70] }}</a>
+                    <p>{{ (product.short_description or product.description or '')[:95] }}</p>
+                    <div class="product-price">
+                        {% if product.discount_percent and product.discount_percent > 0 %}
+                        <span>KSh {{ "%.2f"|format(product.discounted_price) }}</span>
+                        <small>KSh {{ "%.2f"|format(product.selling_price) }}</small>
+                        {% else %}
+                        <span>KSh {{ "%.2f"|format(product.selling_price) }}</span>
+                        {% endif %}
+                    </div>
+                    <div class="product-meta">
+                        <span>{{ product.category.name if product.category else 'General' }}</span>
+                        {% if product.is_digital %}<span>Digital</span>{% elif product.stock > 0 %}<span>In Stock</span>{% endif %}
+                    </div>
+                    {% if match_scores is defined and product.id in match_scores %}
+                    <div class="image-match-score">
+                        <span>{{ match_scores[product.id].score|round|int }}% match</span>
+                        <small>{{ match_scores[product.id].reason }}</small>
+                    </div>
+                    {% endif %}
+                    <div class="product-actions">
+                        <a href="{{ url_for('product_page', slug=product.slug) }}" class="btn btn-outline-gold btn-sm">Details</a>
+                        <form method="POST" action="{{ url_for('add_to_cart', product_id=product.id) }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input type="hidden" name="quantity" value="1">
+                            <button type="submit" class="btn btn-gold btn-sm">Add to Cart</button>
+                        </form>
+                    </div>
+                </div>
+            </article>
+            {% endfor %}
+        </div>
+
+        {% if pagination and pagination.pages > 1 %}
+        <nav class="mt-4">
+            <ul class="pagination justify-content-center">
+                {% if pagination.has_prev %}
+                <li class="page-item"><a class="page-link" href="{{ url_for('shop', page=pagination.prev_num, category=current_category.slug if current_category else None, type=current_type or None, sort=request.args.get('sort') or None, search=request.args.get('search') or None) }}">Previous</a></li>
+                {% endif %}
+                {% for p in pagination.iter_pages() %}
+                {% if p %}
+                <li class="page-item {% if p == pagination.page %}active{% endif %}"><a class="page-link" href="{{ url_for('shop', page=p, category=current_category.slug if current_category else None, type=current_type or None, sort=request.args.get('sort') or None, search=request.args.get('search') or None) }}">{{ p }}</a></li>
+                {% endif %}
+                {% endfor %}
+                {% if pagination.has_next %}
+                <li class="page-item"><a class="page-link" href="{{ url_for('shop', page=pagination.next_num, category=current_category.slug if current_category else None, type=current_type or None, sort=request.args.get('sort') or None, search=request.args.get('search') or None) }}">Next</a></li>
+                {% endif %}
+            </ul>
+        </nav>
+        {% endif %}
+
+        {% else %}
+        <div class="empty-market">
+            <h3>No products found</h3>
+            <a href="{{ url_for('shop') }}" class="btn btn-gold mt-2">Browse All Products</a>
+        </div>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

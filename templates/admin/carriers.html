@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Carrier Partners - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-truck-plane me-2"></i>Carrier Partners & Forwarders</h2>
+            <div class="small text-muted">Verified shipment leads for local delivery, package forwarding, freight forwarding, and clearing.</div>
+        </div>
+        <a href="{{ url_for('admin_shipping') }}" class="btn btn-outline-warning"><i class="fas fa-boxes-packing me-1"></i> Shipping Rates</a>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Local couriers</div><h3>{{ (counts.get('local_courier', 0) + counts.get('last_mile_courier', 0) + counts.get('postal_courier', 0)) }}</h3></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Forwarders</div><h3>{{ (counts.get('freight_forwarder', 0) + counts.get('package_forwarder', 0) + counts.get('clearing_forwarding', 0)) }}</h3></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Express partners</div><h3>{{ counts.get('international_express', 0) }}</h3></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Visible partners</div><h3>{{ partners|length }}</h3></div></div></div>
+    </div>
+
+    <form method="GET" class="card border-0 shadow-sm mb-4">
+        <div class="card-body row g-3 align-items-end">
+            <div class="col-md-4">
+                <label class="form-label">Search</label>
+                <input name="q" class="form-control" value="{{ q }}" placeholder="Aquantuo, Speedaf, China, last mile...">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Partner Type</label>
+                <select name="partner_type" class="form-select">
+                    <option value="">All types</option>
+                    {% for item in partner_types %}
+                    <option value="{{ item }}" {{ 'selected' if selected_partner_type == item }}>{{ item.replace('_', ' ')|title }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Route / Country</label>
+                <select name="country" class="form-select">
+                    <option value="">All countries</option>
+                    {% for item in countries %}
+                    <option value="{{ item }}" {{ 'selected' if selected_country == item }}>{{ item }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-gold w-100">Filter</button>
+            </div>
+        </div>
+    </form>
+
+    <div class="row g-4">
+        {% for partner in partners %}
+        <div class="col-lg-6 col-xl-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between gap-3">
+                        <h5>{{ partner.name }}</h5>
+                        <span class="badge bg-warning text-dark">{{ partner.partner_type.replace('_', ' ')|title }}</span>
+                    </div>
+                    <div class="small text-muted mb-2">{{ partner.service_routes }}</div>
+                    <p class="small">{{ partner.services }}</p>
+                    <div class="d-flex justify-content-between small border-top pt-2">
+                        <span>Reliability</span><strong>{{ "%.0f"|format(partner.reliability_score or 0) }}%</strong>
+                    </div>
+                    <div class="d-flex justify-content-between small">
+                        <span>Rating</span><strong>{{ "%.1f"|format(partner.rating or 0) }}</strong>
+                    </div>
+                    <div class="d-flex justify-content-between small">
+                        <span>ETA</span><strong>{{ partner.estimated_days or 'Confirm' }}</strong>
+                    </div>
+                    {% if partner.notes %}<p class="small text-muted mt-2 mb-0">{{ partner.notes }}</p>{% endif %}
+                </div>
+                <div class="card-footer bg-white d-flex justify-content-between align-items-center gap-2">
+                    <span class="small text-muted">{{ partner.contact or 'Confirm contact' }}</span>
+                    <a href="{{ url_for('admin_carrier_session', partner_id=partner.id) }}" class="btn btn-sm btn-outline-warning">Workspace</a>
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-body text-center text-muted py-5">No carrier partners match this filter.</div></div></div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

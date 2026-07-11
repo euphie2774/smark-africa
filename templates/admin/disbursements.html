@@ -1,0 +1,243 @@
+{% extends "base.html" %}
+{% block title %}Payment Disbursements - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-money-bill-transfer me-2"></i>MVP Payment Disbursements</h2>
+            <div class="small text-muted">Incoming payments, outgoing payments, salaries, commissions, withdrawals, and manufacturer reserves</div>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="hidden" name="action" value="run_cycle">
+                <button class="btn btn-gold"><i class="fas fa-rotate me-1"></i> Run Automation</button>
+            </form>
+            <form method="POST" onsubmit="return confirm('Cancel all queued disbursements?');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="hidden" name="action" value="cancel">
+                <button class="btn btn-outline-warning"><i class="fas fa-ban me-1"></i> Cancel Queued</button>
+            </form>
+            <form method="POST" onsubmit="return confirm('Clear queued and cancelled disbursement records from this ledger?');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="hidden" name="action" value="clear">
+                <button class="btn btn-outline-danger"><i class="fas fa-trash me-1"></i> Clear Disbursements</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm border-start border-success border-4">
+                <div class="card-body">
+                    <div class="small text-muted">Incoming Payments</div>
+                    <h3 class="mb-0 text-success">KSh {{ "%.2f"|format(snapshot.incoming_total) }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm border-start border-danger border-4">
+                <div class="card-body">
+                    <div class="small text-muted">Outgoing Payments</div>
+                    <h3 class="mb-0 text-danger">KSh {{ "%.2f"|format(snapshot.outgoing_total) }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm border-start border-warning border-4">
+                <div class="card-body">
+                    <div class="small text-muted">Manufacturer Reserve</div>
+                    <h3 class="mb-0 text-warning">KSh {{ "%.2f"|format(snapshot.manufacturer_reserve) }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm border-start border-info border-4">
+                <div class="card-body">
+                    <div class="small text-muted">Available Balance</div>
+                    <h3 class="mb-0 text-info">KSh {{ "%.2f"|format(snapshot.available_balance) }}</h3>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Automation Queue</h5>
+                    <span class="badge bg-warning text-dark">MVP only</span>
+                </div>
+                <div class="card-body p-0 table-responsive">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Recipient</th>
+                                <th>Type</th>
+                                <th>Amount</th>
+                                <th>Destination</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in snapshot.pending_withdrawals %}
+                            <tr>
+                                <td>{{ item.user.username if item.user else 'Seller' }}</td>
+                                <td><span class="badge bg-info">Seller withdrawal</span></td>
+                                <td>KSh {{ "%.2f"|format(item.amount) }}</td>
+                                <td>{{ item.method }} - {{ item.destination }}</td>
+                                <td>{{ item.status }}</td>
+                            </tr>
+                            {% endfor %}
+                            {% for salary in snapshot.pending_salaries %}
+                            <tr>
+                                <td>{{ salary.admin.username if salary.admin else 'Admin/Employee' }}</td>
+                                <td><span class="badge bg-warning text-dark">Salary</span></td>
+                                <td>KSh {{ "%.2f"|format(salary.amount) }}</td>
+                                <td>{{ (salary.payment_method or 'mpesa')|upper }} - {{ salary.account_number or (salary.admin.salary_account_number if salary.admin else 'not set') }}</td>
+                                <td>{{ salary.status }}</td>
+                            </tr>
+                            {% endfor %}
+                            {% if snapshot.manufacturer_reserve > 0 %}
+                            <tr>
+                                <td>Manufacturers</td>
+                                <td><span class="badge bg-success">Manufacturer reserve</span></td>
+                                <td>KSh {{ "%.2f"|format(snapshot.manufacturer_reserve) }}</td>
+                                <td>Supplier payable ledger</td>
+                                <td>ready</td>
+                            </tr>
+                            {% endif %}
+                            {% if not snapshot.pending_withdrawals and not snapshot.pending_salaries and snapshot.manufacturer_reserve <= 0 %}
+                            <tr><td colspan="5" class="text-center text-muted py-4">No queued disbursements</td></tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="col-xl-5">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">Set Salary & Disbursement Account</h5></div>
+                <div class="card-body">
+                    <form method="POST" class="row g-3">
+                        <input type="hidden" name="action" value="save_salary">
+                        <div class="col-12">
+                            <label class="form-label">Admin / Worker</label>
+                            <select name="admin_id" class="form-select" required>
+                                <option value="">Select admin or promoted worker</option>
+                                {% for admin in admins %}
+                                <option value="{{ admin.id }}">{{ admin.username }} - {{ admin.admin_level|upper }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Monthly Salary</label>
+                            <input type="number" name="amount" min="1" step="0.01" class="form-control" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Start Date</label>
+                            <input type="date" name="work_start_date" class="form-control" required>
+                        </div>
+                        <div class="col-md-5">
+                            <label class="form-label">Payment Method</label>
+                            <select name="payment_method" class="form-select">
+                                <option value="mpesa">M-Pesa</option>
+                                <option value="bank">Bank</option>
+                            </select>
+                        </div>
+                        <div class="col-md-7">
+                            <label class="form-label">M-Pesa / Bank Account Number</label>
+                            <input name="account_number" class="form-control" placeholder="2547... or bank account" required>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">MVP Notes</label>
+                            <textarea name="notes" class="form-control" rows="3" placeholder="Role, schedule, salary notes, approval context"></textarea>
+                        </div>
+                        <div class="col-12">
+                            <button class="btn btn-gold w-100"><i class="fas fa-calendar-check me-1"></i> Save Salary Setup</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">Admin/Employee Payroll</h5></div>
+                <div class="card-body">
+                    {% for admin in admins %}
+                    <div class="d-flex justify-content-between border-bottom py-2">
+                        <span>
+                            {{ admin.username }} <small class="text-muted">{{ admin.admin_level|upper }}</small>
+                            <div class="small text-muted">
+                                {{ admin.salary_payment_method|upper if admin.salary_payment_method else 'No method' }}
+                                {{ admin.salary_account_number or 'No account saved' }}
+                                {% if admin.work_start_date %} - starts {{ admin.work_start_date.strftime('%d %b %Y') }}{% endif %}
+                            </div>
+                        </span>
+                        <span class="badge bg-{{ 'warning' if admin.admin_level == 'mvp' else 'secondary' }}">{{ 'MVP' if admin.admin_level == 'mvp' else 'Admin' }}</span>
+                    </div>
+                    {% else %}
+                    <p class="text-muted">No admins found.</p>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Manufacturer Payables</h5></div>
+                <div class="card-body">
+                    {% for manufacturer in manufacturers %}
+                    <div class="d-flex justify-content-between border-bottom py-2">
+                        <span>{{ manufacturer.name }} <small class="text-muted">{{ manufacturer.country }}</small></span>
+                        <span>{{ manufacturer.product_categories }}</span>
+                    </div>
+                    {% else %}
+                    <p class="text-muted">No manufacturers saved.</p>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mt-4">
+        <div class="card-header bg-white"><h5 class="mb-0">Payment Ledger</h5></div>
+        <div class="card-body p-0 table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>ID</th>
+                        <th>Direction</th>
+                        <th>Type</th>
+                        <th>Recipient/Order</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                        <th>Date</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for txn in transactions %}
+                    <tr>
+                        <td>{{ txn.id }}</td>
+                        <td>
+                            {% if txn.amount >= 0 %}
+                            <span class="badge bg-success">Incoming</span>
+                            {% else %}
+                            <span class="badge bg-danger">Outgoing</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ (txn.type or 'payment').replace('_', ' ')|title }}</td>
+                        <td>
+                            {% if txn.order_id %}<a href="{{ url_for('admin_order_detail', order_id=txn.order_id) }}">Order #{{ txn.order_id }}</a>{% endif %}
+                            {% if txn.user %}<div>{{ txn.user.username }}</div>{% endif %}
+                            <div class="small text-muted">{{ txn.description }}</div>
+                        </td>
+                        <td class="{{ 'text-success' if txn.amount >= 0 else 'text-danger' }}">KSh {{ "%.2f"|format(txn.amount) }}</td>
+                        <td>{{ txn.status }}</td>
+                        <td>{{ txn.created_at.strftime('%d %b %Y %H:%M') if txn.created_at else 'N/A' }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="7" class="text-center text-muted py-4">No ledger activity yet</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

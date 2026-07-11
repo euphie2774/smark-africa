@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}Track Order - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <h2 class="mb-4"><i class="fas fa-truck me-2"></i>Track Your Order</h2>
+
+            <div class="card shadow-sm mb-4">
+                <div class="card-body">
+                    <form method="GET" class="row g-3">
+                        <div class="col-md-8">
+                            <input type="text" class="form-control form-control-lg" name="order_id" placeholder="Enter Order ID or Tracking Number" value="{{ request.args.get('order_id', '') }}" required>
+                        </div>
+                        <div class="col-md-4">
+                            <button type="submit" class="btn btn-success btn-lg w-100"><i class="fas fa-search me-1"></i> Track</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            {% if order %}
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-white">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h4 class="mb-0">Order #{{ order.id }}</h4>
+                        <span class="badge bg-{{ 'success' if order.payment_status == 'Paid' else 'warning' }}">{{ order.payment_status }}</span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="row mb-4">
+                        <div class="col-md-6">
+                            <p class="mb-1"><strong>Order Date:</strong> {{ order.created_at.strftime('%d %b %Y, %H:%M') }}</p>
+                            <p class="mb-1"><strong>Total:</strong> KSh {{ "%.2f"|format(order.total_amount) }}</p>
+                            <p class="mb-0"><strong>Status:</strong>
+                                <span class="badge bg-{{ 'success' if order.status == 'Delivered' else 'primary' if order.status == 'Processing' else 'secondary' }}">{{ order.status }}</span>
+                            </p>
+                        </div>
+                        <div class="col-md-6">
+                            {% if order.tracking_number %}
+                            <p class="mb-1"><strong>Tracking #:</strong> {{ order.tracking_number }}</p>
+                            {% endif %}
+                            {% if order.estimated_delivery %}
+                            <p class="mb-0"><strong>Est. Delivery:</strong> {{ order.estimated_delivery.strftime('%d %b %Y') }}</p>
+                            {% endif %}
+                            <p class="mb-1"><strong>Delivery:</strong> {{ (order.delivery_method or 'doorstep').replace('_', ' ')|title }}</p>
+                            {% if order.pickup_station %}<p class="mb-1"><strong>Pickup:</strong> {{ order.pickup_station }}</p>{% endif %}
+                            {% if eta_minutes %}
+                            <div class="alert alert-info py-2 mt-2 mb-0"><i class="fas fa-location-dot me-1"></i> Driver is approximately {{ eta_minutes }} minutes away.</div>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <!-- Tracking Timeline -->
+                    {% if tracking_updates %}
+                    <h5 class="mb-3">Tracking Updates</h5>
+                    <div class="timeline">
+                        {% for update in tracking_updates %}
+                        <div class="d-flex mb-3">
+                            <div class="me-3 text-center" style="width: 40px;">
+                                <div class="rounded-circle bg-{{ 'success' if loop.first else 'secondary' }} text-white d-flex align-items-center justify-content-center" style="width: 32px; height: 32px;">
+                                    <i class="fas fa-{{ 'check' if loop.first else 'circle' }}" style="font-size: 12px;"></i>
+                                </div>
+                            </div>
+                            <div>
+                                <p class="mb-0"><strong>{{ update.status }}</strong></p>
+                                <p class="mb-0 text-muted small">{{ update.location or '' }} — {{ update.created_at.strftime('%d %b %Y, %H:%M') }}</p>
+                                {% if update.description %}
+                                <p class="mb-0 text-muted small">{{ update.description }}</p>
+                                {% endif %}
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="text-muted">No tracking updates available yet.</p>
+                    {% endif %}
+
+                    <!-- Order Items -->
+                    <h5 class="mt-4 mb-3">Items</h5>
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead>
+                                <tr>
+                                    <th>Product</th>
+                                    <th>Qty</th>
+                                    <th>Price</th>
+                                    <th>Subtotal</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for item in order.items %}
+                                <tr>
+                                    <td>{{ item.product.name if item.product else 'Deleted Product' }}</td>
+                                    <td>{{ item.quantity }}</td>
+                                    <td>KSh {{ "%.2f"|format(item.price) }}</td>
+                                    <td>KSh {{ "%.2f"|format(item.price * item.quantity) }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            {% elif searched %}
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle me-2"></i> No order found with that ID. Please check and try again.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<style>
+.timeline .d-flex:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 20px;
+    top: 32px;
+    width: 2px;
+    height: calc(100% - 8px);
+    background: #dee2e6;
+}
+.timeline .d-flex {
+    position: relative;
+}
+</style>
+{% endblock %}

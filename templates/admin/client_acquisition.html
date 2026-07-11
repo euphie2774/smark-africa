@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Client Acquisition - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-user-plus me-2"></i>Client Acquisition Tools</h2>
+            <div class="small text-muted">Capture buyer, seller, shipper, and repeat-customer campaigns with next actions.</div>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-4">
+            <form method="POST" class="card border-0 shadow-sm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="card-header bg-white"><h5 class="mb-0">New Acquisition Lead</h5></div>
+                <div class="card-body">
+                    <label class="form-label">Segment</label>
+                    <select name="segment" class="form-select mb-3">
+                        <option value="repeat_buyer">Repeat buyer</option>
+                        <option value="new_buyer">New buyer</option>
+                        <option value="seller">Seller</option>
+                        <option value="shipper">Shipper / forwarder</option>
+                        <option value="bulk_buyer">Bulk buyer</option>
+                    </select>
+                    <label class="form-label">Channel</label>
+                    <select name="channel" class="form-select mb-3">
+                        <option value="referral">Referral</option>
+                        <option value="social">Social</option>
+                        <option value="email">Email</option>
+                        <option value="influencer">Influencer</option>
+                        <option value="organic">Organic</option>
+                    </select>
+                    <label class="form-label">Campaign</label>
+                    <input name="campaign" class="form-control mb-3" placeholder="June electronics reactivation">
+                    <label class="form-label">Target Offer</label>
+                    <input name="target_offer" class="form-control mb-3" placeholder="Coins, free delivery, verified seller deal">
+                    <label class="form-label">Next Action</label>
+                    <input name="next_action" class="form-control mb-3" placeholder="Call, email, retarget, publish offer">
+                    <button class="btn btn-gold w-100">Save Lead</button>
+                </div>
+            </form>
+        </div>
+        <div class="col-lg-8">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">High-Potential Offers</h5></div>
+                <div class="card-body row g-3">
+                    {% for product in products %}
+                    <div class="col-md-6">
+                        <div class="border rounded p-3 h-100">
+                            <strong>{{ product.name }}</strong>
+                            <div class="small text-muted">Sales {{ product.sales_count or 0 }} - Views {{ product.views_count or 0 }}</div>
+                            <div class="fw-bold text-success">KSh {{ "%.2f"|format(product.discounted_price or product.selling_price) }}</div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Pipeline</h5></div>
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light"><tr><th>Segment</th><th>Channel</th><th>Campaign</th><th>Score</th><th>Next Action</th></tr></thead>
+                        <tbody>
+                        {% for lead in leads %}
+                        <tr><td>{{ lead.segment.replace('_', ' ')|title }}</td><td>{{ lead.channel|title }}</td><td>{{ lead.campaign }}</td><td><span class="badge bg-success">{{ "%.0f"|format(lead.lead_score) }}</span></td><td>{{ lead.next_action }}</td></tr>
+                        {% else %}<tr><td colspan="5" class="text-center text-muted py-4">No acquisition leads yet.</td></tr>{% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

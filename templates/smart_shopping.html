@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}AI Shopping Assistant - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="mb-4">
+        <span class="market-kicker">Smart Shopping</span>
+        <h1>AI Shopping Assistant</h1>
+    </div>
+
+    <form method="POST" class="card border-0 shadow-sm mb-4">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+        <div class="card-body">
+            <label class="form-label">Tell us what you need</label>
+            <textarea name="prompt" rows="3" class="form-control form-control-lg" placeholder="I am a software engineering student with $700. Recommend the best laptop.">{{ prompt }}</textarea>
+            <div class="row g-3 mt-2 align-items-end">
+                <div class="col-md-4">
+                    <label class="form-label">Notify below price</label>
+                    <input name="target_price" type="number" step="0.01" class="form-control" placeholder="e.g. 25000">
+                </div>
+                <div class="col-md-4 form-check mt-4">
+                    <input class="form-check-input" type="checkbox" name="create_alert" value="1" id="create_alert">
+                    <label class="form-check-label" for="create_alert">Save as price alert</label>
+                </div>
+                <div class="col-md-4">
+                    <button class="btn btn-gold w-100"><i class="fas fa-wand-magic-sparkles me-1"></i> Recommend</button>
+                </div>
+            </div>
+        </div>
+    </form>
+
+    {% if recommendations %}
+    {% if comparison %}
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-white"><h5 class="mb-0">Automatic Product Comparison</h5></div>
+        <div class="card-body p-0 table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Product</th>
+                        <th>Price</th>
+                        <th>Rating</th>
+                        <th>Stock</th>
+                        <th>Best For</th>
+                        <th>Risk</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in comparison %}
+                    <tr>
+                        <td><strong>{{ item.name }}</strong><div class="small text-muted">{{ item.category }}</div></td>
+                        <td>KSh {{ "%.2f"|format(item.price) }}</td>
+                        <td>{{ "%.1f"|format(item.rating or 0) }}/5</td>
+                        <td>{{ item.stock }}</td>
+                        <td>{{ item.best_for }}</td>
+                        <td>{{ item.risk }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="row g-4">
+        {% for item in recommendations %}
+        {% set product = item.product %}
+        <div class="col-md-6 col-xl-4">
+            <div class="card border-0 shadow-sm h-100">
+                {% if product.image_url %}<img src="{{ product.image_url }}" class="card-img-top" style="height:190px; object-fit:cover;" alt="{{ product.name }}">{% endif %}
+                <div class="card-body">
+                    <h5>{{ product.name }}</h5>
+                    <p class="small text-muted">{{ item.reason }}</p>
+                    <div class="fw-bold text-success mb-2">KSh {{ "%.2f"|format(product.discounted_price or product.selling_price) }}</div>
+                    <a href="{{ url_for('product_page', slug=product.slug) }}" class="btn btn-outline-gold btn-sm">View Product</a>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% elif prompt %}
+    <div class="alert alert-info">No strong matches yet. Try adding a budget, category, use case, or preferred feature.</div>
+    {% endif %}
+</div>
+{% endblock %}

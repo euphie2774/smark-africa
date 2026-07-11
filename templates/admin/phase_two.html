@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Protection Desk - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="fas fa-scale-balanced me-2"></i>Phase Two Protection Desk</h2>
+        <div class="btn-group">
+            <a href="{{ url_for('admin_messages') }}" class="btn btn-outline-success">Admin Messages</a>
+            {% if current_user.admin_level == 'mvp' %}
+            <a href="{{ url_for('admin_manufacturers') }}" class="btn btn-outline-warning">Manufacturers</a>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Claims</h6><h2>{{ claims|length }}</h2></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Verifications</h6><h2>{{ verifications|length }}</h2></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Withdrawals</h6><h2>{{ withdrawals|length }}</h2></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Feedback</h6><h2>{{ feedback|length }}</h2></div></div></div>
+    </div>
+
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-white"><h5 class="mb-0">Open Claims</h5></div>
+        <div class="card-body p-0 table-responsive">
+            <table class="table table-hover mb-0">
+                <thead><tr><th>Order</th><th>Customer</th><th>Reason</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead>
+                <tbody>
+                {% for claim in claims %}
+                <tr>
+                    <td>{{ claim.order.order_number if claim.order else claim.order_id }}</td>
+                    <td>{{ claim.claimant.username if claim.claimant else '-' }}</td>
+                    <td>{{ claim.reason }}</td>
+                    <td>KSh {{ "%.2f"|format(claim.amount or 0) }}</td>
+                    <td>{{ claim.status }}</td>
+                    <td>
+                        <form method="POST" action="{{ url_for('admin_resolve_claim', claim_id=claim.id) }}" class="d-flex gap-2">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input name="resolution" class="form-control form-control-sm" placeholder="Resolution note">
+                            <button name="action" value="approve_refund" class="btn btn-sm btn-success">Refund</button>
+                            <button name="action" value="reject" class="btn btn-sm btn-outline-danger">Reject</button>
+                        </form>
+                    </td>
+                </tr>
+                {% else %}<tr><td colspan="6" class="text-center text-muted py-3">No claims yet.</td></tr>{% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-6">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Seller Verification</h5></div>
+                <div class="card-body">
+                    {% for item in verifications %}
+                    <div class="border-bottom py-2">
+                        <strong>{{ item.legal_name }}</strong> from {{ item.country }} <span class="badge bg-info">{{ item.status }}</span>
+                        <div class="small text-muted">{{ item.notes }}</div>
+                        <form class="mt-2 d-inline" method="POST" action="{{ url_for('admin_update_verification', verification_id=item.id, status='approve') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/><button class="btn btn-sm btn-success">Approve</button></form>
+                        <form class="mt-2 d-inline" method="POST" action="{{ url_for('admin_update_verification', verification_id=item.id, status='reject') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/><button class="btn btn-sm btn-outline-danger">Reject</button></form>
+                    </div>
+                    {% else %}<p class="text-muted">No seller applications.</p>{% endfor %}
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Customer Feedback Inbox</h5></div>
+                <div class="card-body">
+                    {% for item in feedback %}
+                    <div class="border-bottom py-2">
+                        <div class="d-flex justify-content-between gap-2">
+                            <div>
+                                <strong>{{ item.user.username if item.user else 'Guest' }}</strong>
+                                <span class="text-muted small">{{ item.created_at.strftime('%Y-%m-%d') }}</span>
+                            </div>
+                            <div>
+                                <span class="badge bg-warning text-dark">Experience {{ item.experience_rating }}/5</span>
+                                <span class="badge bg-success">Satisfaction {{ item.satisfaction_rating }}/5</span>
+                            </div>
+                        </div>
+                        <p class="mb-0">{{ item.improvement_text or 'No written feedback.' }}</p>
+                        <form method="POST" action="{{ url_for('admin_mark_feedback_read', feedback_id=item.id) }}" class="mt-2">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-outline-success"><i class="fas fa-check me-1"></i> Mark Read</button>
+                        </form>
+                    </div>
+                    {% else %}<p class="text-muted">No feedback yet.</p>{% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

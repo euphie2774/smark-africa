@@ -1,0 +1,383 @@
+{% extends "base.html" %}
+{% block title %}Live Price Intelligence - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-chart-line me-2"></i>Live Price Intelligence</h2>
+            <div class="small text-muted">Last tick: <span id="market-updated">{{ market_payload.updated_at }}</span></div>
+        </div>
+        <div class="d-flex gap-2">
+            <a href="{{ url_for('admin_market_news') }}" class="btn btn-outline-success"><i class="fas fa-newspaper me-1"></i> Price News</a>
+            <a href="{{ url_for('admin_business_intelligence') }}" class="btn btn-outline-warning"><i class="fas fa-brain me-1"></i> BI Dashboard</a>
+            <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-success"><i class="fas fa-arrow-left me-1"></i> Dashboard</a>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-lg-3 col-md-6">
+            <label class="form-label">Category</label>
+            <select id="market-category" class="form-select">
+                <option value="all" {{ 'selected' if selected_category == 'all' }}>All categories</option>
+                {% for category in categories %}
+                <option value="{{ category.id }}" {{ 'selected' if selected_category|string == category.id|string }}>{{ category.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <label class="form-label">Chart</label>
+            <select id="market-chart-type" class="form-select">
+                <option value="line">Line</option>
+                <option value="bar">Bar</option>
+                <option value="radar">Radar</option>
+                <option value="doughnut">Doughnut</option>
+            </select>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <label class="form-label">Movement</label>
+            <div class="form-control d-flex align-items-center justify-content-between">
+                <span id="market-status">Active</span>
+                <span class="badge bg-success" id="market-pulse">1s</span>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <label class="form-label">Signals</label>
+            <div class="form-control"><span id="market-signal-count">{{ market_payload.rows|length }}</span> tracked</div>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-8">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Worldwide Product Price Movement</h5>
+                    <span class="badge bg-warning text-dark">Admin/MVP</span>
+                </div>
+                <div class="card-body">
+                    <div class="market-chart-wrap">
+                        <canvas id="marketChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-xl-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-header bg-white"><h5 class="mb-0">Daily Supplier Signals</h5></div>
+                <div class="card-body" id="market-feed"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4 mt-1">
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">MVP Pricing Suggestions</h5></div>
+                <div class="card-body p-0 table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light"><tr><th>Product</th><th>Current</th><th>Suggested</th><th>Reason</th></tr></thead>
+                        <tbody>
+                            {% for item in pricing_suggestions %}
+                            <tr><td>{{ item.product.name }}</td><td>KSh {{ "%.2f"|format(item.current) }}</td><td>KSh {{ "%.2f"|format(item.suggested) }}</td><td>{{ item.reason }}</td></tr>
+                            {% else %}<tr><td colspan="4" class="text-center text-muted py-4">Pricing suggestions are MVP-only unless enabled for admins.</td></tr>{% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-5">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Automated Low Stock Warnings</h5></div>
+                <div class="card-body">
+                    {% for product in stock_warnings %}
+                    <div class="d-flex justify-content-between border-bottom py-2"><span>{{ product.name }}</span><span class="badge bg-danger">{{ product.stock }} left</span></div>
+                    {% else %}<p class="text-muted">No urgent stock warnings.</p>{% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mt-4">
+        <div class="card-header bg-white"><h5 class="mb-0">Category Analysis</h5></div>
+        <div class="card-body p-0 table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Category</th>
+                        <th>Current Avg</th>
+                        <th>Predicted Next</th>
+                        <th>Kenya vs World</th>
+                        <th>Movement</th>
+                        <th>Source</th>
+                        <th>Updated</th>
+                    </tr>
+                </thead>
+                <tbody id="market-table"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+const initialMarket = {{ market_payload|tojson }};
+const marketCategory = document.getElementById('market-category');
+const chartType = document.getElementById('market-chart-type');
+const marketUpdated = document.getElementById('market-updated');
+const marketPulse = document.getElementById('market-pulse');
+const marketSignalCount = document.getElementById('market-signal-count');
+const marketTable = document.getElementById('market-table');
+const marketFeed = document.getElementById('market-feed');
+let pulseOn = false;
+let marketChart;
+let lastMarketData = initialMarket;
+
+function money(value) {
+    return 'KSh ' + Number(value || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function movementBadge(direction, percent) {
+    const cls = direction === 'increase' ? 'danger' : direction === 'drop' ? 'success' : 'secondary';
+    const icon = direction === 'increase' ? 'fa-arrow-trend-up' : direction === 'drop' ? 'fa-arrow-trend-down' : 'fa-minus';
+    return `<span class="badge bg-${cls}"><i class="fas ${icon} me-1"></i>${direction} ${Number(percent).toFixed(2)}%</span>`;
+}
+
+function renderTables(data) {
+    marketTable.innerHTML = data.rows.map(row => `
+        <tr>
+            <td><span class="market-dot" style="background:${row.color}"></span><strong>${row.category}</strong></td>
+            <td>${money(row.current_price)}</td>
+            <td>${money(row.predicted_price)}</td>
+            <td><strong>${money(row.kenya_price)}</strong><div class="small text-muted">World: ${money(row.world_price)}</div></td>
+            <td>${movementBadge(row.direction, row.percent_change)}</td>
+            <td><div>${row.source}</div><div class="small text-muted">${row.headline}</div></td>
+            <td>${row.updated_at}</td>
+        </tr>
+    `).join('');
+
+    marketFeed.innerHTML = data.rows.slice(0, 8).map(row => `
+        <div class="market-feed-item">
+            <div class="d-flex justify-content-between gap-2">
+                <strong>${row.category}</strong>
+                ${movementBadge(row.direction, row.percent_change)}
+            </div>
+            <div class="small text-muted">${row.headline}</div>
+            <div class="small">${row.source} - ${money(row.predicted_price)}</div>
+        </div>
+    `).join('');
+}
+
+function chartConfig(data, type) {
+    const shared = {
+        labels: data.labels,
+        datasets: [
+            {
+                label: 'Current average',
+                data: data.current_prices,
+                borderColor: '#c9922a',
+                backgroundColor: 'rgba(201,146,42,0.25)',
+                borderWidth: 2,
+                tension: 0.35
+            },
+            {
+                label: 'Predicted next tick',
+                data: data.predicted_prices,
+                borderColor: '#2da06a',
+                backgroundColor: data.colors,
+                borderWidth: 2,
+                tension: 0.35
+            }
+        ]
+    };
+    if (type === 'doughnut') {
+        shared.datasets = [{
+            label: 'Predicted next tick',
+            data: data.predicted_prices,
+            backgroundColor: data.colors,
+            borderWidth: 1
+        }];
+    }
+    return {
+        type,
+        data: shared,
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: {duration: 450},
+            interaction: {mode: 'index', intersect: false},
+            plugins: {
+                legend: {labels: {color: '#f0ede4'}},
+                tooltip: {callbacks: {label: item => `${item.dataset.label}: ${money(item.raw)}`}}
+            },
+            scales: type === 'doughnut' ? {} : {
+                x: {ticks: {color: '#b8c9b2'}, grid: {color: 'rgba(255,255,255,0.08)'}},
+                y: {ticks: {color: '#b8c9b2'}, grid: {color: 'rgba(255,255,255,0.08)'}}
+            }
+        }
+    };
+}
+
+function renderChart(data) {
+    lastMarketData = data;
+    if (typeof Chart === 'undefined') {
+        drawFallbackChart(data);
+        return;
+    }
+    if (marketChart) {
+        marketChart.destroy();
+    }
+    marketChart = new Chart(document.getElementById('marketChart'), chartConfig(data, chartType.value));
+}
+
+function updateChartData(data) {
+    lastMarketData = data;
+    if (typeof Chart === 'undefined') {
+        drawFallbackChart(data);
+        return;
+    }
+    if (!marketChart || marketChart.config.type !== chartType.value) {
+        renderChart(data);
+        return;
+    }
+    marketChart.data.labels = data.labels;
+    if (chartType.value === 'doughnut') {
+        marketChart.data.datasets[0].data = data.predicted_prices;
+        marketChart.data.datasets[0].backgroundColor = data.colors;
+    } else {
+        marketChart.data.datasets[0].data = data.current_prices;
+        marketChart.data.datasets[1].data = data.predicted_prices;
+        marketChart.data.datasets[1].backgroundColor = data.colors;
+    }
+    marketChart.update();
+}
+
+function drawFallbackChart(data) {
+    const canvas = document.getElementById('marketChart');
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(320, rect.width) * dpr;
+    canvas.height = Math.max(300, rect.height) * dpr;
+    canvas.style.width = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const width = rect.width;
+    const height = rect.height;
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#1f4530';
+    ctx.fillRect(0, 0, width, height);
+    const values = data.predicted_prices.length ? data.predicted_prices : [0];
+    const maxValue = Math.max(...values, ...data.current_prices, 1);
+    const pad = 44;
+
+    if (chartType.value === 'doughnut') {
+        const total = values.reduce((sum, value) => sum + value, 0) || 1;
+        let start = -Math.PI / 2;
+        const cx = width / 2;
+        const cy = height / 2;
+        const radius = Math.min(width, height) * 0.32;
+        values.forEach((value, index) => {
+            const angle = (value / total) * Math.PI * 2;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.arc(cx, cy, radius, start, start + angle);
+            ctx.closePath();
+            ctx.fillStyle = data.colors[index] || '#c9922a';
+            ctx.fill();
+            start += angle;
+        });
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius * 0.55, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+        return;
+    }
+
+    if (chartType.value === 'radar') {
+        const cx = width / 2;
+        const cy = height / 2;
+        const radius = Math.min(width, height) * 0.36;
+        ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+        for (let ring = 1; ring <= 4; ring++) {
+            ctx.beginPath();
+            values.forEach((_, index) => {
+                const angle = (index / values.length) * Math.PI * 2 - Math.PI / 2;
+                const x = cx + Math.cos(angle) * radius * ring / 4;
+                const y = cy + Math.sin(angle) * radius * ring / 4;
+                index ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+            });
+            ctx.closePath();
+            ctx.stroke();
+        }
+        ctx.beginPath();
+        values.forEach((value, index) => {
+            const angle = (index / values.length) * Math.PI * 2 - Math.PI / 2;
+            const r = (value / maxValue) * radius;
+            const x = cx + Math.cos(angle) * r;
+            const y = cy + Math.sin(angle) * r;
+            index ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        });
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(45,160,106,0.35)';
+        ctx.strokeStyle = '#2da06a';
+        ctx.fill();
+        ctx.stroke();
+        return;
+    }
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.beginPath();
+    ctx.moveTo(pad, pad);
+    ctx.lineTo(pad, height - pad);
+    ctx.lineTo(width - pad, height - pad);
+    ctx.stroke();
+
+    const step = (width - pad * 2) / Math.max(1, values.length - 1);
+    if (chartType.value === 'bar') {
+        const barWidth = Math.max(12, step * 0.45);
+        values.forEach((value, index) => {
+            const barHeight = ((height - pad * 2) * value) / maxValue;
+            const x = pad + index * step - barWidth / 2;
+            const y = height - pad - barHeight;
+            ctx.fillStyle = data.colors[index] || '#2da06a';
+            ctx.fillRect(x, y, barWidth, barHeight);
+        });
+        return;
+    }
+
+    ctx.beginPath();
+    values.forEach((value, index) => {
+        const x = pad + index * step;
+        const y = height - pad - ((height - pad * 2) * value) / maxValue;
+        index ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.strokeStyle = '#2da06a';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+}
+
+async function fetchMarket() {
+    const response = await fetch(`{{ url_for('admin_market_intelligence_api') }}?category=${encodeURIComponent(marketCategory.value)}`);
+    if (!response.ok) return;
+    const data = await response.json();
+    marketUpdated.textContent = data.updated_at;
+    marketSignalCount.textContent = data.rows.length;
+    pulseOn = !pulseOn;
+    marketPulse.className = `badge bg-${pulseOn ? 'success' : 'warning'}`;
+    updateChartData(data);
+    renderTables(data);
+}
+
+chartType.addEventListener('change', fetchMarket);
+marketCategory.addEventListener('change', fetchMarket);
+window.addEventListener('resize', () => {
+    if (typeof Chart === 'undefined') drawFallbackChart(lastMarketData);
+});
+renderChart(initialMarket);
+renderTables(initialMarket);
+setInterval(fetchMarket, 1000);
+</script>
+{% endblock %}

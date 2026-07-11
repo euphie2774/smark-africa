@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Manage Products - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="fas fa-box me-2"></i>Manage Products</h2>
+        <a href="{{ url_for('admin_add_product') }}" class="btn btn-success"><i class="fas fa-plus me-1"></i> Add Product</a>
+    </div>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>ID</th>
+                            <th>Image</th>
+                            <th>Name</th>
+                            <th>Category</th>
+                            <th>Price</th>
+                            <th>Discount</th>
+                            <th>Buying</th>
+                            <th>Type</th>
+                            <th>Stock</th>
+                            <th>Active</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for product in products %}
+                        <tr>
+                            <td>{{ product.id }}</td>
+                            <td>
+                                {% if product.image_url %}
+                                <img src="{{ product.image_url }}" width="50" height="50" style="object-fit: cover;" class="rounded">
+                                {% else %}
+                                <span class="text-muted">No img</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ product.name[:40] }}</td>
+                            <td>{{ product.category.name if product.category else '-' }}</td>
+                            <td>KSh {{ "%.2f"|format(product.selling_price) }}</td>
+                            <td>
+                                {% if product.discount_percent and product.discount_percent > 0 %}
+                                <span class="badge bg-danger">{{ product.discount_percent|int }}%</span>
+                                {% else %}
+                                <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                            <td>KSh {{ "%.2f"|format(product.buying_price) }}</td>
+                            <td>
+                                {% if product.is_digital %}
+                                <span class="badge bg-info">Digital</span>
+                                {% else %}
+                                <span class="badge bg-secondary">Physical</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ product.stock if not product.is_digital else '∞' }}</td>
+                            <td>
+                                <span class="badge bg-{{ 'success' if product.is_active else 'danger' }}">
+                                    {{ 'Yes' if product.is_active else 'No' }}
+                                </span>
+                            </td>
+                            <td>
+                                <div class="btn-group btn-group-sm">
+                                    <form method="POST" action="{{ url_for('admin_toggle_hot_sale', pid=product.id) }}" style="display:inline;">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button type="submit" class="btn btn-outline-warning" title="{{ 'Remove Hot Sale' if product.is_hot_sale else 'Make Hot Sale' }}">
+                                            <i class="fas fa-fire"></i>
+                                        </button>
+                                    </form>
+                                    <a href="{{ url_for('admin_edit_product', pid=product.id) }}" class="btn btn-outline-primary" title="Edit">
+                                        <i class="fas fa-edit"></i>
+                                    </a>
+                                    <form method="POST" action="{{ url_for('admin_delete_product', pid=product.id) }}" onsubmit="return confirm('Delete this product?');" style="display:inline;">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button type="submit" class="btn btn-outline-danger" title="Delete">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="11" class="text-center text-muted py-4">No products found</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

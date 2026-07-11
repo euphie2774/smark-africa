@@ -1,0 +1,50 @@
+﻿{% extends "base.html" %}
+{% block title %}Business Storefront - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="row g-4">
+        <div class="col-lg-5">
+            <h2 class="mb-2"><i class="fas fa-store me-2"></i>Business Storefront</h2>
+            <p class="text-muted">Apply for an approved digital storefront and sell through SMARKAFRICA on commission after successful sales.</p>
+            <form method="POST" class="card border-0 shadow-sm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label class="form-label">Business Name</label>
+                        <input name="business_name" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Categories</label>
+                        <input name="categories" class="form-control" placeholder="Electronics, Fashion, Services">
+                    </div>
+                    <button class="btn btn-gold w-100">Submit for Approval</button>
+                </div>
+            </form>
+        </div>
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">My Applications</h5></div>
+                <div class="card-body p-0 table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light"><tr><th>Business</th><th>Categories</th><th>Status</th><th>Commission</th></tr></thead>
+                        <tbody>
+                            {% for storefront in storefronts %}
+                            <tr>
+                                <td>{{ storefront.business_name }}</td>
+                                <td>{{ storefront.categories }}</td>
+                                <td><span class="badge bg-secondary">{{ storefront.status }}</span></td>
+                                <td>{{ storefront.commission_percent }}%</td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="4" class="text-center text-muted py-4">No storefront applications yet.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+

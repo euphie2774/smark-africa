@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}POS Reports - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-chart-column me-2"></i>POS Reports</h2>
+            <div class="small text-muted">Sales, profit, stock value, low stock, payment mix, cashier performance, and product movement.</div>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="{{ url_for('admin_pos_reports', period='daily') }}" class="btn btn-sm btn-outline-primary {{ 'active' if period == 'daily' else '' }}">Daily</a>
+            <a href="{{ url_for('admin_pos_reports', period='weekly') }}" class="btn btn-sm btn-outline-primary {{ 'active' if period == 'weekly' else '' }}">Weekly</a>
+            <a href="{{ url_for('admin_pos_reports', period='monthly') }}" class="btn btn-sm btn-outline-primary {{ 'active' if period == 'monthly' else '' }}">Monthly</a>
+            <a href="{{ url_for('admin_pos_reports', period='yearly') }}" class="btn btn-sm btn-outline-primary {{ 'active' if period == 'yearly' else '' }}">Yearly</a>
+            <a href="{{ url_for('admin_pos_reports', period=period, format='csv') }}" class="btn btn-sm btn-gold"><i class="fas fa-file-csv me-1"></i>CSV</a>
+            <a href="{{ url_for('admin_pos_reports', period=period, format='excel') }}" class="btn btn-sm btn-outline-success"><i class="fas fa-file-excel me-1"></i>Excel</a>
+            <a href="{{ url_for('admin_pos_reports', period=period, format='pdf') }}" class="btn btn-sm btn-outline-danger"><i class="fas fa-file-pdf me-1"></i>PDF</a>
+            <a href="{{ url_for('admin_pos') }}" class="btn btn-sm btn-outline-secondary">POS</a>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Sales</div><div class="h4 mb-0">KSh {{ "%.2f"|format(report.total_sales) }}</div></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Gross Profit</div><div class="h4 mb-0">KSh {{ "%.2f"|format(report.gross_profit) }}</div></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Inventory Value</div><div class="h4 mb-0">KSh {{ "%.2f"|format(report.inventory_value) }}</div></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><div class="small text-muted">Transactions</div><div class="h4 mb-0">{{ report.sales|length }}</div></div></div></div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Sales Register</h5></div>
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light"><tr><th>Receipt</th><th>Date</th><th>Cashier</th><th>Payment</th><th class="text-end">Total</th></tr></thead>
+                        <tbody>
+                        {% for sale in report.sales %}
+                        <tr><td><a href="{{ url_for('admin_pos_sale', sale_id=sale.id) }}">{{ sale.receipt_number }}</a></td><td>{{ sale.created_at.strftime('%d %b %H:%M') }}</td><td>{{ sale.cashier.username if sale.cashier else 'Unknown' }}</td><td>{{ sale.payment_method }}</td><td class="text-end">KSh {{ "%.2f"|format(sale.total_amount) }}</td></tr>
+                        {% else %}<tr><td colspan="5" class="text-center text-muted py-4">No sales in this period.</td></tr>{% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div class="col-xl-5">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0">Payment Mix</h5></div>
+                <div class="card-body">
+                    {% for method, amount in report.payment_totals %}
+                    <div class="d-flex justify-content-between border-bottom py-2"><span>{{ method|title }}</span><strong>KSh {{ "%.2f"|format(amount) }}</strong></div>
+                    {% else %}<div class="text-muted">No payment data.</div>{% endfor %}
+                </div>
+            </div>
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Cashier Performance</h5></div>
+                <div class="card-body">
+                    {% for cashier, amount in report.cashier_totals %}
+                    <div class="d-flex justify-content-between border-bottom py-2"><span>{{ cashier }}</span><strong>KSh {{ "%.2f"|format(amount) }}</strong></div>
+                    {% else %}<div class="text-muted">No cashier data.</div>{% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4 mt-1">
+        <div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-header bg-white"><h5 class="mb-0">Fast-Moving Products</h5></div><div class="card-body">{% for name, qty in report.fast_moving %}<div class="d-flex justify-content-between border-bottom py-2"><span>{{ name }}</span><strong>{{ qty }}</strong></div>{% else %}<div class="text-muted">No movement yet.</div>{% endfor %}</div></div></div>
+        <div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-header bg-white"><h5 class="mb-0">Slow-Moving Products</h5></div><div class="card-body">{% for name, qty in report.slow_moving %}<div class="d-flex justify-content-between border-bottom py-2"><span>{{ name }}</span><strong>{{ qty }}</strong></div>{% else %}<div class="text-muted">No movement yet.</div>{% endfor %}</div></div></div>
+        <div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-header bg-white"><h5 class="mb-0">Low Stock</h5></div><div class="card-body">{% for product in report.low_stock[:10] %}<div class="d-flex justify-content-between border-bottom py-2"><span>{{ product.name }}</span><strong>{{ product.stock }}</strong></div>{% else %}<div class="text-muted">No low stock warnings.</div>{% endfor %}</div></div></div>
+    </div>
+</div>
+{% endblock %}

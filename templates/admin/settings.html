@@ -1,0 +1,293 @@
+{% extends "base.html" %}
+{% block title %}Settings - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h2 class="mb-4"><i class="fas fa-cog me-2"></i>System Settings</h2>
+
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+        {% if current_user.admin_level == 'mvp' %}
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h5 class="mb-0">MVP Admin Login Security</h5>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-warning small">
+                    Use this before launch to replace the default MVP/admin login. Current password is required for any change here.
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Admin Username</label>
+                        <input type="text" name="admin_username" class="form-control" value="{{ current_user.username }}" autocomplete="username">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Admin Email</label>
+                        <input type="email" name="admin_email" class="form-control" value="{{ current_user.email }}" autocomplete="email">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Current Password</label>
+                        <input type="password" name="admin_current_password" class="form-control" autocomplete="current-password">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">New Password</label>
+                        <input type="password" name="admin_password" class="form-control" minlength="10" autocomplete="new-password">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Confirm New Password</label>
+                        <input type="password" name="admin_confirm_password" class="form-control" minlength="10" autocomplete="new-password">
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h5 class="mb-0">General Settings</h5>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Site Name</label>
+                        <input type="text" name="site_name" class="form-control" value="{{ settings.site_name or 'SMARKAFRICA' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Site Description</label>
+                        <input type="text" name="site_description" class="form-control" value="{{ settings.site_description or '' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Contact Email</label>
+                        <input type="email" name="contact_email" class="form-control" value="{{ settings.contact_email or '' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Contact Phone</label>
+                        <input type="text" name="contact_phone" class="form-control" value="{{ settings.contact_phone or '' }}">
+                    </div>
+                    {% if current_user.admin_level == 'mvp' %}
+                    <div class="col-md-6">
+                        <label class="form-label">Seller Applications</label>
+                        <select name="seller_signup_enabled" class="form-select">
+                            <option value="0" {{ 'selected' if settings.seller_signup_enabled != '1' else '' }}>Hidden until MVP enables</option>
+                            <option value="1" {{ 'selected' if settings.seller_signup_enabled == '1' else '' }}>Available to users</option>
+                        </select>
+                        <div class="form-text">When everything is ready, switch this on to show Become a Seller.</div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h5 class="mb-0">M-Pesa Daraja Settings</h5>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Consumer Key</label>
+                        <input type="text" name="daraja_consumer_key" class="form-control" value="{{ settings.daraja_consumer_key or '' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Consumer Secret</label>
+                        <input type="text" name="daraja_consumer_secret" class="form-control" value="{{ settings.daraja_consumer_secret or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Passkey</label>
+                        <input type="text" name="daraja_passkey" class="form-control" value="{{ settings.daraja_passkey or '' }}" placeholder="Leave blank when Daraja shows N/A">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Shortcode</label>
+                        <input type="text" name="daraja_shortcode" class="form-control" value="{{ settings.daraja_shortcode or '174379' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Business Name</label>
+                        <input type="text" name="business_name" class="form-control" value="{{ settings.business_name or 'SMARKAFRICA' }}">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">Daraja Environment</label>
+                        <select name="daraja_env" class="form-select">
+                            <option value="sandbox" {{ 'selected' if settings.daraja_env != 'production' else '' }}>Sandbox Mode (testing)</option>
+                            <option value="production" {{ 'selected' if settings.daraja_env == 'production' else '' }}>Production</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h5 class="mb-0">Email Settings</h5>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-info small">
+                    Free relay option: create a Brevo account, verify your sender, copy the SMTP login and key, then use smtp-relay.brevo.com on port 587. The app will send welcome emails, feedback auto-replies, and broadcasts through these settings.
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">SMTP Server</label>
+                        <input type="text" name="smtp_server" class="form-control" value="{{ settings.smtp_server or 'smtp.gmail.com' }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">SMTP Port</label>
+                        <input type="number" name="smtp_port" class="form-control" value="{{ settings.smtp_port or '587' }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">SMTP Use TLS</label>
+                        <select name="smtp_use_tls" class="form-select">
+                            <option value="1" {{ 'selected' if settings.smtp_use_tls else '' }}>Yes</option>
+                            <option value="0">No</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">SMTP Username (email)</label>
+                        <input type="email" name="smtp_username" class="form-control" value="{{ settings.smtp_username or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">SMTP Password</label>
+                        <input type="password" name="smtp_password" class="form-control" value="{{ settings.smtp_password or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">From Email</label>
+                        <input type="email" name="from_email" class="form-control" value="{{ settings.from_email or 'noreply@smarkafrica.africa' }}">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h5 class="mb-0">SEO & Google Tools</h5>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label">Google Analytics ID</label>
+                        <input name="google_analytics_id" class="form-control" value="{{ settings.google_analytics_id or '' }}" placeholder="G-XXXXXXXXXX">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Search Console Token</label>
+                        <input name="google_search_console_token" class="form-control" value="{{ settings.google_search_console_token or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Google Maps API Key</label>
+                        <input name="google_maps_api_key" class="form-control" value="{{ settings.google_maps_api_key or '' }}">
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">Site Keywords</label>
+                        <input name="site_keywords" class="form-control" value="{{ settings.site_keywords or '' }}">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h5 class="mb-0">Checkout Reach</h5>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-8">
+                        <label class="form-label">Allowed Checkout Countries</label>
+                        <input name="checkout_allowed_countries" class="form-control" value="{{ settings.checkout_allowed_countries or 'Kenya' }}" placeholder="Kenya or Kenya,Uganda,Tanzania or *">
+                        <div class="form-text">Use comma-separated countries, or * when the MVP is ready to open checkout everywhere.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Show Expansion Popup</label>
+                        <select name="show_country_launch_popup" class="form-select">
+                            <option value="1" {{ 'selected' if settings.show_country_launch_popup != '0' else '' }}>Yes</option>
+                            <option value="0" {{ 'selected' if settings.show_country_launch_popup == '0' else '' }}>No</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h5 class="mb-0">Performance, KYC, and Shopping Cards</h5>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label">Search Cache Seconds</label>
+                        <input name="product_search_cache_seconds" type="number" min="30" class="form-control" value="{{ settings.product_search_cache_seconds or '300' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Card Minimum Purchase KSh</label>
+                        <input name="shopping_card_min_purchase_kes" type="number" min="0" class="form-control" value="{{ settings.shopping_card_min_purchase_kes or '10000' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Credits per KSh 100</label>
+                        <input name="shopping_card_credits_per_100_kes" type="number" min="0" step="0.01" class="form-control" value="{{ settings.shopping_card_credits_per_100_kes or '1' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Card Issue Credit Threshold</label>
+                        <input name="shopping_card_min_credits" type="number" min="0" class="form-control" value="{{ settings.shopping_card_min_credits or '10000' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Card Issue Fee KSh</label>
+                        <input name="shopping_card_issue_fee_kes" type="number" min="0" step="0.01" class="form-control" value="{{ settings.shopping_card_issue_fee_kes or '700' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Card Number Prefix</label>
+                        <input name="shopping_card_prefix" class="form-control" value="{{ settings.shopping_card_prefix or '607845' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">KYC Provider</label>
+                        <select name="kyc_provider" class="form-select">
+                            <option value="inbuilt" {{ 'selected' if settings.kyc_provider != 'external' }}>Inbuilt review and fingerprinting</option>
+                            <option value="external" {{ 'selected' if settings.kyc_provider == 'external' }}>External provider configured separately</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">SMS OTP Enabled</label>
+                        <select name="sms_otp_enabled" class="form-select">
+                            <option value="0" {{ 'selected' if settings.sms_otp_enabled != '1' }}>Email OTP only</option>
+                            <option value="1" {{ 'selected' if settings.sms_otp_enabled == '1' }}>Email plus SMS provider hook</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h5 class="mb-0">Content Pages</h5>
+            </div>
+            <div class="card-body">
+                {% set can_edit_agreements = current_user.is_admin and current_user.admin_level == 'mvp' %}
+                {% if not can_edit_agreements %}
+                <div class="alert alert-info small">
+                    MVP access is required to edit About, Terms, and User Agreement content.
+                </div>
+                {% endif %}
+                <div class="mb-3">
+                    <label class="form-label">Vision Statement</label>
+                    <textarea name="vision" class="form-control" rows="3">{{ settings.vision or '' }}</textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Mission Statement</label>
+                    <textarea name="mission" class="form-control" rows="3">{{ settings.mission or '' }}</textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">About Content (HTML)</label>
+                    <textarea name="about_content" class="form-control" rows="5" {{ 'disabled' if not can_edit_agreements else '' }}>{{ settings.about_content or '' }}</textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Terms & Conditions (HTML)</label>
+                    <textarea name="terms_content" class="form-control" rows="8" {{ 'disabled' if not can_edit_agreements else '' }}>{{ settings.terms_content or '' }}</textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">User Agreement (HTML)</label>
+                    <textarea name="user_agreement_content" class="form-control" rows="8" {{ 'disabled' if not can_edit_agreements else '' }}>{{ settings.user_agreement_content or '' }}</textarea>
+                </div>
+            </div>
+        </div>
+
+        <div class="text-end">
+            <button type="submit" class="btn btn-success btn-lg px-5"><i class="fas fa-save me-2"></i> Save All Settings</button>
+        </div>
+    </form>
+</div>
+{% endblock %}

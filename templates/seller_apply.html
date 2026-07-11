@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Become a Seller - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="row g-4">
+        <div class="col-lg-5">
+            <h1 class="fw-bold">Seller Verification</h1>
+            <p class="text-muted">Attach a valid ID or passport, a clear face photo, phone details, country, and a bank card last four digits for buyer protection cases.</p>
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body">
+                    <h5 class="fw-bold mb-2">SmarkAfrica Free KYC</h5>
+                    <ul class="small text-muted mb-0">
+                        {% for item in kyc_policy %}
+                        <li>{{ item }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+            {% if verification %}
+            <div class="alert alert-info">
+                Latest status: <strong>{{ verification.status }}</strong><br>
+                Automated score: {{ "%.0f"|format(verification.automated_score or 0) }}%<br>
+                {{ verification.notes }}
+            </div>
+            {% endif %}
+        </div>
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <form method="POST" enctype="multipart/form-data" class="row g-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <div class="col-md-6">
+                            <label class="form-label">Legal Names</label>
+                            <input name="legal_name" class="form-control" required>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Country</label>
+                            <input name="country" class="form-control" required>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Phone</label>
+                            <input name="phone" class="form-control" value="{{ current_user.phone or '' }}" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Document Type</label>
+                            <select name="document_type" class="form-select">
+                                <option value="id">National ID</option>
+                                <option value="passport">Passport</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Bank Card Last 4 Digits</label>
+                            <input name="bank_card_last4" maxlength="4" pattern="[0-9]{4}" class="form-control" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Live Document Scan</label>
+                            <video id="document-video" class="capture-video mb-2" autoplay playsinline></video>
+                            <canvas id="document-canvas" class="d-none"></canvas>
+                            <input type="hidden" name="document_capture" id="document_capture">
+                            <button type="button" class="btn btn-outline-warning w-100" onclick="captureFrame('document')">Capture Document</button>
+                            <div class="form-text" id="document-status">Camera capture required.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Live Face Capture</label>
+                            <video id="selfie-video" class="capture-video mb-2" autoplay playsinline></video>
+                            <canvas id="selfie-canvas" class="d-none"></canvas>
+                            <input type="hidden" name="selfie_capture" id="selfie_capture">
+                            <button type="button" class="btn btn-outline-warning w-100" onclick="captureFrame('selfie')">Capture Face</button>
+                            <div class="form-text" id="selfie-status">Camera capture required.</div>
+                        </div>
+                        <div class="col-12">
+                            <button class="btn btn-gold btn-lg">Submit Verification</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+async function startCapture(videoId) {
+    const video = document.getElementById(videoId);
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        video.srcObject = stream;
+    } catch (err) {
+        video.insertAdjacentHTML('afterend', '<div class="alert alert-warning small">Camera access failed. Use a browser with camera permission enabled.</div>');
+    }
+}
+
+function captureFrame(kind) {
+    const video = document.getElementById(`${kind}-video`);
+    const canvas = document.getElementById(`${kind}-canvas`);
+    const hidden = document.getElementById(`${kind}_capture`);
+    const status = document.getElementById(`${kind}-status`);
+    canvas.width = video.videoWidth || 960;
+    canvas.height = video.videoHeight || 540;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    hidden.value = canvas.toDataURL('image/jpeg', 0.86);
+    status.textContent = 'Captured. Retake if unclear before submitting.';
+}
+
+startCapture('document-video');
+startCapture('selfie-video');
+</script>
+{% endblock %}

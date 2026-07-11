@@ -1,0 +1,124 @@
+﻿{% extends "base.html" %}
+{% block title %}Support - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="row g-4">
+        <div class="col-lg-5">
+            <h2 class="mb-2"><i class="fas fa-headset me-2"></i>Support</h2>
+            <p class="text-muted">Create a tracked ticket for orders, payments, delivery, seller issues, refunds, platform security, or urgent help.</p>
+            <a href="https://wa.me/254708615309" target="_blank" rel="noopener" class="btn btn-success w-100 mb-3">
+                <i class="fab fa-whatsapp me-1"></i> Urgent WhatsApp Support: 0708615309
+            </a>
+            <form method="POST" class="card border-0 shadow-sm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label class="form-label">Subject</label>
+                        <input name="subject" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Severity</label>
+                        <select name="severity" class="form-select">
+                            <option value="normal">Normal</option>
+                            <option value="high">High</option>
+                            <option value="urgent">Urgent</option>
+                            <option value="complex">Complex</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Preferred Channel</label>
+                        <select name="channel" class="form-select">
+                            <option value="web">Web</option>
+                            <option value="email">Email</option>
+                            <option value="whatsapp">WhatsApp</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Details</label>
+                        <textarea name="body" class="form-control" rows="6" required></textarea>
+                    </div>
+                    <button class="btn btn-gold w-100">Create Ticket</button>
+                </div>
+            </form>
+        </div>
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white"><h5 class="mb-0"><i class="fas fa-robot me-1"></i> AI Support Chat</h5></div>
+                <div class="card-body">
+                    <div id="support-chat-log" class="support-chat-log mb-3">
+                        <div class="support-bubble bot">Hi. Ask me about refunds, STK payments, delivery, BNPL, storefronts, or account security.</div>
+                    </div>
+                    <form id="support-chat-form" class="input-group">
+                        <input id="support-chat-input" class="form-control" placeholder="Describe the issue">
+                        <button class="btn btn-gold"><i class="fas fa-paper-plane"></i></button>
+                    </form>
+                </div>
+            </div>
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">My Recent Tickets</h5></div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0">
+                            <thead class="table-light"><tr><th>Subject</th><th>Severity</th><th>Status</th><th>Due</th></tr></thead>
+                            <tbody>
+                                {% for ticket in tickets %}
+                                <tr>
+                                    <td>{{ ticket.subject }}</td>
+                                    <td>{{ ticket.severity }}</td>
+                                    <td><span class="badge bg-secondary">{{ ticket.status }}</span></td>
+                                    <td>{{ ticket.resolution_due_at.strftime('%d %b %H:%M') if ticket.resolution_due_at else 'N/A' }}</td>
+                                </tr>
+                                {% else %}
+                                <tr><td colspan="4" class="text-center text-muted py-4">No tickets yet.</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const form = document.getElementById('support-chat-form');
+    const input = document.getElementById('support-chat-input');
+    const log = document.getElementById('support-chat-log');
+    function addBubble(text, who) {
+        const bubble = document.createElement('div');
+        bubble.className = `support-bubble ${who}`;
+        bubble.textContent = text;
+        log.appendChild(bubble);
+        log.scrollTop = log.scrollHeight;
+    }
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const message = input.value.trim();
+        if (!message) return;
+        addBubble(message, 'user');
+        input.value = '';
+        const response = await fetch('{{ url_for("support_chatbot") }}', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message})
+        });
+        const data = await response.json();
+        addBubble(data.reply, 'bot');
+        if (data.urgent) {
+            const link = document.createElement('a');
+            link.href = data.whatsapp_url;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            link.className = 'btn btn-sm btn-success mt-2';
+            link.innerHTML = '<i class="fab fa-whatsapp me-1"></i>Escalate on WhatsApp';
+            log.appendChild(link);
+        }
+    });
+})();
+</script>
+{% endblock %}
+

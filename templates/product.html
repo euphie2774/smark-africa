@@ -1,0 +1,260 @@
+{% extends 'base.html' %}
+{% block title %}{{ product.name }} - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="{{ url_for('shop') }}">Shop</a></li>
+        <li class="breadcrumb-item active">{{ product.name[:50] }}</li>
+    </ol>
+</nav>
+
+<div class="row g-5">
+    <!-- Product Image -->
+    <div class="col-md-6">
+        {% if gallery_images %}
+        <div class="position-relative">
+            <img src="{{ gallery_images[0] }}" id="main-product-image" class="img-fluid shadow-sm product-main-image" alt="{{ product.name }}">
+            {% if product.is_hot_sale %}<strong class="hot-sale-tag">Hot Sale</strong>{% endif %}
+            {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
+            {% if product.seller and product.seller.is_verified_seller %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+        </div>
+        {% if gallery_images|length > 1 %}
+        <div class="d-flex gap-2 mt-3 flex-wrap">
+            {% for image in gallery_images %}
+            <button type="button" class="btn p-0 border product-thumb" data-image="{{ image }}">
+                <img src="{{ image }}" alt="{{ product.name }} image {{ loop.index }}">
+            </button>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% else %}
+        <div class="bg-light rounded-3 d-flex align-items-center justify-content-center" style="height: 450px;">
+            <span class="text-muted fs-1">📦</span>
+        </div>
+        {% endif %}
+
+        <!-- Preview for digital products -->
+        {% if product.is_digital and product.file_path %}
+        <div class="mt-3">
+            {% if media_kind == 'audio' %}
+            <audio id="music-preview" controls preload="metadata" class="w-100" data-purchase-url="{{ url_for('add_to_cart', product_id=product.id) }}">
+                <source src="{{ url_for('preview_digital', pid=product.id) }}" type="audio/mpeg">
+            </audio>
+            <small class="text-muted d-block mt-1">Listen to a 5 second introduction. Purchase to download and hear the full track.</small>
+            {% elif media_kind == 'video' %}
+            <video id="music-preview" controls preload="metadata" class="w-100 rounded" data-purchase-url="{{ url_for('add_to_cart', product_id=product.id) }}">
+                <source src="{{ url_for('preview_digital', pid=product.id) }}" type="video/mp4">
+            </video>
+            <small class="text-muted d-block mt-1">Watch a 5 second introduction. Purchase to download and view the full file.</small>
+            {% else %}
+            <a href="{{ url_for('preview_digital', pid=product.id) }}" target="_blank" class="btn btn-outline-secondary btn-sm">
+                View Preview
+            </a>
+            <small class="text-muted ms-2">Preview is limited. Purchase to download the full file.</small>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Product Details -->
+    <div class="col-md-6">
+        <span class="badge bg-secondary mb-2">{{ product.category.name if product.category else 'General' }}</span>
+        {% if product.is_digital %}<span class="badge bg-info mb-2">Digital Product</span>{% endif %}
+        {% if product.is_featured %}<span class="badge bg-warning mb-2">Featured</span>{% endif %}
+        {% if product.is_hot_sale %}<span class="badge bg-danger mb-2">Hot Sale</span>{% endif %}
+        {% if product.is_original_source %}<span class="badge bg-success mb-2">Original</span>{% endif %}
+        {% if product.seller and product.seller.is_verified_seller %}<span class="badge bg-primary mb-2">Verified Seller</span>{% endif %}
+
+        <h1 class="fw-bold">{{ product.name }}</h1>
+        <p class="text-muted">{{ product.short_description }}</p>
+
+        <!-- Pricing -->
+        {% if product.discount_percent and product.discount_percent > 0 %}
+        <div class="mb-3">
+            <span class="text-muted text-decoration-line-through fs-4">KSh {{ "%.2f"|format(product.selling_price) }}</span>
+            <span class="badge bg-danger fs-6 ms-2">-{{ product.discount_percent|int }}% OFF</span>
+        </div>
+        <h2 class="text-success fw-bold">KSh {{ "%.2f"|format(product.selling_price * (1 - product.discount_percent/100)) }}</h2>
+        {% else %}
+        <h2 class="text-success fw-bold">KSh {{ "%.2f"|format(product.selling_price) }}</h2>
+        {% endif %}
+
+        <!-- Stock -->
+        {% if not product.is_digital %}
+        <p class="{% if product.stock > 0 %}text-success{% else %}text-danger{% endif %}">
+            {% if product.stock > 0 %}<strong>{{ product.stock }}</strong> in stock{% else %}Out of stock{% endif %}
+        </p>
+        {% else %}
+        <p class="text-info"><strong>Instant Digital Delivery</strong> — Download after purchase</p>
+        {% endif %}
+
+        <!-- Weight (physical) -->
+        {% if not product.is_digital and product.weight_kg > 0 %}
+        <p class="small text-muted">Weight: {{ product.weight_kg }} kg</p>
+        {% endif %}
+
+        {% if current_user.is_authenticated and product.category %}
+        <form method="POST" action="{{ url_for('follow_category', category_id=product.category.id) }}" class="mb-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+            <button class="btn btn-outline-success btn-sm">
+                <i class="fas fa-bell me-1"></i>{{ 'Unfollow' if is_following_category else 'Follow' }} {{ product.category.name }} updates
+            </button>
+        </form>
+        {% endif %}
+
+        <!-- Add to Cart -->
+        {% if product.is_active and (product.stock > 0 or product.is_digital) %}
+        <form method="POST" action="{{ url_for('add_to_cart', product_id=product.id) }}" class="mb-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+            <div class="row g-2 align-items-center">
+                <div class="col-auto">
+                    <label class="fw-bold">Quantity:</label>
+                </div>
+                <div class="col-auto">
+                    <input type="number" name="quantity" value="1" min="1" max="{{ product.stock if not product.is_digital else 99 }}" class="form-control" style="width: 80px;">
+                </div>
+                <div class="col-auto">
+                    <button type="submit" class="btn btn-warning btn-lg fw-bold px-5">Add to Cart</button>
+                </div>
+            </div>
+        </form>
+        {% else %}
+        <button class="btn btn-secondary btn-lg px-5" disabled>Out of Stock</button>
+        {% endif %}
+
+        {% if bnpl_policy and current_user.is_authenticated and not product.is_digital %}
+        <a href="{{ url_for('bnpl_apply', product_id=product.id) }}" class="btn btn-outline-warning btn-lg mb-3">
+            <i class="fas fa-calendar-check me-1"></i> Apply for BNPL
+        </a>
+        <div class="small text-muted mb-3">Deposit from {{ bnpl_policy.min_deposit_percent }}%, up to {{ bnpl_policy.max_term_months }} month(s).</div>
+        {% elif bnpl_policy and not current_user.is_authenticated %}
+        <a href="{{ url_for('login', next=url_for('product_page', slug=product.slug)) }}" class="btn btn-outline-warning btn-lg mb-3">
+            <i class="fas fa-calendar-check me-1"></i> Log in for BNPL
+        </a>
+        {% endif %}
+
+        {% if current_user.is_authenticated %}
+        <form method="POST" action="{{ url_for('product_price_alert', product_id=product.id) }}" class="card border-0 shadow-sm mb-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+            <div class="card-body">
+                <label class="form-label fw-bold">Notify me when price drops below</label>
+                <div class="input-group">
+                    <span class="input-group-text">KSh</span>
+                    <input type="number" step="0.01" min="1" name="target_price" class="form-control" placeholder="{{ (product.discounted_price or product.selling_price)|round|int }}">
+                    <button class="btn btn-outline-warning">Set Alert</button>
+                </div>
+            </div>
+        </form>
+        {% endif %}
+
+        <hr>
+
+        <!-- Description -->
+        <h5 class="fw-bold">Description</h5>
+        <div class="product-description">
+            {{ product.description|safe }}
+        </div>
+
+        <!-- File info (digital) -->
+        {% if product.is_digital and product.file_size %}
+        <p class="small text-muted mt-3">File size: {{ "%.1f"|format(product.file_size / (1024*1024)) }} MB</p>
+        {% if is_music_product %}
+        <p class="small text-muted">Music payouts are tracked as seller earnings after payment confirmation, with SMARKAFRICA commission handled through the same protected settlement flow used for other sellers.</p>
+        {% endif %}
+        {% endif %}
+    </div>
+</div>
+
+<!-- Reviews -->
+<div class="mt-5">
+    <h3 class="fw-bold mb-4">Reviews</h3>
+
+    {% if false %}
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-body">
+            <h5 class="fw-bold">Write a Review</h5>
+            <form method="POST" action="{{ url_for('submit_review', product_id=product.id) }}">
+                <div class="mb-3">
+                    <label class="form-label">Rating</label>
+                    <div class="rating-stars">
+                        {% for i in range(5, 0, -1) %}
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="rating" id="star{{ i }}" value="{{ i }}" {% if i == 5 %}checked{% endif %}>
+                            <label class="form-check-label" for="star{{ i }}">{{ i }} Star{{ 's' if i > 1 }}</label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label for="comment" class="form-label">Comment</label>
+                    <textarea name="comment" id="comment" class="form-control" rows="3" required></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">Submit Review</button>
+            </form>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if reviews %}
+    <div class="row g-3">
+        {% for review in reviews %}
+        <div class="col-md-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between">
+                        <strong>{{ review.author.username if review.author else 'Anonymous' }}</strong>
+                        <div>
+                            {% for s in range(review.rating) %}⭐{% endfor %}
+                            {% if review.is_admin_review %}<span class="badge bg-warning ms-1">Admin</span>{% endif %}
+                        </div>
+                    </div>
+                    <p class="mt-2 mb-0 small">{{ review.comment }}</p>
+                    <small class="text-muted">{{ review.created_at.strftime('%d %b %Y') }}</small>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-muted">No reviews yet. Be the first to review this product!</p>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+document.querySelectorAll('.product-thumb').forEach(button => {
+    button.addEventListener('click', () => {
+        const main = document.getElementById('main-product-image');
+        if (main) main.src = button.dataset.image;
+    });
+});
+
+const musicPreview = document.getElementById('music-preview');
+if (musicPreview) {
+    const showPurchasePrompt = () => {
+        musicPreview.pause();
+        const shouldBuy = confirm('Preview complete. Purchase this track to download and listen to the full file.');
+        if (shouldBuy) {
+            const form = document.querySelector('form[action="' + musicPreview.dataset.purchaseUrl + '"]');
+            form?.submit();
+        }
+    };
+    let prompted = false;
+    musicPreview.addEventListener('timeupdate', () => {
+        if (!prompted && musicPreview.currentTime >= 5) {
+            prompted = true;
+            showPurchasePrompt();
+        }
+    });
+    musicPreview.addEventListener('ended', () => {
+        if (!prompted) {
+            prompted = true;
+            showPurchasePrompt();
+        }
+    });
+}
+</script>
+{% endblock %}

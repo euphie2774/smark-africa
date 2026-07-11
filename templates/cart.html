@@ -1,0 +1,80 @@
+{% extends 'base.html' %}
+{% block title %}Cart - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<h1 class="fw-bold mb-4">Shopping Cart</h1>
+
+{% if cart_items %}
+<div class="table-responsive">
+    <table class="table align-middle">
+        <thead class="table-dark">
+            <tr>
+                <th>Product</th>
+                <th>Price</th>
+                <th>Quantity</th>
+                <th>Total</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in cart_items %}
+            <tr>
+                <td>
+                    <div class="d-flex align-items-center">
+                        {% if item.product.image_url %}
+                        <img src="{{ item.product.image_url }}" alt="{{ item.product.name }}" style="width: 60px; height: 60px; object-fit: cover;" class="rounded me-3">
+                        {% endif %}
+                        <div>
+                            <a href="{{ url_for('product_page', slug=item.product.slug) }}" class="text-decoration-none fw-bold">{{ item.product.name[:50] }}</a>
+                            {% if item.product.is_digital %}<span class="badge bg-info">Digital</span>{% endif %}
+                        </div>
+                    </div>
+                </td>
+                <td>
+                    {% if item.effective_price != item.product.selling_price %}
+                    <span class="text-muted text-decoration-line-through small">KSh {{ "%.2f"|format(item.product.selling_price) }}</span><br>
+                    <span class="text-success fw-bold">KSh {{ "%.2f"|format(item.effective_price) }}</span>
+                    {% else %}
+                    KSh {{ "%.2f"|format(item.product.selling_price) }}
+                    {% endif %}
+                </td>
+                <td>
+                    <form method="POST" action="{{ url_for('update_cart', item_id=item.id) }}" class="d-flex align-items-center gap-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="number" name="quantity" value="{{ item.quantity }}" min="1" max="{{ item.product.stock if not item.product.is_digital else 99 }}" class="form-control" style="width: 70px;">
+                        <button type="submit" class="btn btn-sm btn-outline-primary">Update</button>
+                    </form>
+                </td>
+                <td class="fw-bold">KSh {{ "%.2f"|format(item.subtotal) }}</td>
+                <td>
+                    <form method="POST" action="{{ url_for('remove_cart_item', item_id=item.id) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <button type="submit" class="btn btn-sm btn-danger">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+        <tfoot>
+            <tr class="table-secondary">
+                <td colspan="3" class="text-end fw-bold">Total:</td>
+                <td class="fw-bold fs-5 text-success">KSh {{ "%.2f"|format(total) }}</td>
+                <td></td>
+            </tr>
+        </tfoot>
+    </table>
+</div>
+
+<div class="d-flex justify-content-between mt-4">
+    <a href="{{ url_for('shop') }}" class="btn btn-outline-primary">Continue Shopping</a>
+    <a href="{{ url_for('checkout') }}" class="btn btn-warning btn-lg fw-bold px-5">Proceed to Checkout</a>
+</div>
+
+{% else %}
+<div class="text-center py-5">
+    <h3 class="text-muted">Your cart is empty</h3>
+    <p>Add some products to get started!</p>
+    <a href="{{ url_for('shop') }}" class="btn btn-warning btn-lg mt-3">Browse Products</a>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,468 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║         SMARK-AFRICA REWARDS CARD - COMPLETE WORKFLOW DIAGRAM                 ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+═══════════════════════════════════════════════════════════════════════════════
+PHASE 1: EARNING CREDITS
+═══════════════════════════════════════════════════════════════════════════════
+
+    ┌──────────────┐
+    │  Customer    │
+    │  Makes       │
+    │  Purchase    │
+    └──────┬───────┘
+           │
+           ├─────────────────────────────────────────┐
+           │                                         │
+           ▼                                         ▼
+    ┌──────────────┐                         ┌──────────────┐
+    │  Online      │                         │  POS         │
+    │  Order       │                         │  Purchase    │
+    └──────┬───────┘                         └──────┬───────┘
+           │                                         │
+           │ (Order completed)                       │ (Sale completed)
+           │                                         │
+           ▼                                         ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  System Calculates Credits                          │
+    │  • Purchase amount ÷ 100 × earning rate            │
+    │  • Default: KSh 10,000 → 100 credits (KSh 1.00)   │
+    │  • Minimum purchase: KSh 10,000                    │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  Credits Automatically Added to Customer Account    │
+    │  • Logged in LoyaltyLedger table                   │
+    │  • Also credited to ShoppingCard (if exists)       │
+    └─────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+PHASE 2: CARD ISSUANCE
+═══════════════════════════════════════════════════════════════════════════════
+
+    Customer Eligibility Check:
+
+    ┌─────────────────────────────────────────────────────┐
+    │  Is Customer Eligible for Card?                     │
+    ├─────────────────────────────────────────────────────┤
+    │  ✓ Has 10,000+ credits (free issuance)             │
+    │  ✓ Pays KSh 700 issue fee                          │
+    │  ✓ Is administrator (unrestricted)                 │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           │ YES
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  Admin Issues Card                                  │
+    │  1. Navigate to Admin → Shopping Cards             │
+    │  2. Select customer from dropdown                  │
+    │  3. Enter display name                             │
+    │  4. Enter issue fee (if applicable)                │
+    │  5. Click "Issue and Print"                        │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  System Generates Card                              │
+    │  • Unique card number (e.g., 607845123456)         │
+    │  • Random 4-digit PIN (never duplicated)           │
+    │  • Code128 barcode (SVG format)                    │
+    │  • Card status: Active                             │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  Card Print Page Opens Automatically                │
+    │  • Card design with embedded barcode               │
+    │  • PIN scratch slip                                │
+    │  • Print instructions                              │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  Admin Prints Card                                  │
+    │  • Print on PVC card stock (CR80 size)             │
+    │  • Apply scratch-off material over PIN             │
+    │  • Quality check barcode scans correctly           │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  Card Given to Customer                             │
+    │  • Physical card with barcode                      │
+    │  • PIN scratch slip                                │
+    │  • Usage instructions                              │
+    └─────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+PHASE 3: CARD USAGE AT POS
+═══════════════════════════════════════════════════════════════════════════════
+
+    ┌──────────────┐
+    │  Cashier     │
+    │  Starts Sale │
+    └──────┬───────┘
+           │
+           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  1. Add Products to Cart                            │
+    │     • Scan product barcodes                         │
+    │     • Or manually select products                   │
+    │     • Verify quantities and prices                  │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  2. Customer Presents Rewards Card                  │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  3. Cashier Scans Card Barcode                      │
+    │                                                     │
+    │  Scanning Options:                                  │
+    │  • Phone camera scanner                            │
+    │  • USB barcode scanner                             │
+    │  • Bluetooth scanner                               │
+    │  • Manual card number entry                        │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  System Detects Card Barcode                        │
+    │  • Prefix starts with 607XXX                       │
+    │  • NOT a product barcode                           │
+    │  • Triggers card payment flow                      │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  System Retrieves Card Details from Database        │
+    │  • Validates card is ACTIVE                        │
+    │  • Loads customer info                             │
+    │  • Calculates available balance                    │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  POS Displays Card Information                      │
+    │  • Card: •••• 3456                                 │
+    │  • Customer: John Doe                              │
+    │  • Balance: KSh 350.50                             │
+    │  • Status: Active                                  │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  Customer Details Auto-Filled                       │
+    │  • Name                                            │
+    │  • Email                                           │
+    │  • Phone                                           │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  Payment Method Auto-Selected                       │
+    │  • "Smark-Africa Card" selected                    │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  4. Cashier Requests PIN from Customer             │
+    │     • Customer scratches PIN panel (if first use)  │
+    │     • Customer reveals 4-digit PIN                 │
+    │     • Customer enters PIN in POS terminal          │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                           ▼
+    ┌─────────────────────────────────────────────────────┐
+    │  5. System Validates Transaction                    │
+    │                                                     │
+    │  Checks:                                            │
+    │  ✓ PIN is correct (bcrypt verification)            │
+    │  ✓ Card status is ACTIVE                           │
+    │  ✓ Balance ≥ Purchase amount                       │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                ┌──────────┴──────────┐
+                │                     │
+         PIN Valid?            PIN Invalid?
+                │                     │
+        ✓ YES   │                     │  ✗ NO
+                │                     │
+                ▼                     ▼
+    ┌─────────────────┐   ┌─────────────────────────────┐
+    │  Sufficient     │   │  Show Error Message         │
+    │  Balance?       │   │  "Invalid PIN"              │
+    └────┬────────────┘   │  • Customer re-enters PIN   │
+         │                │  • Max 3 attempts           │
+    ┌────┴────┐           └─────────────────────────────┘
+    │         │
+✓ YES       ✗ NO
+    │         │
+    │         ▼
+    │    ┌─────────────────────────────────────────────┐
+    │    │  Show Error: Insufficient Balance           │
+    │    │  Available: KSh XXX.XX                      │
+    │    │  Needed: KSh YYY.YY                         │
+    │    │                                             │
+    │    │  Options:                                   │
+    │    │  • Cancel transaction                       │
+    │    │  • Use split payment (card + cash)         │
+    │    │  • Fund card with more cash                │
+    │    └─────────────────────────────────────────────┘
+    │
+    ▼
+┌──────────────────────────────────────────────────────┐
+│  Transaction Approved - Deduct from Card             │
+│  • Priority: Use shopping credits first              │
+│  • Then use cash balance (if needed)                │
+│  • Update card balance in database                  │
+└──────────────────────┬───────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────┐
+│  Log Transaction                                     │
+│  • ShoppingCardTransaction record created           │
+│  • Transaction type: "redeem"                       │
+│  • Credit amount: -XXX credits                      │
+│  • Cash amount: -YY.YY KSh                          │
+│  • Balance after transaction                        │
+│  • Reference: POS sale ID                           │
+│  • Timestamp                                        │
+└──────────────────────┬───────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────┐
+│  Complete Sale                                       │
+│  • Deduct stock for physical products               │
+│  • Generate invoice & receipt                       │
+│  • Update sales statistics                          │
+└──────────────────────┬───────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────┐
+│  Print Receipt                                       │
+│  • Shows card details:                              │
+│    "Paid with Smark-Africa Card ending XXXX"       │
+│  • New balance (optional)                           │
+│  • Thank you message                                │
+└──────────────────────┬───────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────┐
+│  Email Receipt (Optional)                            │
+│  • If customer email provided                       │
+│  • PDF/HTML receipt attached                        │
+└──────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+PHASE 4: CARD MANAGEMENT
+═══════════════════════════════════════════════════════════════════════════════
+
+┌──────────────────────────────────────────────────────┐
+│  Admin Card Management Actions                       │
+├──────────────────────────────────────────────────────┤
+│                                                      │
+│  ✓ View All Issued Cards                            │
+│    • Card number (masked: •••• 1234)               │
+│    • Customer details                               │
+│    • Credit & cash balances                         │
+│    • Status                                         │
+│                                                      │
+│  ✓ Fund Card with Cash                              │
+│    • Admin adds cash balance                        │
+│    • Cash works same as credits                     │
+│    • Used for gift cards, promotions                │
+│                                                      │
+│  ✓ Change Card Status                               │
+│    • Active → Customer can use card                │
+│    • Blocked → Temporarily disabled                 │
+│    • Lost → Permanently disabled                    │
+│                                                      │
+│  ✓ Reprint Card                                      │
+│    • View card print page                           │
+│    • Print replacement card                         │
+│    • Note: PIN not shown (security)                │
+│                                                      │
+│  ✓ View Transaction History                          │
+│    • All card transactions                          │
+│    • Filter by card, customer, type                │
+│    • Export to CSV                                  │
+│                                                      │
+│  ✓ Reset PIN (via Reissuance)                       │
+│    • Issue new card with new PIN                    │
+│    • Transfer balance to new card                   │
+│    • Deactivate old card                            │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+SYSTEM ARCHITECTURE
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          SMARK-AFRICA PLATFORM                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │                        FLASK WEB APPLICATION                     │  │
+│  │                            (main.py)                             │  │
+│  ├─────────────────────────────────────────────────────────────────┤  │
+│  │                                                                  │  │
+│  │  Card Barcode Functions:                                         │  │
+│  │  • generate_card_barcode_svg()                                  │  │
+│  │  • find_card_by_barcode()                                       │  │
+│  │  • create_shopping_card()                                       │  │
+│  │  • credit_shopping_card()                                       │  │
+│  │  • redeem_shopping_card()                                       │  │
+│  │                                                                  │  │
+│  │  API Routes:                                                     │  │
+│  │  • GET /admin/cards/<id>/barcode.svg                           │  │
+│  │  • POST /admin/pos/scan-card                                   │  │
+│  │  • GET /admin/cards/<id>/print                                 │  │
+│  │                                                                  │  │
+│  └────────────────────────┬────────────────────────────────────────┘  │
+│                           │                                            │
+│                           ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │                      DATABASE (SQLAlchemy)                       │  │
+│  │                         (models.py)                              │  │
+│  ├─────────────────────────────────────────────────────────────────┤  │
+│  │                                                                  │  │
+│  │  ShoppingCard Table:                                             │  │
+│  │  • card_number (unique, indexed)                                │  │
+│  │  • pin_hash (bcrypt)                                            │  │
+│  │  • credit_balance (integer)                                     │  │
+│  │  • cash_balance (float)                                         │  │
+│  │  • status (active/blocked/lost)                                 │  │
+│  │                                                                  │  │
+│  │  ShoppingCardTransaction Table:                                  │  │
+│  │  • transaction_type                                             │  │
+│  │  • amounts (credit & cash)                                      │  │
+│  │  • balances after                                               │  │
+│  │  • references & timestamps                                      │  │
+│  │                                                                  │  │
+│  └────────────────────────┬────────────────────────────────────────┘  │
+│                           │                                            │
+│                           ▼                                            │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │                    BARCODE GENERATION                            │  │
+│  │                  (python-barcode library)                        │  │
+│  ├─────────────────────────────────────────────────────────────────┤  │
+│  │                                                                  │  │
+│  │  • Format: Code128                                              │  │
+│  │  • Output: SVG (scalable)                                       │  │
+│  │  • Configuration: module_width, height, quiet_zone             │  │
+│  │  • Text display: Enabled                                        │  │
+│  │                                                                  │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+                                    │
+                                    │
+                                    ▼
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          FRONTEND INTERFACES                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌──────────────────────────┐      ┌──────────────────────────┐       │
+│  │   ADMIN PORTAL           │      │   POS INTERFACE          │       │
+│  │   (Admin Users)          │      │   (Cashiers)             │       │
+│  ├──────────────────────────┤      ├──────────────────────────┤       │
+│  │                          │      │                          │       │
+│  │  • Issue cards           │      │  • Scan card barcodes    │       │
+│  │  • Fund cards            │      │  • Display card info     │       │
+│  │  • Change status         │      │  • Process payments      │       │
+│  │  • View transactions     │      │  • Enter PIN             │       │
+│  │  • Print cards           │      │  • Complete sales        │       │
+│  │                          │      │                          │       │
+│  └──────────────────────────┘      └──────────────────────────┘       │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+                                    │
+                                    │
+                                    ▼
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        BARCODE SCANNING DEVICES                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐      │
+│  │   Phone    │  │    USB     │  │ Bluetooth  │  │  Manual    │      │
+│  │  Scanner   │  │  Scanner   │  │  Scanner   │  │   Entry    │      │
+│  └────────────┘  └────────────┘  └────────────┘  └────────────┘      │
+│                                                                         │
+│  All scanners read Code128 barcodes from physical cards                │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+DATA FLOW: BARCODE SCAN TO PAYMENT
+═══════════════════════════════════════════════════════════════════════════════
+
+Physical Card             Scanner              POS Browser            Flask App
+     │                       │                       │                    │
+     │  [Barcode: 607845...]│                       │                    │
+     │ ────────────────────>│                       │                    │
+     │                       │                       │                    │
+     │                       │  POST /pos/scan-card  │                    │
+     │                       │ ───────────────────> │                    │
+     │                       │  {"barcode":"607845"} │                    │
+     │                       │                       │                    │
+     │                       │                       │  find_card_by_     │
+     │                       │                       │  barcode()         │
+     │                       │                       │ ─────────────────> │
+     │                       │                       │                    │
+     │                       │                       │  Query Database    │
+     │                       │                       │  ← ─ ─ ─ ─ ─ ─ ─ ─│
+     │                       │                       │                    │
+     │                       │  JSON response        │                    │
+     │                       │  {card details}       │                    │
+     │                       │ <─────────────────────│                    │
+     │                       │                       │                    │
+     │                       │  Display card info    │                    │
+     │                       │ ────────────────────> │                    │
+     │                       │  on screen            │                    │
+     │                       │                       │                    │
+Customer enters PIN         │                       │                    │
+     │ ─────────────────────────────────────────────>│                    │
+     │                       │                       │                    │
+     │                       │  POST /admin/pos      │                    │
+     │                       │  (Complete Sale)      │                    │
+     │                       │ ───────────────────> │                    │
+     │                       │  {card_number, pin}   │                    │
+     │                       │                       │                    │
+     │                       │                       │  redeem_shopping_  │
+     │                       │                       │  card()            │
+     │                       │                       │ ─────────────────> │
+     │                       │                       │                    │
+     │                       │                       │  • Verify PIN      │
+     │                       │                       │  • Check balance   │
+     │                       │                       │  • Deduct amount   │
+     │                       │                       │  • Log transaction │
+     │                       │                       │                    │
+     │                       │  Sale completed       │                    │
+     │                       │  Receipt generated    │                    │
+     │                       │ <─────────────────────│                    │
+     │                       │                       │                    │
+     │ <───────── Receipt printed/emailed ──────────│                    │
+     │                       │                       │                    │
+
+
+═══════════════════════════════════════════════════════════════════════════════
+END OF WORKFLOW DIAGRAM
+═══════════════════════════════════════════════════════════════════════════════
+
+For detailed technical documentation, see: REWARDS_CARD_SYSTEM.md
+For POS staff training, see: CARD_POS_QUICK_GUIDE.md
+For implementation details, see: CARD_IMPLEMENTATION_SUMMARY.md

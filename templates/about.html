@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}About Us - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-10">
+            <h1 class="text-center mb-5">About SMARKAFRICA</h1>
+
+            <!-- Vision -->
+            <div class="card shadow-sm mb-4 border-0">
+                <div class="card-body text-center p-5">
+                    <div class="mb-3">
+                        <i class="fas fa-eye text-success" style="font-size: 3rem;"></i>
+                    </div>
+                    <h3 class="card-title">Our Vision</h3>
+                    <p class="lead">{{ settings.vision if settings and settings.vision else 'To be Africa\'s most trusted digital marketplace, empowering creators and entrepreneurs across the continent.' }}</p>
+                </div>
+            </div>
+
+            <!-- Mission -->
+            <div class="card shadow-sm mb-4 border-0">
+                <div class="card-body text-center p-5">
+                    <div class="mb-3">
+                        <i class="fas fa-bullseye text-success" style="font-size: 3rem;"></i>
+                    </div>
+                    <h3 class="card-title">Our Mission</h3>
+                    <p class="lead">{{ settings.mission if settings and settings.mission else 'To provide a seamless, secure, and affordable platform for buying and selling digital and physical products, powered by M-Pesa for effortless African payments.' }}</p>
+                </div>
+            </div>
+
+            <!-- About Content -->
+            <div class="card shadow-sm mb-4 border-0">
+                <div class="card-body p-5">
+                    <h3 class="card-title mb-4">Who We Are</h3>
+
+                    {% if settings and settings.about_content %}
+                    <div class="about-content">
+                        {{ settings.about_content|safe }}
+                    </div>
+                    {% else %}
+                    <p>SMARKAFRICA is a modern e-commerce platform built for the African market. We specialize in digital products — from PDFs and eBooks to software and media — alongside physical goods shipped across the continent.</p>
+
+                    <p>What sets us apart:</p>
+                    <ul>
+                        <li><strong>M-Pesa Integration</strong> — Pay seamlessly via M-Pesa STK Push. No credit cards needed.</li>
+                        <li><strong>Instant Digital Delivery</strong> — Get your digital products immediately after payment confirmation.</li>
+                        <li><strong>African-Focused</strong> — Built by Africans, for Africans, with local payment methods and shipping in mind.</li>
+                        <li><strong>Creator-Friendly</strong> — We empower content creators and entrepreneurs to sell their work with minimal friction.</li>
+                    </ul>
+
+                    <p>Whether you're a student looking for study materials, a professional seeking software tools, or a creator wanting to monetize your work, SMARKAFRICA is your marketplace.</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Contact -->
+            <div class="card shadow-sm border-0">
+                <div class="card-body p-5">
+                    <h3 class="card-title mb-4">Contact Us</h3>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <p class="mb-1"><i class="fas fa-envelope me-2 text-success"></i> <strong>Email:</strong></p>
+                            <p class="ms-4">{{ settings.contact_email if settings and settings.contact_email else 'support@smarkafrica.africa' }}</p>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <p class="mb-1"><i class="fas fa-phone me-2 text-success"></i> <strong>Phone:</strong></p>
+                            <p class="ms-4">{{ settings.contact_phone if settings and settings.contact_phone else '+254 700 000 000' }}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

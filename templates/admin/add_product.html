@@ -1,0 +1,297 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit' if product else 'Add' }} Product - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h2 class="mb-4"><i class="fas fa-{{ 'edit' if product else 'plus' }} me-2"></i>{{ 'Edit' if product else 'Add' }} Product</h2>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body p-4">
+            <form method="POST" enctype="multipart/form-data">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Product Name *</label>
+                        <input type="text" name="name" class="form-control" value="{{ product.name if product else '' }}" required>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Category *</label>
+                        <select name="category_id" class="form-select" required>
+                            <option value="">Select...</option>
+                            {% for cat in categories %}
+                            <option value="{{ cat.id }}" {{ 'selected' if product and product.category_id == cat.id }}>{{ cat.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Slug</label>
+                        <input type="text" name="slug" class="form-control" value="{{ product.slug if product else '' }}" placeholder="Auto-generated if empty">
+                    </div>
+
+                    <div class="col-12">
+                        <label class="form-label">Short Description</label>
+                        <textarea name="short_description" class="form-control" rows="2">{{ product.short_description if product else '' }}</textarea>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <label class="form-label mb-0">Full Description</label>
+                            <button type="button" class="btn btn-sm btn-outline-warning" id="generate-description">
+                                <i class="fas fa-wand-magic-sparkles me-1"></i> Suggest Description
+                            </button>
+                        </div>
+                        <textarea name="description" class="form-control" rows="5">{{ product.description if product else '' }}</textarea>
+                        <div id="description-status" class="form-text"></div>
+                        <div class="form-text">You can keep your own wording or use the generated recommendation.</div>
+                    </div>
+
+                    <div class="col-md-3">
+                        <label class="form-label">Selling Price (KSh) *</label>
+                        <input type="number" name="selling_price" class="form-control" step="0.01" min="0" value="{{ product.selling_price if product else '' }}" required>
+                        <div id="market-price-warning" class="alert alert-warning mt-2 d-none"></div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Buying Price (KSh) *</label>
+                        <input type="number" name="buying_price" class="form-control" step="0.01" min="0" value="{{ product.buying_price if product else '' }}" required>
+                        <div class="form-text">Cost of goods sold (for P&L tracking)</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Discount (%)</label>
+                        <input type="number" name="discount_percent" class="form-control" step="0.01" min="0" max="99" value="{{ product.discount_percent if product else '0' }}">
+                        <div class="form-text">Max safe discount calculated automatically</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Market Source</label>
+                        <div class="form-control" id="market-source-box">Waiting for product name...</div>
+                        <div class="form-text">Verified source ranges are shown only when available.</div>
+                    </div>
+
+                    <div class="col-md-3">
+                        <label class="form-label">Condition</label>
+                        <select name="product_condition" class="form-select">
+                            {% set condition = product.product_condition if product else 'new' %}
+                            <option value="new" {{ 'selected' if condition == 'new' }}>New</option>
+                            <option value="second_hand" {{ 'selected' if condition == 'second_hand' }}>Second hand</option>
+                            <option value="thrifted" {{ 'selected' if condition == 'thrifted' }}>Thrifted</option>
+                            <option value="refurbished" {{ 'selected' if condition == 'refurbished' }}>Refurbished</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Sale Mode</label>
+                        <select name="sale_mode" class="form-select">
+                            {% set mode = product.sale_mode if product else 'direct' %}
+                            <option value="direct" {{ 'selected' if mode == 'direct' }}>Immediate sale</option>
+                            <option value="bid" {{ 'selected' if mode == 'bid' }}>Bid</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Bid Price</label>
+                        <input type="number" name="bid_price" class="form-control" step="0.01" min="0" value="{{ product.bid_price if product else '0' }}">
+                        <div class="form-text">Minimum 75% of direct sale price</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Commission (%)</label>
+                        <input type="number" name="commission_percent" class="form-control" step="0.01" min="15" value="{{ product.commission_percent if product else '15' }}">
+                    </div>
+
+                    <div class="col-md-3">
+                        <label class="form-label">Product Type</label>
+                        <div class="form-check form-switch mt-2">
+                            <input class="form-check-input" type="checkbox" name="is_digital" id="is_digital" value="1" {{ 'checked' if product and product.is_digital else '' }} onchange="toggleDigital()">
+                            <label class="form-check-label" for="is_digital">Digital Product</label>
+                        </div>
+                    </div>
+
+                    <div class="col-md-3" id="digital-file-section" style="{{ 'display:block;' if product and product.is_digital else 'display:none;' }}">
+                        <label class="form-label">Upload Digital File</label>
+                        <input type="file" name="digital_file" class="form-control" accept=".pdf,.zip,.exe,.msi,.apk,.mp3,.mp4,.epub,.mobi,.jpg,.jpeg,.png">
+                        {% if product and product.file_path %}
+                        <small class="text-muted">Current file: {{ product.file_path.split('/')[-1] }}</small>
+                        {% endif %}
+                        <div class="form-text">Customers download this after payment. Music/audio supports MP3 and MP4 previews.</div>
+                    </div>
+
+                    <div class="col-md-3" id="stock-section" style="{{ 'display:none;' if product and product.is_digital else 'display:block;' }}">
+                        <label class="form-label">Stock Quantity</label>
+                        <input type="number" name="stock" class="form-control" min="0" value="{{ product.stock if product else '0' }}">
+                    </div>
+
+                    <div class="col-md-3" id="weight-section" style="{{ 'display:none;' if product and product.is_digital else 'display:block;' }}">
+                        <label class="form-label">Weight (kg)</label>
+                        <input type="number" name="weight_kg" class="form-control" step="0.01" min="0" value="{{ product.weight_kg if product else '0' }}">
+                    </div>
+
+                    <div class="col-12">
+                        <label class="form-label fw-bold">Product Images</label>
+                        <div>
+                            <input type="file" name="product_images" class="form-control" accept="image/png,image/jpeg,image/gif,image/webp" multiple>
+                            <div class="form-text">Select 1-10 images in one upload. The first selected image becomes the main store image.</div>
+                            <div class="form-text">Upload an image from your computer. Not required — product will still appear in store.</div>
+                        </div>
+                        <div class="mt-2">
+                            <input type="url" name="image_url" class="form-control" value="{{ product.image_url if product else '' }}" placeholder="Or paste image URL (optional)">
+                        </div>
+                    </div>
+
+                    <div class="col-md-6">
+                        <div class="form-check form-switch mt-2">
+                            <input class="form-check-input" type="checkbox" name="is_active" id="is_active" value="1" {{ 'checked' if not product or product.is_active else '' }}>
+                            <label class="form-check-label" for="is_active"><strong>Active</strong> — Show in store</label>
+                        </div>
+                        <div class="form-check form-switch mt-2">
+                            <input class="form-check-input" type="checkbox" name="is_featured" id="is_featured" value="1" {{ 'checked' if product and product.is_featured else '' }}>
+                            <input class="form-check-input" type="checkbox" name="admin_priority" id="admin_priority" value="1" {{ 'checked' if product and product.admin_priority else '' }}>
+                            <input class="form-check-input" type="checkbox" name="is_hot_sale" id="is_hot_sale" value="1" {{ 'checked' if product and product.is_hot_sale else '' }}>
+                            <input class="form-check-input" type="checkbox" name="is_original_source" id="is_original_source" value="1" {{ 'checked' if product and product.is_original_source else '' }}>
+                            <label class="form-check-label" for="is_hot_sale"><strong>Hot Sale</strong> - priority in sliding homepage images and short customer pop</label><br>
+                            <label class="form-check-label" for="is_original_source"><strong>Original</strong> - sourced direct from manufacturer with image seal</label><br>
+                            <label class="form-check-label" for="admin_priority"><strong>MVP/Admin Product</strong> - higher search priority and starter review</label><br>
+                            <label class="form-check-label" for="is_featured"><strong>Featured</strong> — Show on homepage</label>
+                        </div>
+                    </div>
+
+                    <div class="col-12">
+                        <div class="alert alert-light border d-flex flex-wrap align-items-center gap-4 mb-0">
+                            <div class="form-check form-switch mb-0">
+                                <input class="form-check-input" type="checkbox" name="is_original_source" id="is_original_source_clear" value="1" {{ 'checked' if product and product.is_original_source else '' }}>
+                                <label class="form-check-label" for="is_original_source_clear"><strong>Original authenticity seal</strong></label>
+                            </div>
+                            <span class="small text-muted">Turn this on when the item is direct, original, and suitable for an authenticity mark in the store.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <hr class="my-4">
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-success btn-lg px-5">
+                        <i class="fas fa-save me-2"></i>{{ 'Update' if product else 'Create' }} Product
+                    </button>
+                    <a href="{{ url_for('admin_products') }}" class="btn btn-outline-secondary btn-lg">Cancel</a>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+function toggleDigital() {
+    var isDigital = document.getElementById('is_digital').checked;
+    document.getElementById('digital-file-section').style.display = isDigital ? 'block' : 'none';
+    document.getElementById('stock-section').style.display = isDigital ? 'none' : 'block';
+    document.getElementById('weight-section').style.display = isDigital ? 'none' : 'block';
+}
+</script>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+const productId = {{ product.id if product else 'null' }};
+const marketWarning = document.getElementById('market-price-warning');
+const priceInput = document.querySelector('[name="selling_price"]');
+const buyingInput = document.querySelector('[name="buying_price"]');
+const nameInput = document.querySelector('[name="name"]');
+const categoryInput = document.querySelector('[name="category_id"]');
+const descriptionInput = document.querySelector('[name="description"]');
+const conditionInput = document.querySelector('[name="product_condition"]');
+const imageUrlInput = document.querySelector('[name="image_url"]');
+const digitalInput = document.querySelector('[name="is_digital"]');
+let priceCheckTimer = null;
+
+function showMarketWarning(data) {
+    if (!marketWarning) return;
+    if (!data || data.status === 'ok') {
+        if (data && data.confidence === 'verified_reference') {
+            marketWarning.classList.remove('d-none');
+            marketWarning.className = 'alert alert-info mt-2';
+            marketWarning.innerHTML = `
+                <strong>Verified market source:</strong> ${data.label}<br>
+                Kenya range: KSh ${Number(data.kenya_low).toFixed(2)} - KSh ${Number(data.kenya_high).toFixed(2)}.
+                Manufacturer/import estimate: KSh ${Number(data.manufacturer_price).toFixed(2)}.
+            `;
+        } else {
+            marketWarning.classList.add('d-none');
+            marketWarning.innerHTML = '';
+        }
+        updateMarketSource(data);
+        return;
+    }
+    marketWarning.className = `alert ${data.status === 'unknown' ? 'alert-secondary' : 'alert-warning'} mt-2`;
+    marketWarning.innerHTML = `
+        <strong>Market price warning:</strong> ${data.message}<br>
+        ${data.kenya_high > 0 ? `Kenya range: KSh ${Number(data.kenya_low).toFixed(2)} - KSh ${Number(data.kenya_high).toFixed(2)}. Manufacturer estimate: KSh ${Number(data.manufacturer_price).toFixed(2)}.` : ''}
+        ${data.kenya_high > 0 ? '<button type="button" class="btn btn-sm btn-outline-dark ms-2" id="match-market-price">Match market midpoint</button>' : ''}
+    `;
+    document.getElementById('match-market-price')?.addEventListener('click', () => {
+        priceInput.value = Number(data.recommended_price).toFixed(2);
+        marketWarning.classList.add('d-none');
+    });
+    updateMarketSource(data);
+}
+
+function updateMarketSource(data) {
+    const box = document.getElementById('market-source-box');
+    if (!box || !data) return;
+    if (data.source_url) {
+        box.innerHTML = `<a href="${data.source_url}" target="_blank" rel="noopener">${data.source}</a>`;
+    } else {
+        box.textContent = data.source || 'No verified source matched';
+    }
+}
+
+function checkMarketPrice() {
+    clearTimeout(priceCheckTimer);
+    priceCheckTimer = setTimeout(() => {
+        if (!priceInput?.value || !nameInput?.value) return;
+        fetch("{{ url_for('admin_price_check_api') }}", {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                product_id: productId,
+                name: nameInput.value,
+                category_id: categoryInput?.value || null,
+                selling_price: priceInput.value,
+                buying_price: buyingInput?.value || 0,
+                description: descriptionInput?.value || ''
+            })
+        }).then(response => response.json()).then(showMarketWarning).catch(() => {});
+    }, 350);
+}
+
+[priceInput, buyingInput, nameInput, categoryInput].forEach(input => {
+    input?.addEventListener('input', checkMarketPrice);
+    input?.addEventListener('change', checkMarketPrice);
+});
+checkMarketPrice();
+
+document.getElementById('generate-description')?.addEventListener('click', () => {
+    const status = document.getElementById('description-status');
+    if (!nameInput?.value) {
+        if (status) status.textContent = 'Enter a product name first.';
+        return;
+    }
+    if (status) status.textContent = 'Generating recommendation...';
+    fetch("{{ url_for('admin_product_description_api') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            name: nameInput.value,
+            category_id: categoryInput?.value || null,
+            product_condition: conditionInput?.value || 'new',
+            image_url: imageUrlInput?.value || '',
+            is_digital: Boolean(digitalInput?.checked)
+        })
+    }).then(response => response.json()).then(data => {
+        if (data.description && descriptionInput) {
+            descriptionInput.value = data.description;
+            descriptionInput.dispatchEvent(new Event('input', { bubbles: true }));
+            if (status) status.textContent = 'Recommended description inserted. You can edit it before saving.';
+        } else if (status) {
+            status.textContent = data.error || 'No recommendation was generated.';
+        }
+    }).catch(() => {
+        if (status) status.textContent = 'Could not generate the description. Please try again.';
+    });
+});
+</script>
+{% endblock %}

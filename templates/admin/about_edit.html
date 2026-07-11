@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Edit About Page - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h2 class="mb-4"><i class="fas fa-edit me-2"></i>Edit About Page Content</h2>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body">
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="mb-3">
+                    <label class="form-label">Vision</label>
+                    <textarea name="vision" class="form-control" rows="3">{{ settings.vision if settings else '' }}</textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Mission</label>
+                    <textarea name="mission" class="form-control" rows="3">{{ settings.mission if settings else '' }}</textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">About Content (HTML supported)</label>
+                    <textarea name="about_content" class="form-control" rows="10">{{ settings.about_content if settings else '' }}</textarea>
+                </div>
+                <button type="submit" class="btn btn-success"><i class="fas fa-save me-2"></i> Save Changes</button>
+                <a href="{{ url_for('about') }}" class="btn btn-outline-secondary">View About Page</a>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
