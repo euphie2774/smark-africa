@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+{% block title %}My Coins - SMARKAFRICA{% endblock %}
+{% block content %}
+<div class="container py-4">
+    <div class="row">
+        <div class="col-lg-8">
+            <!-- Balance & Check-In -->
+            <div class="card border-0 shadow-sm mb-4 bg-dark text-light">
+                <div class="card-body">
+                    <div class="row align-items-center">
+                        <div class="col-md-6 text-center text-md-start mb-3 mb-md-0">
+                            <small class="text-muted d-block">Your Coin Balance</small>
+                            <div class="display-4 fw-bold text-warning">
+                                <i class="fas fa-coins me-2"></i>{{ balance }}
+                            </div>
+                        </div>
+                        <div class="col-md-6 text-center text-md-end">
+                            <div class="mb-2">
+                                <span class="badge bg-warning text-dark fs-6 px-3 py-2">
+                                    <i class="fas fa-fire me-1"></i>{{ streak }} day streak
+                                </span>
+                            </div>
+                            {% if not checked_in_today %}
+                            <form method="POST" action="{{ url_for('coins_check_in') }}" class="d-inline">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <button type="submit" class="btn btn-warning btn-lg fw-bold pulse-btn">
+                                    <i class="fas fa-calendar-check me-2"></i>Daily Check-In
+                                </button>
+                            </form>
+                            <div class="small text-muted mt-1">+{{ coin_settings.daily_login }} coins{% if streak >= 6 %} + streak bonus!{% endif %}</div>
+                            {% else %}
+                            <button class="btn btn-outline-success btn-lg" disabled>
+                                <i class="fas fa-check-circle me-2"></i>Checked In Today!
+                            </button>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Ways to Earn -->
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-dark text-warning">
+                    <h5 class="mb-0"><i class="fas fa-star me-2"></i>Ways to Earn Coins</h5>
+                </div>
+                <div class="card-body bg-dark">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="p-3 rounded border border-warning bg-dark h-100">
+                                <div class="d-flex align-items-center mb-2">
+                                    <i class="fas fa-calendar-day fa-2x text-warning me-3"></i>
+                                    <div>
+                                        <h6 class="mb-0">Daily Check-In</h6>
+                                        <span class="badge bg-warning text-dark">+{{ coin_settings.daily_login }} coins/day</span>
+                                    </div>
+                                </div>
+                                <small class="text-muted">Log in daily to earn coins. Build streaks for bonus rewards!</small>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 rounded border border-warning bg-dark h-100">
+                                <div class="d-flex align-items-center mb-2">
+                                    <i class="fas fa-shopping-bag fa-2x text-warning me-3"></i>
+                                    <div>
+                                        <h6 class="mb-0">Make Purchases</h6>
+                                        <span class="badge bg-warning text-dark">+{{ coin_settings.purchase_per_1000 }} coins per KSh 1,000</span>
+                                    </div>
+                                </div>
+                                <small class="text-muted">Every purchase earns you coins. Bigger orders = more coins!</small>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 rounded border border-warning bg-dark h-100">
+                                <div class="d-flex align-items-center mb-2">
+                                    <i class="fas fa-star-half-alt fa-2x text-warning me-3"></i>
+                                    <div>
+                                        <h6 class="mb-0">Write Reviews</h6>
+                                        <span class="badge bg-warning text-dark">+{{ coin_settings.review_reward }} coins each</span>
+                                    </div>
+                                </div>
+                                <small class="text-muted">Rate and review products you've bought to help the community.</small>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 rounded border border-warning bg-dark h-100">
+                                <div class="d-flex align-items-center mb-2">
+                                    <i class="fas fa-user-plus fa-2x text-warning me-3"></i>
+                                    <div>
+                                        <h6 class="mb-0">Refer Friends</h6>
+                                        <span class="badge bg-warning text-dark">+{{ coin_settings.referral_bonus }} coins each</span>
+                                    </div>
+                                </div>
+                                <small class="text-muted">Invite friends to SMARKAFRICA and earn when they sign up.</small>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 rounded border border-warning bg-dark h-100">
+                                <div class="d-flex align-items-center mb-2">
+                                    <i class="fas fa-fire fa-2x text-warning me-3"></i>
+                                    <div>
+                                        <h6 class="mb-0">7-Day Streak</h6>
+                                        <span class="badge bg-warning text-dark">+{{ coin_settings.streak_bonus_7day }} bonus coins</span>
+                                    </div>
+                                </div>
+                                <small class="text-muted">Check in for 7 consecutive days to unlock a bonus reward.</small>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-3 rounded border border-warning bg-dark h-100">
+                                <div class="d-flex align-items-center mb-2">
+                                    <i class="fas fa-calendar-star fa-2x text-warning me-3"></i>
+                                    <div>
+                                        <h6 class="mb-0">Platform Events</h6>
+                                        <span class="badge bg-warning text-dark">+{{ coin_settings.event_participation }} coins</span>
+                                    </div>
+                                </div>
+                                <small class="text-muted">Participate in flash sales, raffles, and special campaigns.</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Transaction History -->
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-dark text-light">
+                    <h5 class="mb-0"><i class="fas fa-history me-2"></i>Coin History</h5>
+                </div>
+                <div class="card-body bg-dark p-0">
+                    {% if transactions %}
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Date</th>
+                                    <th>Activity</th>
+                                    <th class="text-end">Coins</th>
+                                    <th class="text-end">Balance</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for txn in transactions %}
+                                <tr>
+                                    <td class="small">{{ txn.created_at.strftime('%b %d, %H:%M') }}</td>
+                                    <td>
+                                        {% if txn.coin_type == 'daily_login' %}
+                                        <i class="fas fa-calendar-check text-info me-1"></i>
+                                        {% elif txn.coin_type == 'purchase' %}
+                                        <i class="fas fa-shopping-bag text-success me-1"></i>
+                                        {% elif txn.coin_type == 'review' %}
+                                        <i class="fas fa-star text-warning me-1"></i>
+                                        {% elif txn.coin_type == 'referral' %}
+                                        <i class="fas fa-user-plus text-primary me-1"></i>
+                                        {% else %}
+                                        <i class="fas fa-coins text-warning me-1"></i>
+                                        {% endif %}
+                                        {{ txn.description or txn.coin_type|replace('_', ' ')|title }}
+                                    </td>
+                                    <td class="text-end fw-bold {{ 'text-success' if txn.amount > 0 else 'text-danger' }}">
+                                        {{ '+' if txn.amount > 0 else '' }}{{ txn.amount }}
+                                    </td>
+                                    <td class="text-end text-muted">{{ txn.balance_after }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <div class="text-center py-4">
+                        <i class="fas fa-coins fa-3x text-muted mb-3"></i>
+                        <p class="text-muted">No coin activity yet. Start earning by checking in daily!</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar -->
+        <div class="col-lg-4">
+            <!-- Streak Progress -->
+            <div class="card border-0 shadow-sm mb-4 bg-dark text-light">
+                <div class="card-body text-center">
+                    <h6 class="text-warning mb-3">Streak Progress</h6>
+                    <div class="d-flex justify-content-center gap-1 mb-3">
+                        {% for day in range(1, 8) %}
+                        <div class="streak-day {{ 'active' if day <= streak else '' }}">
+                            <i class="fas fa-{{ 'check-circle text-success' if day <= streak else 'circle text-muted' }}"></i>
+                            <small class="d-block">D{{ day }}</small>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% if streak >= 7 %}
+                    <span class="badge bg-success">Streak bonus unlocked!</span>
+                    {% elif streak > 0 %}
+                    <small class="text-muted">{{ 7 - streak }} more days for bonus!</small>
+                    {% else %}
+                    <small class="text-muted">Start your streak today!</small>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Leaderboard -->
+            <div class="card border-0 shadow-sm mb-4 bg-dark text-light">
+                <div class="card-header bg-dark border-warning">
+                    <h6 class="mb-0 text-warning"><i class="fas fa-trophy me-2"></i>Top Collectors</h6>
+                </div>
+                <div class="card-body p-0">
+                    <ol class="list-group list-group-flush list-group-numbered">
+                        {% for username, bal in leaderboard %}
+                        <li class="list-group-item bg-dark text-light d-flex justify-content-between align-items-center border-secondary">
+                            <span>
+                                {% if loop.index == 1 %}<i class="fas fa-crown text-warning me-1"></i>{% endif %}
+                                {{ username }}
+                                {% if username == current_user.username %}<span class="badge bg-info ms-1">You</span>{% endif %}
+                            </span>
+                            <span class="badge bg-warning text-dark rounded-pill">{{ bal }}</span>
+                        </li>
+                        {% endfor %}
+                    </ol>
+                </div>
+            </div>
+
+            <!-- What Coins Can Do -->
+            <div class="card border-0 shadow-sm bg-dark text-light">
+                <div class="card-body">
+                    <h6 class="text-warning mb-3"><i class="fas fa-gift me-2"></i>Spend Your Coins</h6>
+                    <ul class="list-unstyled small">
+                        <li class="mb-2"><i class="fas fa-ticket text-warning me-2"></i>Buy raffle tickets</li>
+                        <li class="mb-2"><i class="fas fa-percent text-warning me-2"></i>Unlock exclusive discounts</li>
+                        <li class="mb-2"><i class="fas fa-star text-warning me-2"></i>Access flash sales early</li>
+                        <li class="mb-2"><i class="fas fa-medal text-warning me-2"></i>Earn badges & status</li>
+                        <li><i class="fas fa-credit-card text-warning me-2"></i>Convert to card credits (coming soon)</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+.pulse-btn {
+    animation: pulse 2s infinite;
+}
+@keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0.7); }
+    70% { box-shadow: 0 0 0 12px rgba(255, 193, 7, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0); }
+}
+.streak-day {
+    width: 36px;
+    text-align: center;
+    padding: 4px;
+}
+.streak-day.active {
+    transform: scale(1.1);
+}
+</style>
+{% endblock %}

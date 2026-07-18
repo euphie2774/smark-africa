@@ -1133,4 +1133,78 @@ class KYCIdentityVerification(db.Model):
     reviewer = db.relationship('User', foreign_keys=[reviewed_by], lazy=True)
 
 
+class Raffle(db.Model):
+    __tablename__ = 'raffles'
+    __table_args__ = (
+        db.Index('ix_raffles_status_ends', 'status', 'ends_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=False)
+    seller_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text)
+    product_value = db.Column(db.Float, nullable=False)
+    ticket_price = db.Column(db.Float, nullable=False)
+    total_tickets = db.Column(db.Integer, nullable=False)
+    tickets_sold = db.Column(db.Integer, default=0)
+    status = db.Column(db.String(30), default='active')  # active, sold_out, drawing, completed, cancelled
+    winner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    winner_ticket_number = db.Column(db.Integer, nullable=True)
+    drawn_at = db.Column(db.DateTime, nullable=True)
+    starts_at = db.Column(db.DateTime, default=datetime.utcnow)
+    ends_at = db.Column(db.DateTime, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+    product = db.relationship('Product', lazy=True)
+    seller = db.relationship('User', foreign_keys=[seller_id], lazy=True)
+    winner = db.relationship('User', foreign_keys=[winner_id], lazy=True)
+    tickets = db.relationship('RaffleTicket', backref='raffle', lazy=True)
+
+
+class RaffleTicket(db.Model):
+    __tablename__ = 'raffle_tickets'
+    __table_args__ = (
+        db.UniqueConstraint('raffle_id', 'ticket_number', name='uq_raffle_ticket_number'),
+        db.Index('ix_raffle_tickets_user', 'user_id', 'raffle_id'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    raffle_id = db.Column(db.Integer, db.ForeignKey('raffles.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    ticket_number = db.Column(db.Integer, nullable=False)
+    purchased_at = db.Column(db.DateTime, default=datetime.utcnow)
+    mpesa_receipt = db.Column(db.String(50))
+
+    user = db.relationship('User', lazy=True)
+
+
+class CoinTransaction(db.Model):
+    __tablename__ = 'coin_transactions'
+    __table_args__ = (
+        db.Index('ix_coin_transactions_user_created', 'user_id', 'created_at'),
+        db.Index('ix_coin_transactions_type', 'coin_type'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    amount = db.Column(db.Integer, nullable=False)
+    coin_type = db.Column(db.String(50), nullable=False)
+    description = db.Column(db.String(300))
+    reference_id = db.Column(db.String(80))
+    balance_after = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', lazy=True)
+
+
+class CoinDailyCheckIn(db.Model):
+    __tablename__ = 'coin_daily_checkins'
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'check_in_date', name='uq_coin_checkin_user_date'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    check_in_date = db.Column(db.Date, nullable=False)
+    streak_count = db.Column(db.Integer, default=1)
+    coins_earned = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', lazy=True)

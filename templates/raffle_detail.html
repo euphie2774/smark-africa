@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}{{ raffle.title }} - Raffle - SMARKAFRICA{% endblock %}
+{% block content %}
+<div class="container">
+    <nav aria-label="breadcrumb" class="mb-3">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('raffles') }}">Raffles</a></li>
+            <li class="breadcrumb-item active">{{ raffle.title }}</li>
+        </ol>
+    </nav>
+
+    <div class="row g-4">
+        <div class="col-lg-7">
+            {% if raffle.product and raffle.product.image_url %}
+            <img src="{{ raffle.product.image_url }}" class="img-fluid rounded shadow" alt="{{ raffle.title }}" style="max-height:400px;width:100%;object-fit:cover;">
+            {% else %}
+            <div class="d-flex align-items-center justify-content-center bg-dark rounded" style="height:350px;">
+                <i class="fas fa-gift fa-5x text-warning"></i>
+            </div>
+            {% endif %}
+
+            {% if raffle.description %}
+            <div class="mt-3">
+                <h5>About this prize</h5>
+                <p class="text-muted">{{ raffle.description }}</p>
+            </div>
+            {% endif %}
+
+            {% if raffle.product %}
+            <div class="card bg-dark border-0 mt-3">
+                <div class="card-body">
+                    <h6 class="text-warning">Product Details</h6>
+                    <p class="mb-1"><strong>{{ raffle.product.name }}</strong></p>
+                    <p class="text-muted small mb-0">{{ raffle.product.description[:200] if raffle.product.description else '' }}</p>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="col-lg-5">
+            <div class="card border-warning bg-dark shadow-lg sticky-top" style="top:80px;">
+                <div class="card-header bg-warning text-dark text-center">
+                    <h4 class="mb-0 fw-bold">{{ raffle.title }}</h4>
+                </div>
+                <div class="card-body">
+                    <div class="text-center mb-3">
+                        <div class="display-6 text-warning fw-bold">KSh {{ "%.0f"|format(raffle.product_value) }}</div>
+                        <small class="text-muted">Product Value</small>
+                    </div>
+
+                    <div class="row text-center mb-3">
+                        <div class="col-4">
+                            <div class="fw-bold text-warning fs-5">KSh {{ "%.0f"|format(raffle.ticket_price) }}</div>
+                            <small class="text-muted">Per Ticket</small>
+                        </div>
+                        <div class="col-4">
+                            <div class="fw-bold fs-5">{{ raffle.tickets_sold }}</div>
+                            <small class="text-muted">Sold</small>
+                        </div>
+                        <div class="col-4">
+                            <div class="fw-bold text-success fs-5">{{ raffle.total_tickets - raffle.tickets_sold }}</div>
+                            <small class="text-muted">Left</small>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <div class="progress" style="height:12px;">
+                            <div class="progress-bar bg-warning progress-bar-striped progress-bar-animated" style="width:{{ progress_pct|int }}%"></div>
+                        </div>
+                        <div class="d-flex justify-content-between mt-1">
+                            <small class="text-muted">{{ progress_pct|int }}% sold</small>
+                            <small class="text-muted">{{ raffle.total_tickets }} total</small>
+                        </div>
+                    </div>
+
+                    {% if raffle.status == 'active' %}
+                    <div class="text-center mb-3">
+                        <div class="raffle-countdown" data-ends="{{ raffle.ends_at.isoformat() }}">
+                            <small class="text-muted">Ends in</small>
+                            <div class="d-flex justify-content-center gap-2 mt-1" id="countdown-{{ raffle.id }}">
+                                <div class="bg-dark border border-warning rounded p-2 text-center" style="min-width:50px;">
+                                    <div class="fw-bold text-warning countdown-days">--</div>
+                                    <small class="text-muted" style="font-size:0.65rem;">DAYS</small>
+                                </div>
+                                <div class="bg-dark border border-warning rounded p-2 text-center" style="min-width:50px;">
+                                    <div class="fw-bold text-warning countdown-hours">--</div>
+                                    <small class="text-muted" style="font-size:0.65rem;">HRS</small>
+                                </div>
+                                <div class="bg-dark border border-warning rounded p-2 text-center" style="min-width:50px;">
+                                    <div class="fw-bold text-warning countdown-mins">--</div>
+                                    <small class="text-muted" style="font-size:0.65rem;">MIN</small>
+                                </div>
+                                <div class="bg-dark border border-warning rounded p-2 text-center" style="min-width:50px;">
+                                    <div class="fw-bold text-warning countdown-secs">--</div>
+                                    <small class="text-muted" style="font-size:0.65rem;">SEC</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {% if current_user.is_authenticated %}
+                    <form method="POST" action="{{ url_for('raffle_buy_ticket', raffle_id=raffle.id) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <div class="input-group mb-3">
+                            <span class="input-group-text bg-dark text-warning border-warning">Qty</span>
+                            <select name="quantity" class="form-select bg-dark text-light border-warning">
+                                {% for q in range(1, min(11, raffle.total_tickets - raffle.tickets_sold + 1)) %}
+                                <option value="{{ q }}">{{ q }} ticket{{ 's' if q > 1 else '' }} - KSh {{ "%.0f"|format(q * raffle.ticket_price) }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <button type="submit" class="btn btn-warning btn-lg w-100 fw-bold">
+                            <i class="fas fa-ticket me-2"></i>Buy Tickets Now
+                        </button>
+                    </form>
+                    {% else %}
+                    <a href="{{ url_for('login') }}" class="btn btn-outline-warning btn-lg w-100">
+                        <i class="fas fa-sign-in-alt me-2"></i>Login to Buy Tickets
+                    </a>
+                    {% endif %}
+
+                    {% elif raffle.status == 'completed' %}
+                    <div class="text-center">
+                        <div class="mb-3">
+                            <i class="fas fa-trophy fa-3x text-warning"></i>
+                        </div>
+                        <h5 class="text-success">Draw Complete!</h5>
+                        {% if raffle.winner %}
+                        <p class="mb-1">Winner: <strong class="text-warning">{{ raffle.winner.username }}</strong></p>
+                        <p class="text-muted">Winning Ticket: <strong>#{{ raffle.winner_ticket_number }}</strong></p>
+                        {% endif %}
+                    </div>
+
+                    {% elif raffle.status == 'cancelled' %}
+                    <div class="text-center">
+                        <span class="badge bg-secondary fs-6">Cancelled</span>
+                    </div>
+                    {% endif %}
+
+                    {% if user_tickets %}
+                    <hr class="border-warning">
+                    <h6 class="text-center mb-2">Your Tickets</h6>
+                    <div class="d-flex flex-wrap justify-content-center gap-2">
+                        {% for ticket in user_tickets %}
+                        <span class="badge bg-warning text-dark fs-6 px-3 py-2">
+                            #{{ ticket.ticket_number }}
+                            {% if raffle.status == 'completed' and raffle.winner_ticket_number == ticket.ticket_number %}
+                            <i class="fas fa-crown ms-1"></i>
+                            {% endif %}
+                        </span>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="card bg-dark border-0 mt-3">
+                <div class="card-body small">
+                    <h6><i class="fas fa-info-circle text-warning me-1"></i>How it works</h6>
+                    <ol class="text-muted ps-3 mb-0">
+                        <li>Buy one or more tickets at KSh {{ "%.0f"|format(raffle.ticket_price) }} each</li>
+                        <li>When all {{ raffle.total_tickets }} tickets sell out (or the timer ends), a winner is drawn</li>
+                        <li>The winner gets the product worth KSh {{ "%.0f"|format(raffle.product_value) }}</li>
+                        <li>More tickets = higher chance of winning</li>
+                    </ol>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    document.querySelectorAll('.raffle-countdown').forEach(function(el) {
+        const endsAt = new Date(el.dataset.ends).getTime();
+        const container = el.querySelector('[id^="countdown-"]');
+        if (!container) return;
+        function update() {
+            const now = Date.now();
+            let diff = Math.max(0, Math.floor((endsAt - now) / 1000));
+            const days = Math.floor(diff / 86400); diff %= 86400;
+            const hours = Math.floor(diff / 3600); diff %= 3600;
+            const mins = Math.floor(diff / 60);
+            const secs = diff % 60;
+            container.querySelector('.countdown-days').textContent = days;
+            container.querySelector('.countdown-hours').textContent = hours;
+            container.querySelector('.countdown-mins').textContent = mins;
+            container.querySelector('.countdown-secs').textContent = secs;
+        }
+        update();
+        setInterval(update, 1000);
+    });
+})();
+</script>
+{% endblock %}

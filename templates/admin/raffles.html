@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Manage Raffles - Admin - SMARKAFRICA{% endblock %}
+{% block content %}
+<div class="container">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="fas fa-ticket text-warning me-2"></i>Raffle Management</h2>
+        <button class="btn btn-warning" data-bs-toggle="modal" data-bs-target="#createRaffleModal">
+            <i class="fas fa-plus me-1"></i>Create Raffle
+        </button>
+    </div>
+
+    {% if raffles %}
+    <div class="table-responsive">
+        <table class="table table-dark table-hover">
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Product Value</th>
+                    <th>Ticket Price</th>
+                    <th>Sold / Total</th>
+                    <th>Status</th>
+                    <th>Winner</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for raffle in raffles %}
+                <tr>
+                    <td>{{ raffle.title }}</td>
+                    <td>KSh {{ "%.0f"|format(raffle.product_value) }}</td>
+                    <td>KSh {{ "%.0f"|format(raffle.ticket_price) }}</td>
+                    <td>
+                        {{ raffle.tickets_sold }} / {{ raffle.total_tickets }}
+                        <div class="progress mt-1" style="height:4px;">
+                            <div class="progress-bar bg-warning" style="width:{{ (raffle.tickets_sold / raffle.total_tickets * 100)|int }}%"></div>
+                        </div>
+                    </td>
+                    <td>
+                        {% if raffle.status == 'active' %}
+                        <span class="badge bg-success">Active</span>
+                        {% elif raffle.status == 'completed' %}
+                        <span class="badge bg-info">Completed</span>
+                        {% elif raffle.status == 'cancelled' %}
+                        <span class="badge bg-secondary">Cancelled</span>
+                        {% elif raffle.status == 'drawing' %}
+                        <span class="badge bg-warning text-dark">Drawing</span>
+                        {% else %}
+                        <span class="badge bg-dark">{{ raffle.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if raffle.winner %}
+                        {{ raffle.winner.username }} (#{{ raffle.winner_ticket_number }})
+                        {% else %}-{% endif %}
+                    </td>
+                    <td>
+                        {% if raffle.status == 'active' %}
+                        <form method="POST" class="d-inline">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="action" value="draw">
+                            <input type="hidden" name="raffle_id" value="{{ raffle.id }}">
+                            <button class="btn btn-sm btn-info" title="Force Draw"><i class="fas fa-dice"></i></button>
+                        </form>
+                        <form method="POST" class="d-inline">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="action" value="cancel">
+                            <input type="hidden" name="raffle_id" value="{{ raffle.id }}">
+                            <button class="btn btn-sm btn-danger" title="Cancel"><i class="fas fa-ban"></i></button>
+                        </form>
+                        {% endif %}
+                        <a href="{{ url_for('raffle_detail', raffle_id=raffle.id) }}" class="btn btn-sm btn-outline-warning" title="View"><i class="fas fa-eye"></i></a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="text-center py-5">
+        <p class="text-muted">No raffles yet. Create your first raffle!</p>
+    </div>
+    {% endif %}
+</div>
+
+<div class="modal fade" id="createRaffleModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content bg-dark border-warning">
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="action" value="create">
+                <div class="modal-header border-warning">
+                    <h5 class="modal-title text-warning">Create New Raffle</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">Product</label>
+                        <select name="product_id" class="form-select bg-dark text-light border-secondary" required>
+                            <option value="">Select a product...</option>
+                            {% for p in products %}
+                            <option value="{{ p.id }}" data-price="{{ p.selling_price }}">{{ p.name }} (KSh {{ "%.0f"|format(p.selling_price) }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Title</label>
+                        <input type="text" name="title" class="form-control bg-dark text-light border-secondary" placeholder="e.g. Win a Samsung TV!">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Description</label>
+                        <textarea name="description" class="form-control bg-dark text-light border-secondary" rows="3"></textarea>
+                    </div>
+                    <div class="row">
+                        <div class="col-6 mb-3">
+                            <label class="form-label">Product Value (KSh)</label>
+                            <input type="number" name="product_value" class="form-control bg-dark text-light border-secondary" step="1">
+                            <small class="text-muted">Leave blank to use product price</small>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label class="form-label">Ticket Price (KSh)</label>
+                            <input type="number" name="ticket_price" class="form-control bg-dark text-light border-secondary" value="10" step="1" required>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Duration (days)</label>
+                        <input type="number" name="duration_days" class="form-control bg-dark text-light border-secondary" value="7" min="1" max="90">
+                    </div>
+                </div>
+                <div class="modal-footer border-warning">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-warning fw-bold">Create Raffle</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

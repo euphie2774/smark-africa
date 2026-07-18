@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Raffles - SMARKAFRICA{% endblock %}
+{% block content %}
+<div class="container">
+    <div class="text-center mb-4">
+        <h1 class="fw-bold"><i class="fas fa-ticket text-warning me-2"></i>SMARKAFRICA Raffles</h1>
+        <p class="text-muted">Win premium products for as low as KSh 10! Buy tickets and stand a chance to win big.</p>
+    </div>
+
+    {% if active_raffles %}
+    <div class="row g-4 mb-5">
+        {% for raffle in active_raffles %}
+        <div class="col-md-6 col-lg-4">
+            <div class="card h-100 border-0 shadow-sm raffle-card">
+                {% if raffle.product and raffle.product.image_url %}
+                <img src="{{ raffle.product.image_url }}" class="card-img-top" alt="{{ raffle.title }}" style="height:200px;object-fit:cover;">
+                {% else %}
+                <div class="card-img-top d-flex align-items-center justify-content-center bg-dark" style="height:200px;">
+                    <i class="fas fa-gift fa-3x text-warning"></i>
+                </div>
+                {% endif %}
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h5 class="card-title mb-0">{{ raffle.title }}</h5>
+                        <span class="badge bg-success">LIVE</span>
+                    </div>
+                    <p class="text-muted small mb-2">Worth <strong class="text-warning">KSh {{ "%.0f"|format(raffle.product_value) }}</strong></p>
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between small mb-1">
+                            <span>{{ raffle.tickets_sold }}/{{ raffle.total_tickets }} tickets sold</span>
+                            <span class="fw-bold">KSh {{ "%.0f"|format(raffle.ticket_price) }}/ticket</span>
+                        </div>
+                        <div class="progress" style="height:8px;">
+                            <div class="progress-bar bg-warning" style="width:{{ (raffle.tickets_sold / raffle.total_tickets * 100)|int }}%"></div>
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <small class="text-muted"><i class="fas fa-clock me-1"></i>Ends {{ raffle.ends_at.strftime('%b %d, %Y') }}</small>
+                        <a href="{{ url_for('raffle_detail', raffle_id=raffle.id) }}" class="btn btn-sm btn-warning fw-bold">Buy Tickets</a>
+                    </div>
+                </div>
+                {% set pct = (raffle.tickets_sold / raffle.total_tickets * 100)|int %}
+                {% if pct >= 80 %}
+                <div class="card-footer bg-danger text-white text-center small fw-bold py-1">
+                    <i class="fas fa-fire me-1"></i>Almost sold out! Only {{ raffle.total_tickets - raffle.tickets_sold }} tickets left!
+                </div>
+                {% elif pct >= 50 %}
+                <div class="card-footer bg-warning text-dark text-center small fw-bold py-1">
+                    <i class="fas fa-bolt me-1"></i>Selling fast! {{ raffle.total_tickets - raffle.tickets_sold }} tickets remaining
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-center py-5 mb-5">
+        <i class="fas fa-hourglass-half fa-3x text-muted mb-3"></i>
+        <h4>No active raffles right now</h4>
+        <p class="text-muted">Check back soon! New raffles are added regularly with amazing products.</p>
+    </div>
+    {% endif %}
+
+    {% if completed_raffles %}
+    <h3 class="mb-3"><i class="fas fa-trophy text-warning me-2"></i>Recent Winners</h3>
+    <div class="table-responsive mb-5">
+        <table class="table table-dark table-hover">
+            <thead>
+                <tr>
+                    <th>Product</th>
+                    <th>Value</th>
+                    <th>Winner</th>
+                    <th>Winning Ticket</th>
+                    <th>Date</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for raffle in completed_raffles %}
+                <tr>
+                    <td>{{ raffle.title }}</td>
+                    <td class="text-warning fw-bold">KSh {{ "%.0f"|format(raffle.product_value) }}</td>
+                    <td>
+                        {% if raffle.winner %}
+                        <i class="fas fa-crown text-warning me-1"></i>{{ raffle.winner.username }}
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
+                    <td>#{{ raffle.winner_ticket_number }}</td>
+                    <td>{{ raffle.drawn_at.strftime('%b %d, %Y') if raffle.drawn_at else '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    {% if current_user.is_authenticated and user_tickets %}
+    <h3 class="mb-3"><i class="fas fa-receipt me-2"></i>My Tickets</h3>
+    <div class="row g-3 mb-4">
+        {% for ticket in user_tickets %}
+        <div class="col-6 col-md-4 col-lg-3">
+            <div class="card border-warning bg-dark text-center p-3">
+                <div class="fw-bold text-warning fs-4">#{{ ticket.ticket_number }}</div>
+                <small class="text-muted">{{ ticket.raffle.title[:25] }}...</small>
+                {% if ticket.raffle.status == 'completed' and ticket.raffle.winner_ticket_number == ticket.ticket_number %}
+                <span class="badge bg-success mt-1"><i class="fas fa-trophy me-1"></i>WINNER!</span>
+                {% elif ticket.raffle.status == 'completed' %}
+                <span class="badge bg-secondary mt-1">Draw complete</span>
+                {% else %}
+                <span class="badge bg-info mt-1">Active</span>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="card bg-dark border-warning mb-4">
+        <div class="card-body text-center">
+            <h4 class="text-warning"><i class="fas fa-shield-halved me-2"></i>Fair & Transparent</h4>
+            <p class="text-muted mb-0">Our raffle system uses a cryptographically secure random algorithm. Every ticket has an equal chance of winning. Winners are drawn automatically when all tickets sell out, or at the scheduled end date.</p>
+        </div>
+    </div>
+</div>
+{% endblock %}

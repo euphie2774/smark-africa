@@ -1486,6 +1486,33 @@ h6 {
     max-height: min(72vh, 520px);
     overflow-y: auto;
     overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 991.98px) {
+    .navbar-collapse {
+        max-height: 80vh;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+    }
+    .admin-scroll-dropdown {
+        max-height: none;
+        overflow-y: visible;
+    }
+}
+
+.raffle-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-gold) !important;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+.raffle-card:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--gold-glow), var(--card-shadow);
+}
+.raffle-card .progress {
+    background: rgba(0,0,0,0.3);
 }
 
 .admin-scroll-dropdown::-webkit-scrollbar {

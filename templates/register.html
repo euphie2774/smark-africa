@@ -14,15 +14,22 @@
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                         <input type="hidden" name="verification_step" value="confirm">
                         <div class="alert alert-info">
-                            Enter the 6-digit code sent to {{ pending_registration.email }}.
+                            Enter the 6-digit code sent to {{ pending_registration.email }}{% if pending_registration.phone %} and {{ pending_registration.phone }}{% endif %}.
                         </div>
                         <div class="mb-3">
                             <label for="verification_code" class="form-label">Verification Code</label>
                             <input type="text" class="form-control form-control-lg text-center" id="verification_code" name="verification_code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required>
                         </div>
-                        <div class="d-grid">
+                        <div class="d-grid gap-2">
                             <button type="submit" class="btn btn-success btn-lg">Verify and Create Account</button>
                         </div>
+                    </form>
+                    <form method="POST" action="{{ url_for('resend_verification_code') }}" class="mt-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-outline-secondary">Resend Code</button>
+                        </div>
+                        <p class="text-muted text-center small mt-2">Didn't receive the code? Click to resend.</p>
                     </form>
                     {% else %}
                     <form method="POST">

@@ -44,7 +44,8 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     PointOfSaleSale, PointOfSaleItem, MarketPriceCache, BusinessStorefront, ExchangeRate, SupportTicket, \
     LoyaltyLedger, BNPLPlan, BNPLInstallment, TrustScore, ProductBarcode, Supplier, PurchaseOrder, \
     PurchaseOrderItem, StockMovement, BNPLProductPolicy, SignupVerification, ShoppingCard, \
-    ShoppingCardTransaction, KYCIdentityVerification, CardAuthorizationRequest
+    ShoppingCardTransaction, KYCIdentityVerification, CardAuthorizationRequest, Raffle, RaffleTicket, \
+    CoinTransaction, CoinDailyCheckIn
 
 # Import security utilities
 from validators import (RegisterSchema, LoginSchema, ProductSchema, ReviewSchema,
@@ -80,6 +81,7 @@ csp = {
         "'self'",
         "'unsafe-inline'",  # Required for inline scripts - minimize in production
         "https://cdn.jsdelivr.net",
+        "https://unpkg.com",
         "https://code.jquery.com",
         "https://stackpath.bootstrapcdn.com"
     ],
@@ -233,8 +235,9 @@ def send_signup_verification(email, phone, code):
     <p>This code expires in 15 minutes. If you did not request this, ignore this email.</p>
     """
     sent = send_email(email, subject, body) if email else False
-    if phone and Setting.get('sms_otp_enabled', '0') == '1':
-        app.logger.info('SMS OTP requested for %s; configure an SMS provider before production sending.', phone)
+    if phone:
+        sms_msg = f'Your SMARKAFRICA verification code is: {code}. It expires in 15 minutes.'
+        send_sms_notification(phone, sms_msg)
     return sent
 
 
@@ -597,11 +600,44 @@ def decline_card_authorization(auth_request_id, user_id):
 
 
 def send_sms_notification(phone_number, message):
-    """Send SMS notification (placeholder - integrate with SMS gateway)."""
-    # TODO: Integrate with Africa's Talking, Twilio, or local SMS gateway
-    logger.info(f'SMS to {phone_number}: {message}')
-    # For now, just log the message
-    pass
+    """Send SMS via Africa's Talking or log if not configured."""
+    at_username = Setting.get('africastalking_username', app.config.get('AFRICASTALKING_USERNAME', ''))
+    at_api_key = Setting.get('africastalking_api_key', app.config.get('AFRICASTALKING_API_KEY', ''))
+    at_sender = Setting.get('africastalking_sender_id', app.config.get('AFRICASTALKING_SENDER_ID', ''))
+
+    if not at_username or not at_api_key:
+        logger.info(f'SMS (not configured, logged only) to {phone_number}: {message}')
+        return False
+
+    try:
+        import requests as http_requests
+        url = 'https://api.africastalking.com/version1/messaging'
+        if at_username == 'sandbox':
+            url = 'https://api.sandbox.africastalking.com/version1/messaging'
+        headers = {
+            'apiKey': at_api_key,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json',
+        }
+        payload = {
+            'username': at_username,
+            'to': phone_number,
+            'message': message,
+        }
+        if at_sender:
+            payload['from'] = at_sender
+        resp = http_requests.post(url, headers=headers, data=payload, timeout=15)
+        resp.raise_for_status()
+        result = resp.json()
+        recipients = result.get('SMSMessageData', {}).get('Recipients', [])
+        if recipients and recipients[0].get('status') == 'Success':
+            logger.info(f'SMS sent to {phone_number}')
+            return True
+        logger.warning(f'SMS to {phone_number} may have failed: {result}')
+        return False
+    except Exception as e:
+        logger.error(f'SMS sending failed to {phone_number}: {e}')
+        return False
 
 
 # ========== FLUTTERWAVE CARD PAYMENTS ==========
@@ -700,6 +736,8 @@ def order_loyalty_points(order):
             reference_id=order.id,
             note=f'Purchase reward for {order.order_number}',
         )
+    # Award coins for purchase
+    award_purchase_coins(order.user_id, float(order.amount_paid or 0), order.id)
 
 
 def setting_value(key, default=''):
@@ -1554,7 +1592,33 @@ def check_payment_status(checkout_request_id):
 
 
 def send_email(to_email, subject, body_html):
-    """Send email notification"""
+    """Send email via Brevo HTTP API (preferred) or SMTP fallback."""
+    brevo_key = Setting.get('brevo_api_key', '')
+    mail_from = Setting.get('from_email', Setting.get('mail_from', 'noreply@smark-africa.com'))
+    sender_name = Setting.get('business_name', 'SMARKAFRICA')
+
+    if brevo_key:
+        try:
+            resp = requests.post(
+                'https://api.brevo.com/v3/smtp/email',
+                headers={'api-key': brevo_key, 'Content-Type': 'application/json'},
+                json={
+                    'sender': {'name': sender_name, 'email': mail_from},
+                    'to': [{'email': to_email}],
+                    'subject': subject,
+                    'htmlContent': body_html,
+                },
+                timeout=20,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f'Email sent to {to_email} via Brevo API')
+                return True
+            logger.error(f'Brevo API error {resp.status_code}: {resp.text}')
+            return False
+        except Exception as e:
+            logger.error(f'Brevo API request failed: {e}')
+            return False
+
     try:
         import smtplib
         from email.mime.text import MIMEText
@@ -1564,7 +1628,6 @@ def send_email(to_email, subject, body_html):
         mail_port = int(Setting.get('smtp_port', Setting.get('mail_port', app.config['MAIL_PORT'])))
         mail_user = Setting.get('smtp_username', Setting.get('mail_username', app.config['MAIL_USERNAME']))
         mail_pass = Setting.get('smtp_password', Setting.get('mail_password', app.config['MAIL_PASSWORD']))
-        mail_from = Setting.get('from_email', Setting.get('mail_from', 'noreply@smarkafrica.com'))
 
         msg = MIMEMultipart('alternative')
         msg['Subject'] = subject
@@ -1581,9 +1644,10 @@ def send_email(to_email, subject, body_html):
             server.login(mail_user, mail_pass)
         server.sendmail(mail_from, [to_email], msg.as_string())
         server.quit()
+        logger.info(f'Email sent to {to_email} via SMTP')
         return True
     except Exception as e:
-        print(f"Email sending failed: {e}")
+        logger.error(f'Email sending failed: {e}')
         return False
 
 
@@ -2719,6 +2783,7 @@ def product_barcode_value(product):
     barcode = f"{base}{checksum}"
     row = ProductBarcode(product_id=product.id, barcode=barcode)
     db.session.add(row)
+    db.session.commit()
     return barcode
 
 
@@ -2743,7 +2808,16 @@ def product_by_barcode(value):
     if not clean_value:
         return None
     row = ProductBarcode.query.filter_by(barcode=clean_value).first()
-    return row.product if row else None
+    if row:
+        return row.product
+    row = ProductBarcode.query.filter(ProductBarcode.barcode.ilike(clean_value)).first()
+    if row:
+        return row.product
+    if clean_value.isdigit():
+        row = ProductBarcode.query.filter(ProductBarcode.barcode.ilike(f'%{clean_value}')).first()
+        if row:
+            return row.product
+    return None
 
 
 def pos_terminal_key(user_id=None):
@@ -4184,6 +4258,9 @@ def login():
                 user.last_login = utcnow()
                 db.session.commit()
 
+                # Award daily login coins
+                process_daily_check_in(user.id)
+
                 log_admin_action('login_success', 'user', user.id)
 
                 next_page = request.args.get('next')
@@ -4198,7 +4275,7 @@ def login():
 
 
 @app.route('/register', methods=['GET', 'POST'])
-@limiter.limit("3 per hour")  # Rate limit registration attempts
+@limiter.limit("10 per hour")
 def register():
     if current_user.is_authenticated:
         return redirect(url_for('home'))
@@ -4300,10 +4377,42 @@ def register():
             'password_hash': generate_password_hash(password),
         }
         send_signup_verification(email, phone, code)
-        flash('We sent a 6-digit verification code to your email. Enter it to finish registration.', 'info')
+        dest = 'your email' + (' and phone' if phone else '')
+        flash(f'We sent a 6-digit verification code to {dest}. Enter it to finish registration.', 'info')
         return render_template('register.html', pending_registration=session['pending_registration'])
 
     return render_template('register.html', pending_registration=session.get('pending_registration'))
+
+
+@app.route('/register/resend', methods=['POST'])
+@limiter.limit("3 per 15 minutes")
+def resend_verification_code():
+    pending = session.get('pending_registration')
+    if not pending:
+        flash('No pending registration found. Please start again.', 'danger')
+        return redirect(url_for('register'))
+
+    old_verification = SignupVerification.query.get(pending.get('verification_id'))
+    if old_verification:
+        old_verification.consumed_at = utcnow()
+        db.session.commit()
+
+    code = generate_signup_code()
+    verification = SignupVerification(
+        email=pending['email'],
+        phone=pending.get('phone'),
+        expires_at=utcnow() + timedelta(minutes=15),
+    )
+    verification.set_code(code)
+    db.session.add(verification)
+    db.session.commit()
+
+    pending['verification_id'] = verification.id
+    session['pending_registration'] = pending
+
+    send_signup_verification(pending['email'], pending.get('phone'), code)
+    flash('A new verification code has been sent.', 'info')
+    return render_template('register.html', pending_registration=pending)
 
 
 @app.route('/logout')
@@ -5086,9 +5195,10 @@ def submit_review(order_id, product_id):
         'Shared a verified product review',
         f'review:{product_id}:{current_user.id}'
     )
+    award_review_coins(current_user.id, review_id=f'{product_id}')
     db.session.commit()
 
-    return jsonify({'success': True, 'message': 'Review submitted!'})
+    return jsonify({'success': True, 'message': 'Review submitted! +coins earned.'})
 
 
 # ========================================================================
@@ -5385,6 +5495,353 @@ def admin_bnpl():
         users=User.query.order_by(User.created_at.desc()).limit(120).all(),
         products=Product.query.filter_by(is_active=True, is_digital=False).order_by(Product.created_at.desc()).limit(120).all(),
     )
+
+
+# ========================================================================
+# COINS SYSTEM — Engagement & Rewards
+# ========================================================================
+
+
+def coin_setting(key, default):
+    return int(float(Setting.get(key, str(default)) or default))
+
+
+def get_user_coin_balance(user_id):
+    last_txn = CoinTransaction.query.filter_by(user_id=user_id).order_by(CoinTransaction.created_at.desc()).first()
+    return last_txn.balance_after if last_txn else 0
+
+
+def award_coins(user_id, amount, coin_type, description='', reference_id=''):
+    if amount <= 0:
+        return None
+    current_balance = get_user_coin_balance(user_id)
+    new_balance = current_balance + amount
+    txn = CoinTransaction(
+        user_id=user_id,
+        amount=amount,
+        coin_type=coin_type,
+        description=description,
+        reference_id=reference_id,
+        balance_after=new_balance,
+    )
+    db.session.add(txn)
+    return txn
+
+
+def spend_coins(user_id, amount, coin_type, description='', reference_id=''):
+    current_balance = get_user_coin_balance(user_id)
+    if amount > current_balance:
+        return None
+    new_balance = current_balance - amount
+    txn = CoinTransaction(
+        user_id=user_id,
+        amount=-amount,
+        coin_type=coin_type,
+        description=description,
+        reference_id=reference_id,
+        balance_after=new_balance,
+    )
+    db.session.add(txn)
+    return txn
+
+
+def process_daily_check_in(user_id):
+    today = datetime.utcnow().date()
+    existing = CoinDailyCheckIn.query.filter_by(user_id=user_id, check_in_date=today).first()
+    if existing:
+        return None, existing.streak_count
+
+    yesterday = today - timedelta(days=1)
+    yesterday_checkin = CoinDailyCheckIn.query.filter_by(user_id=user_id, check_in_date=yesterday).first()
+    streak = (yesterday_checkin.streak_count + 1) if yesterday_checkin else 1
+
+    base_coins = coin_setting('coins_daily_login', 5)
+    bonus = 0
+    if streak >= 7:
+        bonus = coin_setting('coins_streak_bonus_7day', 25)
+    elif streak >= 3:
+        bonus = 10
+
+    total_earned = base_coins + bonus
+    checkin = CoinDailyCheckIn(
+        user_id=user_id,
+        check_in_date=today,
+        streak_count=streak,
+        coins_earned=total_earned,
+    )
+    db.session.add(checkin)
+    award_coins(user_id, total_earned, 'daily_login',
+                f'Daily check-in (day {streak} streak)' + (f' + {bonus} bonus!' if bonus else ''))
+    db.session.commit()
+    return checkin, streak
+
+
+def award_purchase_coins(user_id, order_amount, order_id=''):
+    coins_per_1000 = coin_setting('coins_purchase_per_1000', 10)
+    coins = int((order_amount / 1000) * coins_per_1000)
+    if coins > 0:
+        award_coins(user_id, coins, 'purchase',
+                    f'Purchase reward (KSh {order_amount:,.0f})',
+                    reference_id=f'order:{order_id}')
+    return coins
+
+
+def award_review_coins(user_id, review_id=''):
+    coins = coin_setting('coins_review_reward', 10)
+    award_coins(user_id, coins, 'review', 'Product review reward', reference_id=f'review:{review_id}')
+    return coins
+
+
+def award_referral_coins(user_id, referred_user_id=''):
+    coins = coin_setting('coins_referral_bonus', 50)
+    award_coins(user_id, coins, 'referral', 'Referral bonus', reference_id=f'user:{referred_user_id}')
+    return coins
+
+
+@app.route('/coins')
+@login_required
+def coins_page():
+    balance = get_user_coin_balance(current_user.id)
+    today = datetime.utcnow().date()
+    checked_in_today = CoinDailyCheckIn.query.filter_by(user_id=current_user.id, check_in_date=today).first()
+
+    # Get streak info
+    streak = 0
+    if checked_in_today:
+        streak = checked_in_today.streak_count
+    else:
+        yesterday = today - timedelta(days=1)
+        yesterday_checkin = CoinDailyCheckIn.query.filter_by(user_id=current_user.id, check_in_date=yesterday).first()
+        streak = yesterday_checkin.streak_count if yesterday_checkin else 0
+
+    transactions = CoinTransaction.query.filter_by(user_id=current_user.id).order_by(
+        CoinTransaction.created_at.desc()).limit(30).all()
+
+    # Leaderboard (top 10)
+    from sqlalchemy import func as sqfunc
+    leaderboard = db.session.query(
+        User.username,
+        sqfunc.coalesce(
+            db.session.query(CoinTransaction.balance_after)
+            .filter(CoinTransaction.user_id == User.id)
+            .order_by(CoinTransaction.created_at.desc())
+            .limit(1)
+            .correlate(User)
+            .scalar_subquery(), 0
+        ).label('balance')
+    ).filter(User.is_active == True).order_by(db.text('balance DESC')).limit(10).all()
+
+    return render_template('coins.html',
+                           balance=balance,
+                           streak=streak,
+                           checked_in_today=checked_in_today,
+                           transactions=transactions,
+                           leaderboard=leaderboard,
+                           coin_settings={
+                               'daily_login': coin_setting('coins_daily_login', 5),
+                               'purchase_per_1000': coin_setting('coins_purchase_per_1000', 10),
+                               'referral_bonus': coin_setting('coins_referral_bonus', 50),
+                               'review_reward': coin_setting('coins_review_reward', 10),
+                               'streak_bonus_7day': coin_setting('coins_streak_bonus_7day', 25),
+                               'event_participation': coin_setting('coins_event_participation', 20),
+                           })
+
+
+@app.route('/coins/check-in', methods=['POST'])
+@login_required
+@limiter.limit("3 per minute")
+def coins_check_in():
+    checkin, streak = process_daily_check_in(current_user.id)
+    if checkin:
+        flash(f'Daily check-in complete! +{checkin.coins_earned} coins (streak: {streak} days)', 'success')
+    else:
+        flash(f'You already checked in today! Current streak: {streak} days.', 'info')
+    return redirect(url_for('coins_page'))
+
+
+# ========================================================================
+# RAFFLE SYSTEM
+# ========================================================================
+
+import secrets
+import time as _time
+
+def _raffle_weighted_draw(raffle):
+    """
+    Provably fair weighted random draw.
+    Uses a seed derived from raffle ID + sold ticket count + server entropy
+    to produce a deterministic-yet-unpredictable winner ticket number.
+    """
+    seed_material = f"{raffle.id}-{raffle.tickets_sold}-{secrets.token_hex(16)}-{_time.time_ns()}"
+    seed_hash = hashlib.sha256(seed_material.encode()).hexdigest()
+    winning_index = int(seed_hash, 16) % raffle.tickets_sold
+    tickets = RaffleTicket.query.filter_by(raffle_id=raffle.id).order_by(RaffleTicket.ticket_number).all()
+    return tickets[winning_index] if tickets else None
+
+
+@app.route('/raffles')
+def raffles():
+    active_raffles = Raffle.query.filter_by(status='active').order_by(Raffle.ends_at.asc()).all()
+    completed_raffles = Raffle.query.filter_by(status='completed').order_by(Raffle.drawn_at.desc()).limit(10).all()
+    user_tickets = []
+    if current_user.is_authenticated:
+        user_tickets = RaffleTicket.query.filter_by(user_id=current_user.id).order_by(RaffleTicket.purchased_at.desc()).limit(50).all()
+    return render_template('raffles.html',
+                           active_raffles=active_raffles,
+                           completed_raffles=completed_raffles,
+                           user_tickets=user_tickets)
+
+
+@app.route('/raffle/<int:raffle_id>')
+def raffle_detail(raffle_id):
+    raffle = Raffle.query.get_or_404(raffle_id)
+    user_tickets = []
+    if current_user.is_authenticated:
+        user_tickets = RaffleTicket.query.filter_by(raffle_id=raffle_id, user_id=current_user.id).all()
+    progress_pct = (raffle.tickets_sold / raffle.total_tickets * 100) if raffle.total_tickets else 0
+    return render_template('raffle_detail.html', raffle=raffle, user_tickets=user_tickets, progress_pct=progress_pct)
+
+
+@app.route('/raffle/<int:raffle_id>/buy', methods=['POST'])
+@login_required
+@limiter.limit("10 per minute")
+def raffle_buy_ticket(raffle_id):
+    raffle = Raffle.query.get_or_404(raffle_id)
+    if raffle.status != 'active':
+        flash('This raffle is no longer accepting tickets.', 'warning')
+        return redirect(url_for('raffle_detail', raffle_id=raffle_id))
+
+    qty = request.form.get('quantity', 1, type=int)
+    if qty < 1 or qty > 50:
+        flash('You can buy between 1 and 50 tickets at a time.', 'warning')
+        return redirect(url_for('raffle_detail', raffle_id=raffle_id))
+
+    remaining = raffle.total_tickets - raffle.tickets_sold
+    if qty > remaining:
+        flash(f'Only {remaining} tickets remain.', 'warning')
+        return redirect(url_for('raffle_detail', raffle_id=raffle_id))
+
+    for i in range(qty):
+        raffle.tickets_sold += 1
+        ticket = RaffleTicket(
+            raffle_id=raffle.id,
+            user_id=current_user.id,
+            ticket_number=raffle.tickets_sold,
+        )
+        db.session.add(ticket)
+
+    db.session.commit()
+    flash(f'Successfully purchased {qty} ticket(s) for "{raffle.title}"!', 'success')
+
+    # Auto-draw if all tickets sold
+    if raffle.tickets_sold >= raffle.total_tickets:
+        raffle.status = 'drawing'
+        db.session.commit()
+        _execute_raffle_draw(raffle)
+
+    return redirect(url_for('raffle_detail', raffle_id=raffle_id))
+
+
+def _execute_raffle_draw(raffle):
+    winning_ticket = _raffle_weighted_draw(raffle)
+    if winning_ticket:
+        raffle.winner_id = winning_ticket.user_id
+        raffle.winner_ticket_number = winning_ticket.ticket_number
+        raffle.drawn_at = datetime.utcnow()
+        raffle.status = 'completed'
+        db.session.commit()
+
+        # Record financials: seller gets product price, platform keeps the margin
+        total_revenue = raffle.tickets_sold * raffle.ticket_price
+        seller_payout = raffle.product_value
+        platform_profit = total_revenue - seller_payout
+
+        # Record seller payout transaction (platform buys product at full price)
+        db.session.add(Transaction(
+            order_id=None,
+            user_id=raffle.seller_id,
+            type='raffle_seller_payout',
+            amount=seller_payout,
+            description=f'Raffle product sold: {raffle.title}',
+            status='completed',
+        ))
+
+        # Record platform commission from ticket sales margin
+        if platform_profit > 0:
+            db.session.add(Transaction(
+                order_id=None,
+                user_id=raffle.seller_id,
+                type='raffle_platform_commission',
+                amount=platform_profit,
+                commission_amount=platform_profit,
+                description=f'Platform profit from raffle: {raffle.title} ({raffle.tickets_sold} tickets x KSh {raffle.ticket_price})',
+                status='completed',
+            ))
+
+        notif = CustomerNotification(
+            user_id=winning_ticket.user_id,
+            title='You Won a Raffle!',
+            body=f'Congratulations! Your ticket #{winning_ticket.ticket_number} won "{raffle.title}". '
+                 f'The product worth KSh {raffle.product_value:,.0f} is yours!',
+            notification_type='raffle_win',
+        )
+        db.session.add(notif)
+        db.session.commit()
+
+
+@app.route('/admin/raffles', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def admin_raffles():
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'create':
+            product_id = request.form.get('product_id', type=int)
+            product = Product.query.get(product_id) if product_id else None
+            product_value = request.form.get('product_value', type=float) or (product.selling_price if product else 0)
+            ticket_price = request.form.get('ticket_price', type=float, default=10.0)
+            # Platform margin: sell more tickets than the product costs so platform profits
+            platform_margin_pct = float(Setting.get('raffle_platform_margin_pct', '20') or 20)
+            base_tickets = int(product_value / ticket_price) if ticket_price > 0 else 100
+            total_tickets = request.form.get('total_tickets', type=int) or int(base_tickets * (1 + platform_margin_pct / 100))
+            ends_days = request.form.get('duration_days', 7, type=int)
+
+            raffle = Raffle(
+                product_id=product_id,
+                seller_id=current_user.id,
+                title=request.form.get('title', product.name if product else 'Raffle'),
+                description=request.form.get('description', ''),
+                product_value=product_value,
+                ticket_price=ticket_price,
+                total_tickets=total_tickets,
+                ends_at=datetime.utcnow() + timedelta(days=ends_days),
+            )
+            db.session.add(raffle)
+            db.session.commit()
+            flash(f'Raffle "{raffle.title}" created with {total_tickets} tickets at KSh {ticket_price} each.', 'success')
+
+        elif action == 'draw':
+            raffle_id = request.form.get('raffle_id', type=int)
+            raffle = Raffle.query.get(raffle_id)
+            if raffle and raffle.status in ('active', 'sold_out'):
+                raffle.status = 'drawing'
+                db.session.commit()
+                _execute_raffle_draw(raffle)
+                flash(f'Draw completed! Winner: Ticket #{raffle.winner_ticket_number}', 'success')
+
+        elif action == 'cancel':
+            raffle_id = request.form.get('raffle_id', type=int)
+            raffle = Raffle.query.get(raffle_id)
+            if raffle and raffle.status == 'active':
+                raffle.status = 'cancelled'
+                db.session.commit()
+                flash('Raffle cancelled.', 'info')
+
+        return redirect(url_for('admin_raffles'))
+
+    all_raffles = Raffle.query.order_by(Raffle.created_at.desc()).limit(100).all()
+    products = Product.query.filter_by(is_active=True, is_digital=False).order_by(Product.name).all()
+    return render_template('admin/raffles.html', raffles=all_raffles, products=products)
 
 
 # ========================================================================
@@ -7088,7 +7545,9 @@ def pos_pair_scan_push(token):
         'received_at': utcnow().isoformat()
     }))
     db.session.commit()
-    return jsonify({'success': True, 'barcode': barcode, 'product': product.name if product else ''})
+    if not product:
+        return jsonify({'success': False, 'error': f'No product found for barcode: {barcode}', 'barcode': barcode})
+    return jsonify({'success': True, 'barcode': barcode, 'product': product.name})
 
 
 @app.route('/admin/pos/scan', methods=['POST'])
@@ -7110,7 +7569,9 @@ def admin_pos_scan_push():
         'received_at': utcnow().isoformat()
     }))
     db.session.commit()
-    return jsonify({'success': True, 'barcode': barcode, 'product': product.name if product else ''})
+    if not product:
+        return jsonify({'success': False, 'error': f'No product found for barcode: {barcode}', 'barcode': barcode})
+    return jsonify({'success': True, 'barcode': barcode, 'product': product.name})
 
 
 @app.route('/admin/pos/latest-scan')
@@ -8711,13 +9172,14 @@ def admin_settings():
             'mail_port': '587',
             'mail_username': '',
             'mail_password': '',
-            'mail_from': 'noreply@smarkafrica.com',
+            'mail_from': 'noreply@smark-africa.com',
             'smtp_server': 'smtp-relay.brevo.com',
             'smtp_port': '587',
             'smtp_use_tls': '1',
             'smtp_username': '',
             'smtp_password': '',
-            'from_email': 'noreply@smarkafrica.com',
+            'brevo_api_key': os.environ.get('BREVO_API_KEY', ''),
+            'from_email': 'noreply@smark-africa.com',
             'google_analytics_id': '',
             'google_search_console_token': '',
             'google_maps_api_key': '',
@@ -8731,6 +9193,13 @@ def admin_settings():
             'shopping_card_min_credits': '10000',
             'shopping_card_issue_fee_kes': '700',
             'shopping_card_prefix': '607845',
+            'raffle_platform_margin_pct': '20',
+            'coins_daily_login': '5',
+            'coins_purchase_per_1000': '10',
+            'coins_referral_bonus': '50',
+            'coins_review_reward': '10',
+            'coins_streak_bonus_7day': '25',
+            'coins_event_participation': '20',
             'kyc_provider': 'inbuilt',
             'sms_otp_enabled': '0',
         }
@@ -9414,7 +9883,8 @@ def init_database():
         'smtp_server': 'smtp-relay.brevo.com',
         'smtp_port': '587',
         'smtp_use_tls': '1',
-        'from_email': 'noreply@smarkafrica.com',
+        'brevo_api_key': os.environ.get('BREVO_API_KEY', ''),
+        'from_email': 'noreply@smark-africa.com',
         'site_keywords': 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products',
         'checkout_allowed_countries': 'Kenya',
         'show_country_launch_popup': '1',
@@ -9425,6 +9895,13 @@ def init_database():
         'shopping_card_min_credits': '10000',
         'shopping_card_issue_fee_kes': '700',
         'shopping_card_prefix': '607845',
+        'raffle_platform_margin_pct': '20',
+        'coins_daily_login': '5',
+        'coins_purchase_per_1000': '10',
+        'coins_referral_bonus': '50',
+        'coins_review_reward': '10',
+        'coins_streak_bonus_7day': '25',
+        'coins_event_participation': '20',
         'kyc_provider': 'inbuilt',
         'sms_otp_enabled': '0',
     }

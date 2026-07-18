@@ -84,6 +84,11 @@ class Config:
     MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD', 'your-app-password')
     MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER', 'noreply@smarkafrica.com')
 
+    # Africa's Talking SMS gateway
+    AFRICASTALKING_USERNAME = os.environ.get('AFRICASTALKING_USERNAME', '')
+    AFRICASTALKING_API_KEY = os.environ.get('AFRICASTALKING_API_KEY', '')
+    AFRICASTALKING_SENDER_ID = os.environ.get('AFRICASTALKING_SENDER_ID', '')
+
     # Admin credentials - must be set in environment
     ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME')
     ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')

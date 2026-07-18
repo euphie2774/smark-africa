@@ -451,7 +451,18 @@
             const data = await response.json();
             if (!data.success) return;
             if (data.cart) renderCart(data.cart);
-            if (status) status.textContent = data.product_name ? `received ${data.product_name}` : `received ${data.barcode}`;
+            if (data.product_name) {
+                if (status) status.textContent = `received ${data.product_name}`;
+            } else if (data.barcode) {
+                if (status) status.textContent = `scanned ${data.barcode} - product not found`;
+                const regBarcodeField = document.querySelector('input[name="barcode"]');
+                if (regBarcodeField) {
+                    regBarcodeField.value = data.barcode;
+                    regBarcodeField.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    regBarcodeField.classList.add('border-warning');
+                    setTimeout(() => regBarcodeField.classList.remove('border-warning'), 3000);
+                }
+            }
         } catch (error) {
             if (status) status.textContent = 'offline';
         }
@@ -496,8 +507,15 @@
         if (data.success) {
             renderCart(data.cart);
             if (status) status.textContent = `added from ${sourceLabel}`;
-        } else if (status) {
-            status.textContent = data.error || 'barcode not found';
+        } else {
+            if (status) status.textContent = data.error || 'barcode not found';
+            const regBarcodeField = document.querySelector('input[name="barcode"]');
+            if (regBarcodeField) {
+                regBarcodeField.value = clean;
+                regBarcodeField.scrollIntoView({behavior: 'smooth', block: 'center'});
+                regBarcodeField.classList.add('border-warning');
+                setTimeout(() => regBarcodeField.classList.remove('border-warning'), 3000);
+            }
         }
     }
     if (wiredInput) {

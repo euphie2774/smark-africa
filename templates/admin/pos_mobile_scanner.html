@@ -43,6 +43,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script>
 (function () {
     const video = document.getElementById('scanner-video');
@@ -51,8 +52,9 @@
     const stopButton = document.getElementById('stop-scanner');
     const manualForm = document.getElementById('manual-scan-form');
     const manualInput = document.getElementById('manual-barcode');
-    let stream = null;
-    let detector = null;
+    let html5Scanner = null;
+    let nativeStream = null;
+    let nativeDetector = null;
     let scanning = false;
     let lastCode = '';
     let lastSentAt = 0;
@@ -85,56 +87,111 @@
         if (barcode === lastCode && now - lastSentAt < 2500) return;
         lastCode = barcode;
         lastSentAt = now;
-        const response = await fetch(scanUrl, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({barcode})
-        });
-        const data = await response.json();
-        if (data.success) {
-            setStatus(data.product ? `Sent ${data.product} to POS.` : `Sent ${barcode} to POS.`, 'success');
-            if (navigator.vibrate) navigator.vibrate(90);
-        } else {
-            setStatus(data.error || 'Could not send barcode.', 'warning');
-        }
-    }
-
-    async function scanLoop() {
-        if (!scanning || !detector) return;
         try {
-            const codes = await detector.detect(video);
-            if (codes && codes.length) {
-                await sendBarcode(codes[0].rawValue);
+            const response = await fetch(scanUrl, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({barcode})
+            });
+            const data = await response.json();
+            if (data.success) {
+                setStatus(data.product ? `Added: ${data.product}` : `Sent barcode: ${barcode}`, 'success');
+                if (navigator.vibrate) navigator.vibrate(90);
+            } else {
+                setStatus(data.error || 'Product not found for this barcode.', 'warning');
             }
         } catch (error) {
-            setStatus('Camera is active. If scanning does not work, use the manual barcode box below.', 'warning');
+            setStatus('Network error. Check your connection.', 'danger');
         }
-        requestAnimationFrame(scanLoop);
     }
 
-    startButton.addEventListener('click', async () => {
-        if (!('BarcodeDetector' in window)) {
-            setStatus('This browser does not support camera barcode detection. Use the manual barcode box below.', 'warning');
-            return;
-        }
+    function useHtml5QrCode() {
+        const scannerContainer = document.createElement('div');
+        scannerContainer.id = 'html5-scanner-region';
+        scannerContainer.style.width = '100%';
+        video.style.display = 'none';
+        video.parentNode.insertBefore(scannerContainer, video.nextSibling);
+
+        html5Scanner = new Html5Qrcode('html5-scanner-region');
+        const config = {
+            fps: 10,
+            qrbox: {width: 280, height: 150},
+            formatsToSupport: [
+                Html5QrcodeSupportedFormats.EAN_13,
+                Html5QrcodeSupportedFormats.EAN_8,
+                Html5QrcodeSupportedFormats.CODE_128,
+                Html5QrcodeSupportedFormats.CODE_39,
+                Html5QrcodeSupportedFormats.UPC_A,
+                Html5QrcodeSupportedFormats.UPC_E,
+                Html5QrcodeSupportedFormats.QR_CODE,
+                Html5QrcodeSupportedFormats.ITF,
+                Html5QrcodeSupportedFormats.CODABAR,
+            ]
+        };
+        html5Scanner.start(
+            {facingMode: 'environment'},
+            config,
+            (decodedText) => { sendBarcode(decodedText); },
+            () => {}
+        ).then(() => {
+            scanning = true;
+            setStatus('Scanning. Point the camera at a barcode.', 'info');
+        }).catch((err) => {
+            setStatus('Camera permission denied or not available. Use the manual barcode box below.', 'danger');
+        });
+    }
+
+    async function useNativeBarcodeDetector() {
         try {
-            detector = new BarcodeDetector({formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code', 'upc_a', 'upc_e']});
-            stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment'}, audio: false});
-            video.srcObject = stream;
+            nativeDetector = new BarcodeDetector({formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code', 'upc_a', 'upc_e']});
+            nativeStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment'}, audio: false});
+            video.srcObject = nativeStream;
             await video.play();
             scanning = true;
             setStatus('Scanning. Point the camera at a barcode.', 'info');
-            scanLoop();
+            nativeScanLoop();
         } catch (error) {
-            setStatus('Camera permission failed. Use the manual barcode box below.', 'danger');
+            useHtml5QrCode();
+        }
+    }
+
+    async function nativeScanLoop() {
+        if (!scanning || !nativeDetector) return;
+        try {
+            const codes = await nativeDetector.detect(video);
+            if (codes && codes.length) {
+                await sendBarcode(codes[0].rawValue);
+            }
+        } catch (error) {}
+        if (scanning) requestAnimationFrame(nativeScanLoop);
+    }
+
+    startButton.addEventListener('click', async () => {
+        if (scanning) return;
+        if ('BarcodeDetector' in window) {
+            await useNativeBarcodeDetector();
+        } else if (typeof Html5Qrcode !== 'undefined') {
+            useHtml5QrCode();
+        } else {
+            setStatus('No barcode scanner available. Use the manual barcode box below.', 'danger');
         }
     });
 
     stopButton.addEventListener('click', () => {
         scanning = false;
-        if (stream) stream.getTracks().forEach(track => track.stop());
-        stream = null;
-        video.srcObject = null;
+        if (nativeStream) {
+            nativeStream.getTracks().forEach(track => track.stop());
+            nativeStream = null;
+            video.srcObject = null;
+        }
+        if (html5Scanner) {
+            html5Scanner.stop().then(() => {
+                const region = document.getElementById('html5-scanner-region');
+                if (region) region.remove();
+                video.style.display = '';
+            }).catch(() => {});
+            html5Scanner = null;
+        }
         setStatus('Scanner stopped.', 'secondary');
     });
 
