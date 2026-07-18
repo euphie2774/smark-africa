@@ -1492,16 +1492,22 @@ def stk_push(phone_number, amount, order_number, callback_url=None):
         if not phone:
             return {'success': False, 'error': 'Enter a valid Safaricom M-Pesa number such as 07XXXXXXXX or 2547XXXXXXXX.'}
 
+        app_base_url = Setting.get('app_base_url', '') or os.environ.get('APP_BASE_URL', '')
         callback_host = request.host_url if request else ''
-        if not callback_url and ('localhost' in callback_host or '127.0.0.1' in callback_host):
-            return {'success': False, 'error': 'Daraja requires a public HTTPS callback URL. Set APP_BASE_URL or run the app on a public HTTPS domain before initiating STK Push.'}
+        is_local = 'localhost' in callback_host or '127.0.0.1' in callback_host
+
+        if not callback_url and is_local and not app_base_url:
+            return {'success': False, 'error': 'Daraja requires a public HTTPS callback URL. Set APP_BASE_URL in environment or admin settings (e.g. your ngrok URL or production domain).'}
 
         timestamp = daraja_timestamp()
         password_str = shortcode + passkey + timestamp
         password = base64.b64encode(password_str.encode()).decode()
 
         if not callback_url:
-            callback_url = url_for('mpesa_callback', _external=True)
+            if app_base_url:
+                callback_url = app_base_url.rstrip('/') + '/mpesa/callback'
+            else:
+                callback_url = url_for('mpesa_callback', _external=True)
 
         headers = {
             'Authorization': f'Bearer {token}',
@@ -9167,6 +9173,7 @@ def admin_settings():
             'daraja_passkey': '',
             'daraja_shortcode': '174379',
             'daraja_env': 'sandbox',
+            'app_base_url': '',
             'business_name': 'SMARKAFRICA',
             'mail_server': 'smtp.gmail.com',
             'mail_port': '587',
@@ -10109,9 +10116,11 @@ def add_security_headers(response):
     return response
 
 
+with app.app_context():
+    init_database()
+
+
 if __name__ == '__main__':
-    with app.app_context():
-        init_database()
     try:
         from gevent.pywsgi import WSGIServer
         app.logger.info('Starting SMARKAFRICA on http://127.0.0.1:5000 via gevent WSGI server')
