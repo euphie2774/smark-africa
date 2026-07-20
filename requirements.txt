@@ -12,7 +12,6 @@ Flask-Caching==2.3.0
 redis==5.0.8
 APScheduler==3.10.4
 psycopg2-binary==2.9.11
-gevent==26.5.0
 qrcode==8.2
 python-barcode==0.15.1
 marshmallow==3.22.0

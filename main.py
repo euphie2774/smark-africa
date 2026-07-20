@@ -10208,15 +10208,8 @@ with app.app_context():
 
 
 if __name__ == '__main__':
-    try:
-        from gevent.pywsgi import WSGIServer
-        app.logger.info('Starting SMARKAFRICA on http://127.0.0.1:5000 via gevent WSGI server')
-        http_server = WSGIServer(('0.0.0.0', 5000), app)
-        http_server.serve_forever()
-    except ImportError:
-        from wsgiref.simple_server import make_server
-        app.logger.warning('gevent is not installed; using stdlib WSGI server for local development only')
-        with make_server('0.0.0.0', 5000, app) as http_server:
-            app.logger.info('Starting SMARKAFRICA on http://127.0.0.1:5000')
-            http_server.serve_forever()
+    # For local development - use Flask's built-in server
+    # Production uses gunicorn (see gunicorn.conf.py)
+    app.logger.info('Starting SMARKAFRICA on http://127.0.0.1:5000')
+    app.run(host='0.0.0.0', port=5000, debug=True)
 

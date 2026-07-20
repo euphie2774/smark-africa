@@ -1,9 +1,11 @@
 import multiprocessing
 
 bind = '0.0.0.0:8000'
-worker_class = 'gevent'
+# Use sync workers to avoid gevent/SSL recursion bug on Python 3.14
+worker_class = 'sync'
 workers = int(__import__('os').environ.get('WEB_CONCURRENCY', multiprocessing.cpu_count() * 2 + 1))
-timeout = 60
+threads = 4  # Use threads for concurrency instead of gevent
+timeout = 120
 graceful_timeout = 30
 max_requests = 1000
 max_requests_jitter = 100
