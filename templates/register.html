@@ -69,11 +69,22 @@
                         </div>
                         <div class="mb-3">
                             <label for="password" class="form-label">Password</label>
-                            <input type="password" class="form-control" id="password" name="password" required minlength="6">
+                            <div class="input-group">
+                                <input type="password" class="form-control" id="password" name="password" required minlength="6">
+                                <button class="btn btn-outline-secondary" type="button" onclick="togglePassword('password', this)">
+                                    <i class="fas fa-eye"></i>
+                                </button>
+                            </div>
                         </div>
                         <div class="mb-3">
                             <label for="confirm_password" class="form-label">Confirm Password</label>
-                            <input type="password" class="form-control" id="confirm_password" name="confirm_password" required>
+                            <div class="input-group">
+                                <input type="password" class="form-control" id="confirm_password" name="confirm_password" required>
+                                <button class="btn btn-outline-secondary" type="button" onclick="togglePassword('confirm_password', this)">
+                                    <i class="fas fa-eye"></i>
+                                </button>
+                            </div>
+                            <div id="password-match-feedback" class="form-text"></div>
                         </div>
                         <div class="d-grid">
                             <button type="submit" class="btn btn-success btn-lg">Send Verification Code</button>
@@ -90,4 +101,49 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function togglePassword(fieldId, btn) {
+    var field = document.getElementById(fieldId);
+    var icon = btn.querySelector('i');
+    if (field.type === 'password') {
+        field.type = 'text';
+        icon.classList.replace('fa-eye', 'fa-eye-slash');
+    } else {
+        field.type = 'password';
+        icon.classList.replace('fa-eye-slash', 'fa-eye');
+    }
+}
+
+(function() {
+    var pw = document.getElementById('password');
+    var cpw = document.getElementById('confirm_password');
+    var feedback = document.getElementById('password-match-feedback');
+    if (!pw || !cpw || !feedback) return;
+
+    function checkMatch() {
+        if (!cpw.value) {
+            feedback.textContent = '';
+            cpw.classList.remove('is-valid', 'is-invalid');
+            return;
+        }
+        if (pw.value === cpw.value) {
+            feedback.textContent = 'Passwords match';
+            feedback.className = 'form-text text-success';
+            cpw.classList.remove('is-invalid');
+            cpw.classList.add('is-valid');
+        } else {
+            feedback.textContent = 'Passwords do not match';
+            feedback.className = 'form-text text-danger';
+            cpw.classList.remove('is-valid');
+            cpw.classList.add('is-invalid');
+        }
+    }
+
+    pw.addEventListener('input', checkMatch);
+    cpw.addEventListener('input', checkMatch);
+})();
+</script>
 {% endblock %}

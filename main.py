@@ -1598,31 +1598,33 @@ def check_payment_status(checkout_request_id):
 
 
 def send_email(to_email, subject, body_html):
-    """Send email via Brevo HTTP API (preferred) or SMTP fallback."""
-    brevo_key = Setting.get('brevo_api_key', '')
-    mail_from = Setting.get('from_email', Setting.get('mail_from', 'noreply@smark-africa.com'))
+    """Send email via Resend SDK (preferred) or SMTP fallback."""
+    resend_key = Setting.get('resend_api_key', '') or os.environ.get('RESEND_API_KEY', '')
+    mail_from = Setting.get('from_email', Setting.get('mail_from', ''))
     sender_name = Setting.get('business_name', 'SMARKAFRICA')
 
-    if brevo_key:
+    # Default to verified domain; fall back to Resend test domain only if completely unconfigured
+    if not mail_from:
+        mail_from = 'noreply@smark-africa.com'
+
+    if resend_key:
         try:
-            resp = requests.post(
-                'https://api.brevo.com/v3/smtp/email',
-                headers={'api-key': brevo_key, 'Content-Type': 'application/json'},
-                json={
-                    'sender': {'name': sender_name, 'email': mail_from},
-                    'to': [{'email': to_email}],
-                    'subject': subject,
-                    'htmlContent': body_html,
-                },
-                timeout=20,
-            )
-            if resp.status_code in (200, 201):
-                logger.info(f'Email sent to {to_email} via Brevo API')
+            import resend
+            resend.api_key = resend_key
+            params = {
+                "from": f"{sender_name} <{mail_from}>",
+                "to": [to_email],
+                "subject": subject,
+                "html": body_html,
+            }
+            email = resend.Emails.send(params)
+            if email and email.get('id'):
+                logger.info(f'Email sent to {to_email} via Resend SDK (id={email["id"]})')
                 return True
-            logger.error(f'Brevo API error {resp.status_code}: {resp.text}')
+            logger.error(f'Resend SDK returned unexpected response: {email}')
             return False
         except Exception as e:
-            logger.error(f'Brevo API request failed: {e}')
+            logger.error(f'Resend SDK error: {e}')
             return False
 
     try:
@@ -3849,40 +3851,78 @@ def verify_document_quality(document_path):
         }
 
 
+def _get_cached_settings():
+    """Get settings with caching to avoid DB hit on every request."""
+    cache_key = 'global_settings_dict'
+    if cache:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+    from models import Setting
+    s = {}
+    for row in Setting.query.all():
+        s[row.key] = row.value
+    if cache:
+        cache.set(cache_key, s, timeout=60)
+    return s
+
+
+def _get_cached_platform_ads():
+    """Get platform ads with caching."""
+    cache_key = 'platform_ads_list'
+    if cache:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+    try:
+        active_ads = AdCampaign.query.filter(
+            AdCampaign.status == 'active',
+            AdCampaign.placement.in_(['smarkafrica', 'platform'])
+        ).order_by(AdCampaign.created_at.desc()).limit(8).all()
+        if active_ads:
+            platform_ad = active_ads[0]
+            launched_together = [
+                ad for ad in active_ads
+                if active_ads[0].created_at and ad.created_at and
+                abs((active_ads[0].created_at - ad.created_at).total_seconds()) <= 5
+            ]
+            platform_ads = launched_together if len(launched_together) > 1 else [platform_ad]
+            result = (platform_ad, platform_ads)
+        else:
+            result = (None, [])
+    except Exception:
+        result = (None, [])
+    if cache:
+        cache.set(cache_key, result, timeout=60)
+    return result
+
+
+def _get_cached_hot_sale():
+    """Get hot sale product with caching."""
+    cache_key = 'hot_sale_pop_product'
+    if cache:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached if cached != 'NONE' else None
+    try:
+        hot_sale_pop = Product.query.filter_by(is_active=True, is_hot_sale=True).order_by(
+            Product.hot_sale_started_at.desc(),
+            Product.updated_at.desc()
+        ).first()
+    except Exception:
+        hot_sale_pop = None
+    if cache:
+        cache.set(cache_key, hot_sale_pop if hot_sale_pop else 'NONE', timeout=60)
+    return hot_sale_pop
+
+
 @app.context_processor
 def inject_globals():
     """Inject settings and utility vars into all templates"""
     try:
-        from models import Setting
-        s = {}
-        for row in Setting.query.all():
-            s[row.key] = row.value
-        platform_ad = None
-        platform_ads = []
-        hot_sale_pop = None
-        try:
-            active_ads = AdCampaign.query.filter(
-                AdCampaign.status == 'active',
-                AdCampaign.placement.in_(['smarkafrica', 'platform'])
-            ).order_by(AdCampaign.created_at.desc()).limit(8).all()
-            if active_ads:
-                platform_ad = active_ads[0]
-                launched_together = [
-                    ad for ad in active_ads
-                    if active_ads[0].created_at and ad.created_at and
-                    abs((active_ads[0].created_at - ad.created_at).total_seconds()) <= 5
-                ]
-                platform_ads = launched_together if len(launched_together) > 1 else [platform_ad]
-        except Exception:
-            platform_ad = None
-            platform_ads = []
-        try:
-            hot_sale_pop = Product.query.filter_by(is_active=True, is_hot_sale=True).order_by(
-                Product.hot_sale_started_at.desc(),
-                Product.updated_at.desc()
-            ).first()
-        except Exception:
-            hot_sale_pop = None
+        s = _get_cached_settings()
+        platform_ad, platform_ads = _get_cached_platform_ads()
+        hot_sale_pop = _get_cached_hot_sale()
         return dict(
             settings=s,
             now=datetime.utcnow(),
@@ -4391,7 +4431,7 @@ def register():
 
 
 @app.route('/register/resend', methods=['POST'])
-@limiter.limit("3 per 15 minutes")
+@limiter.limit("10 per hour")
 def resend_verification_code():
     pending = session.get('pending_registration')
     if not pending:
@@ -9180,12 +9220,12 @@ def admin_settings():
             'mail_username': '',
             'mail_password': '',
             'mail_from': 'noreply@smark-africa.com',
-            'smtp_server': 'smtp-relay.brevo.com',
+            'smtp_server': 'smtp.gmail.com',
             'smtp_port': '587',
             'smtp_use_tls': '1',
             'smtp_username': '',
             'smtp_password': '',
-            'brevo_api_key': os.environ.get('BREVO_API_KEY', ''),
+            'resend_api_key': os.environ.get('RESEND_API_KEY', ''),
             'from_email': 'noreply@smark-africa.com',
             'google_analytics_id': '',
             'google_search_console_token': '',
@@ -9219,6 +9259,8 @@ def admin_settings():
             value = request.form.get(key, '').strip() or default
             Setting.set(key, value)
 
+        if cache:
+            cache.delete('global_settings_dict')
         flash('Settings updated successfully!', 'success')
         return redirect(url_for('admin_settings'))
 
@@ -9887,10 +9929,10 @@ def init_database():
         ''',
         'contact_email': 'admin@smarkafrica.com',
         'contact_phone': '+254700000000',
-        'smtp_server': 'smtp-relay.brevo.com',
+        'smtp_server': 'smtp.gmail.com',
         'smtp_port': '587',
         'smtp_use_tls': '1',
-        'brevo_api_key': os.environ.get('BREVO_API_KEY', ''),
+        'resend_api_key': os.environ.get('RESEND_API_KEY', ''),
         'from_email': 'noreply@smark-africa.com',
         'site_keywords': 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products',
         'checkout_allowed_countries': 'Kenya',
