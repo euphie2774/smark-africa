@@ -117,12 +117,26 @@
 
         <div class="card border-0 shadow-sm mb-4">
             <div class="card-header bg-white">
-                <h5 class="mb-0">Email Settings</h5>
+                <h5 class="mb-0">Email Settings (Resend)</h5>
             </div>
             <div class="card-body">
                 <div class="alert alert-info small">
-                    Free relay option: create a Brevo account, verify your sender, copy the SMTP login and key, then use smtp-relay.brevo.com on port 587. The app will send welcome emails, feedback auto-replies, and broadcasts through these settings.
+                    <strong>Resend (recommended):</strong> Get your API key from <a href="https://resend.com/api-keys" target="_blank">resend.com/api-keys</a>.
+                    Verify your domain at <a href="https://resend.com/domains" target="_blank">resend.com/domains</a> to send from your own email address.
+                    Set the API key in your environment variables (RESEND_API_KEY) for security.
                 </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">From Email (must match verified domain)</label>
+                        <input type="email" name="from_email" class="form-control" value="{{ settings.from_email or 'noreply@smark-africa.com' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Business Name (sender name)</label>
+                        <input type="text" name="business_name" class="form-control" value="{{ settings.business_name or 'SMARKAFRICA' }}">
+                    </div>
+                </div>
+                <hr class="my-4">
+                <p class="text-muted small mb-2">SMTP Fallback (only used if Resend API key is not set)</p>
                 <div class="row g-3">
                     <div class="col-md-6">
                         <label class="form-label">SMTP Server</label>
@@ -139,17 +153,13 @@
                             <option value="0">No</option>
                         </select>
                     </div>
-                    <div class="col-md-4">
-                        <label class="form-label">SMTP Username (email)</label>
-                        <input type="email" name="smtp_username" class="form-control" value="{{ settings.smtp_username or '' }}">
+                    <div class="col-md-6">
+                        <label class="form-label">SMTP Username</label>
+                        <input type="text" name="smtp_username" class="form-control" value="{{ settings.smtp_username or '' }}">
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-6">
                         <label class="form-label">SMTP Password</label>
                         <input type="password" name="smtp_password" class="form-control" value="{{ settings.smtp_password or '' }}">
-                    </div>
-                    <div class="col-md-4">
-                        <label class="form-label">From Email</label>
-                        <input type="email" name="from_email" class="form-control" value="{{ settings.from_email or 'noreply@smarkafrica.africa' }}">
                     </div>
                 </div>
             </div>

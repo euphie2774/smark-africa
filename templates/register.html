@@ -31,6 +31,9 @@
                         </div>
                         <p class="text-muted text-center small mt-2">Didn't receive the code? Click to resend.</p>
                     </form>
+                    <div class="text-center mt-3">
+                        <a href="{{ url_for('register', new=1) }}" class="text-muted small">Start over with a different email</a>
+                    </div>
                     {% else %}
                     <form method="POST">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>

@@ -4326,6 +4326,20 @@ def register():
     if current_user.is_authenticated:
         return redirect(url_for('home'))
 
+    # Allow user to start fresh registration with ?new=1
+    if request.args.get('new') == '1':
+        session.pop('pending_registration', None)
+        return redirect(url_for('register'))
+
+    # Clear expired pending registrations automatically
+    pending = session.get('pending_registration')
+    if pending:
+        verification_id = pending.get('verification_id')
+        verification = SignupVerification.query.get(verification_id) if verification_id else None
+        if not verification or verification.consumed_at or verification.expires_at < utcnow():
+            session.pop('pending_registration', None)
+            pending = None
+
     if request.method == 'POST':
         if request.form.get('verification_step') == 'confirm':
             pending = session.get('pending_registration') or {}
