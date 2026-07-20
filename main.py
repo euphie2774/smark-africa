@@ -4318,8 +4318,10 @@ def login():
         username = validated_data['username']
         password = validated_data['password']
 
-        # Use constant-time query to prevent timing attacks
+        # Check by username or email
         user = User.query.filter_by(username=username).first()
+        if not user and '@' in username:
+            user = User.query.filter_by(email=username.lower()).first()
 
         # Constant-time password check
         if user and user.check_password(password):
@@ -8230,6 +8232,40 @@ def admin_make_admin(uid):
 
     flash(f'User {user.username} is {"now admin" if user.is_admin else "no longer admin"}.', 'success')
     return redirect(url_for('admin_users'))
+
+
+@app.route('/admin/users/reset-password/<int:uid>', methods=['GET', 'POST'])
+@login_required
+@mvp_required
+@limiter.limit("5 per hour")
+def admin_reset_password(uid):
+    """MVP-only: Reset any user's password"""
+    user = User.query.get_or_404(uid)
+
+    if request.method == 'POST':
+        new_password = request.form.get('new_password', '')
+        confirm_password = request.form.get('confirm_password', '')
+
+        if len(new_password) < 8:
+            flash('Password must be at least 8 characters.', 'danger')
+            return render_template('admin/reset_password.html', user=user)
+
+        if new_password != confirm_password:
+            flash('Passwords do not match.', 'danger')
+            return render_template('admin/reset_password.html', user=user)
+
+        user.set_password(new_password)
+        db.session.commit()
+
+        log_admin_action('user_password_reset', 'user', uid, {
+            'username': user.username,
+            'reset_by_mvp': current_user.id
+        })
+
+        flash(f'Password reset successfully for {user.username}.', 'success')
+        return redirect(url_for('admin_users'))
+
+    return render_template('admin/reset_password.html', user=user)
 
 
 @app.route('/admin/users/verified-seller/<int:uid>', methods=['POST'])
