@@ -1598,34 +1598,46 @@ def check_payment_status(checkout_request_id):
 
 
 def send_email(to_email, subject, body_html):
-    """Send email via Resend SDK (preferred) or SMTP fallback."""
-    resend_key = Setting.get('resend_api_key', '') or os.environ.get('RESEND_API_KEY', '')
-    mail_from = Setting.get('from_email', Setting.get('mail_from', ''))
+    """Send email via Resend HTTP API (preferred) or SMTP fallback."""
+    # Get API key - prefer env var for security
+    resend_key = os.environ.get('RESEND_API_KEY', '') or Setting.get('resend_api_key', '')
     sender_name = Setting.get('business_name', 'SMARKAFRICA')
 
-    # Default to verified domain; fall back to Resend test domain only if completely unconfigured
-    if not mail_from:
+    # Get from_email - must match verified Resend domain
+    mail_from = Setting.get('from_email', '')
+    if not mail_from or '@smark-africa.com' not in mail_from:
         mail_from = 'noreply@smark-africa.com'
+
+    logger.info(f'send_email: to={to_email}, from={mail_from}, has_resend_key={bool(resend_key)}')
 
     if resend_key:
         try:
-            import resend
-            resend.api_key = resend_key
-            params = {
-                "from": f"{sender_name} <{mail_from}>",
-                "to": [to_email],
-                "subject": subject,
-                "html": body_html,
-            }
-            email = resend.Emails.send(params)
-            if email and email.get('id'):
-                logger.info(f'Email sent to {to_email} via Resend SDK (id={email["id"]})')
+            # Use direct HTTP API to avoid gevent/SDK recursion conflict
+            resp = requests.post(
+                'https://api.resend.com/emails',
+                headers={
+                    'Authorization': f'Bearer {resend_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'from': f'{sender_name} <{mail_from}>',
+                    'to': [to_email],
+                    'subject': subject,
+                    'html': body_html,
+                },
+                timeout=30
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                logger.info(f'Email sent to {to_email} via Resend API (id={data.get("id")})')
                 return True
-            logger.error(f'Resend SDK returned unexpected response: {email}')
+            logger.error(f'Resend API error {resp.status_code}: {resp.text}')
             return False
         except Exception as e:
-            logger.error(f'Resend SDK error: {e}')
+            logger.error(f'Resend API error: {e}', exc_info=True)
             return False
+
+    logger.warning(f'No Resend API key configured, trying SMTP fallback')
 
     try:
         import smtplib
@@ -3958,6 +3970,7 @@ def healthz():
         'database': 'unknown',
         'uploads': 'unknown',
         'daraja': 'configured' if not daraja_config_error() else 'missing_config',
+        'resend_key': 'configured' if os.environ.get('RESEND_API_KEY') else 'missing',
     }
     status = 200
     try:
@@ -3973,6 +3986,24 @@ def healthz():
         checks['uploads'] = 'not_writable'
         status = 503
     return jsonify(checks), status
+
+
+@app.route('/test-email')
+@login_required
+@admin_required
+def test_email():
+    """Test email sending - admin only"""
+    test_to = current_user.email
+    result = send_email(
+        test_to,
+        'SMARKAFRICA Test Email',
+        '<h2>Test Email</h2><p>If you receive this, email sending is working!</p>'
+    )
+    if result:
+        flash(f'Test email sent to {test_to}. Check your inbox (and spam folder).', 'success')
+    else:
+        flash('Email sending failed. Check server logs for details.', 'danger')
+    return redirect(url_for('admin_settings'))
 
 
 # ========================================================================
