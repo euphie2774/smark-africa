@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Coins Management - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h2 class="mb-4"><i class="fas fa-coins me-2 text-warning"></i>Coins Management</h2>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm bg-warning text-dark">
+                <div class="card-body text-center">
+                    <h6>Total Coins in Circulation</h6>
+                    <h2 class="fw-bold">{{ "{:,}".format(total_coins) }}</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm bg-dark text-warning">
+                <div class="card-body text-center">
+                    <h6>Users with Coins</h6>
+                    <h2 class="fw-bold">{{ total_users_with_coins }}</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm bg-success text-white">
+                <div class="card-body text-center">
+                    <h6>Event Participation Reward</h6>
+                    <h2 class="fw-bold">{{ settings.get('coins_event_participation', '20') }}</h2>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-white">
+            <h5 class="mb-0">Coin Reward Settings</h5>
+        </div>
+        <div class="card-body">
+            <form method="POST" action="{{ url_for('admin_coins_settings') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label">Daily Login Reward</label>
+                        <input type="number" name="coins_daily_login" class="form-control" value="{{ settings.get('coins_daily_login', '5') }}" min="0">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Purchase per KSh 1000</label>
+                        <input type="number" name="coins_purchase_per_1000" class="form-control" value="{{ settings.get('coins_purchase_per_1000', '10') }}" min="0">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Referral Bonus</label>
+                        <input type="number" name="coins_referral_bonus" class="form-control" value="{{ settings.get('coins_referral_bonus', '50') }}" min="0">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Review Reward</label>
+                        <input type="number" name="coins_review_reward" class="form-control" value="{{ settings.get('coins_review_reward', '10') }}" min="0">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">7-Day Streak Bonus</label>
+                        <input type="number" name="coins_streak_bonus_7day" class="form-control" value="{{ settings.get('coins_streak_bonus_7day', '25') }}" min="0">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Event Participation</label>
+                        <input type="number" name="coins_event_participation" class="form-control" value="{{ settings.get('coins_event_participation', '20') }}" min="0">
+                    </div>
+                </div>
+                <div class="text-end mt-3">
+                    <button type="submit" class="btn btn-success"><i class="fas fa-save me-2"></i>Save Coin Settings</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-header bg-white">
+            <h5 class="mb-0">Recent Transactions</h5>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>User</th>
+                            <th>Type</th>
+                            <th>Amount</th>
+                            <th>Description</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for tx in recent_transactions %}
+                        <tr>
+                            <td>{{ tx.user.username if tx.user else 'Unknown' }}</td>
+                            <td><span class="badge bg-secondary">{{ tx.coin_type }}</span></td>
+                            <td class="{{ 'text-success' if tx.amount > 0 else 'text-danger' }}">
+                                {{ '+' if tx.amount > 0 else '' }}{{ tx.amount }}
+                            </td>
+                            <td class="small">{{ tx.description or '-' }}</td>
+                            <td class="small">{{ tx.created_at.strftime('%d %b %Y %H:%M') }}</td>
+                        </tr>
+                        {% endfor %}
+                        {% if not recent_transactions %}
+                        <tr><td colspan="5" class="text-center text-muted py-3">No transactions yet</td></tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

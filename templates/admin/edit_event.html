@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Edit Event - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="fas fa-calendar-pen me-2"></i>Edit Event</h2>
+        <a href="{{ url_for('admin_events') }}" class="btn btn-outline-secondary"><i class="fas fa-arrow-left me-1"></i> Back</a>
+    </div>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body">
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Event Title</label>
+                        <input type="text" name="title" class="form-control" required value="{{ event.title }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Hot Event</label>
+                        <select name="is_hot" class="form-select">
+                            <option value="0" {{ '' if event.is_hot else 'selected' }}>Normal</option>
+                            <option value="1" {{ 'selected' if event.is_hot else '' }}>HOT</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Status</label>
+                        <select name="is_active" class="form-select">
+                            <option value="1" {{ 'selected' if event.is_active else '' }}>Active</option>
+                            <option value="0" {{ '' if event.is_active else 'selected' }}>Inactive</option>
+                        </select>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">Description</label>
+                        <textarea name="description" class="form-control" rows="4" required>{{ event.description }}</textarea>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">Offers & Deals</label>
+                        <textarea name="offers" class="form-control" rows="3">{{ event.offers or '' }}</textarea>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Event Start Date & Time</label>
+                        <input type="datetime-local" name="event_date" class="form-control" required value="{{ event.event_date.strftime('%Y-%m-%dT%H:%M') }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Event End Date & Time</label>
+                        <input type="datetime-local" name="end_date" class="form-control" value="{{ event.end_date.strftime('%Y-%m-%dT%H:%M') if event.end_date else '' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Location</label>
+                        <input type="text" name="location" class="form-control" value="{{ event.location or '' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Image URL</label>
+                        <input type="url" name="image_url" class="form-control" value="{{ event.image_url or '' }}">
+                    </div>
+                </div>
+                <div class="text-end mt-4">
+                    <button type="submit" class="btn btn-success btn-lg"><i class="fas fa-save me-2"></i>Update Event</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

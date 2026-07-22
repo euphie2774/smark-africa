@@ -15,13 +15,21 @@ def _database_url(required=False):
 
 
 class Config:
-    # Security: SECRET_KEY must be set in environment, no fallback
+    # Security: SECRET_KEY must be set in environment for production
     SECRET_KEY = os.environ.get('SECRET_KEY')
     if not SECRET_KEY:
-        import secrets
-        SECRET_KEY = secrets.token_hex(32)
         if os.environ.get('FLASK_ENV') == 'production':
             raise RuntimeError('SECRET_KEY environment variable must be set in production')
+        # In development, persist a stable key so sessions survive restarts
+        _key_file = os.path.join(BASE_DIR, '.secret_key')
+        if os.path.exists(_key_file):
+            with open(_key_file, 'r') as f:
+                SECRET_KEY = f.read().strip()
+        else:
+            import secrets
+            SECRET_KEY = secrets.token_hex(32)
+            with open(_key_file, 'w') as f:
+                f.write(SECRET_KEY)
 
     SQLALCHEMY_DATABASE_URI = _database_url(os.environ.get('FLASK_ENV') == 'production')
     SQLALCHEMY_TRACK_MODIFICATIONS = False

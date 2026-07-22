@@ -1,0 +1,386 @@
+{% extends "base.html" %}
+{% block title %}MVP Full Documentation - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4 d-print-none">
+        <h2><i class="fas fa-book-open me-2 text-warning"></i>MVP Full Platform Documentation</h2>
+        <div>
+            <button onclick="window.print()" class="btn btn-warning btn-lg"><i class="fas fa-print me-2"></i>Print Full Documentation</button>
+            <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-secondary ms-2"><i class="fas fa-arrow-left me-1"></i>Back</a>
+        </div>
+    </div>
+
+    <div class="alert alert-warning d-print-none">
+        <i class="fas fa-shield-alt me-2"></i><strong>CONFIDENTIAL - MVP ACCESS ONLY.</strong> This documentation contains full platform details including technical architecture, financial data, and operational information. Do not distribute without authorization.
+    </div>
+
+    <div id="print-content">
+
+        <!-- COVER PAGE -->
+        <div class="page-break text-center py-5">
+            <div style="margin-top: 80px;">
+                <h1 class="display-2 fw-bold text-success">SMARK-AFRICA</h1>
+                <div class="my-4">
+                    <i class="fas fa-globe-africa text-success" style="font-size: 120px;"></i>
+                </div>
+                <svg viewBox="0 0 400 200" style="max-width: 400px; margin: 0 auto; display: block;">
+                    <rect x="50" y="20" width="300" height="160" rx="10" fill="none" stroke="#198754" stroke-width="2"/>
+                    <text x="200" y="60" text-anchor="middle" font-size="14" fill="#198754">E-COMMERCE PLATFORM</text>
+                    <rect x="80" y="80" width="60" height="40" rx="5" fill="#ffc107"/>
+                    <text x="110" y="105" text-anchor="middle" font-size="10" fill="#000">Shop</text>
+                    <rect x="170" y="80" width="60" height="40" rx="5" fill="#198754"/>
+                    <text x="200" y="105" text-anchor="middle" font-size="10" fill="#fff">Pay</text>
+                    <rect x="260" y="80" width="60" height="40" rx="5" fill="#0d6efd"/>
+                    <text x="290" y="105" text-anchor="middle" font-size="10" fill="#fff">Deliver</text>
+                    <line x1="140" y1="100" x2="170" y2="100" stroke="#333" stroke-width="2"/>
+                    <line x1="230" y1="100" x2="260" y2="100" stroke="#333" stroke-width="2"/>
+                    <text x="200" y="155" text-anchor="middle" font-size="12" fill="#666">Kenya's Premier Digital & Physical Marketplace</text>
+                </svg>
+                <h3 class="mt-4 text-warning">FULL MVP DOCUMENTATION</h3>
+                <p class="lead text-muted">Confidential - Internal Use Only</p>
+                <p class="text-muted">www.smark-africa.com</p>
+                <p class="small text-muted mt-3">Generated: {{ now().strftime('%d %B %Y, %H:%M') }}</p>
+            </div>
+        </div>
+
+        <!-- ACKNOWLEDGEMENTS -->
+        <div class="page-break py-5">
+            <h2 class="text-center mb-5 border-bottom pb-3">Acknowledgements</h2>
+            <div class="row justify-content-center">
+                <div class="col-md-8">
+                    <table class="table table-borderless">
+                        <tbody>
+                            <tr><td class="fw-bold">Publisher:</td><td>Euwin Murumbi</td></tr>
+                            <tr><td class="fw-bold">Editor:</td><td>Euwin Murumbi</td></tr>
+                            <tr><td class="fw-bold">Director:</td><td>Euwin Murumbi</td></tr>
+                            <tr><td class="fw-bold">Designer:</td><td>Euwin Murumbi</td></tr>
+                        </tbody>
+                    </table>
+                    <div class="mt-5">
+                        <h5>Social Media & Contact</h5>
+                        <table class="table table-sm">
+                            <tbody>
+                                <tr><td><i class="fas fa-globe me-2"></i>Website</td><td>www.smark-africa.com</td></tr>
+                                <tr><td><i class="fab fa-facebook me-2"></i>Facebook</td><td>@SmarkAfrica</td></tr>
+                                <tr><td><i class="fab fa-twitter me-2"></i>Twitter / X</td><td>@SmarkAfrica</td></tr>
+                                <tr><td><i class="fab fa-instagram me-2"></i>Instagram</td><td>@SmarkAfrica</td></tr>
+                                <tr><td><i class="fab fa-linkedin me-2"></i>LinkedIn</td><td>Smark-Africa</td></tr>
+                                <tr><td><i class="fas fa-envelope me-2"></i>Email</td><td>{{ settings.get('contact_email', 'info@smark-africa.com') }}</td></tr>
+                                <tr><td><i class="fab fa-youtube me-2"></i>YouTube</td><td>@SmarkAfrica</td></tr>
+                                <tr><td><i class="fab fa-tiktok me-2"></i>TikTok</td><td>@SmarkAfrica</td></tr>
+                                <tr><td><i class="fas fa-phone me-2"></i>Phone</td><td>+254708615309</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- MISSION VISION VALUES -->
+        <div class="page-break py-5">
+            <h2 class="text-center mb-5 border-bottom pb-3">Mission, Vision & Core Values</h2>
+            <div class="mb-5">
+                <h4 class="text-success"><i class="fas fa-bullseye me-2"></i>Mission</h4>
+                <p class="lead">{{ settings.get('mission', 'To provide an accessible, reliable, and affordable e-commerce platform that empowers African businesses and consumers to trade seamlessly across the continent.') }}</p>
+            </div>
+            <div class="mb-5">
+                <h4 class="text-success"><i class="fas fa-eye me-2"></i>Vision</h4>
+                <p class="lead">{{ settings.get('vision', 'To become Africa\'s leading digital marketplace, connecting millions of buyers and sellers across the continent through innovative technology and trusted service.') }}</p>
+            </div>
+            <div class="mb-4">
+                <h4 class="text-success"><i class="fas fa-heart me-2"></i>Core Values</h4>
+                <ul>
+                    <li><strong>Trust & Transparency</strong> - Building lasting relationships through honest business practices</li>
+                    <li><strong>Innovation</strong> - Continuously improving with cutting-edge technology</li>
+                    <li><strong>Customer First</strong> - Every decision made with customers' best interests</li>
+                    <li><strong>African Excellence</strong> - Proudly African, competing globally</li>
+                    <li><strong>Accessibility</strong> - Quality products available to everyone in Africa</li>
+                    <li><strong>Community</strong> - Building a thriving ecosystem for all stakeholders</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- REAL-TIME PLATFORM STATISTICS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Platform Statistics (Real-Time)</h2>
+            <p class="text-muted small">Data as of {{ now().strftime('%d %B %Y, %H:%M') }}</p>
+
+            <div class="row g-3 mb-4">
+                <div class="col-md-3"><div class="card bg-light p-3 text-center"><h6>Total Users</h6><h3 class="text-primary">{{ stats.total_users }}</h3></div></div>
+                <div class="col-md-3"><div class="card bg-light p-3 text-center"><h6>Total Products</h6><h3 class="text-success">{{ stats.total_products }}</h3></div></div>
+                <div class="col-md-3"><div class="card bg-light p-3 text-center"><h6>Total Orders</h6><h3 class="text-warning">{{ stats.total_orders }}</h3></div></div>
+                <div class="col-md-3"><div class="card bg-light p-3 text-center"><h6>Categories</h6><h3 class="text-info">{{ stats.total_categories }}</h3></div></div>
+            </div>
+            <div class="row g-3 mb-4">
+                <div class="col-md-4"><div class="card bg-light p-3 text-center"><h6>Active Sellers</h6><h3>{{ stats.total_sellers }}</h3></div></div>
+                <div class="col-md-4"><div class="card bg-light p-3 text-center"><h6>Transactions</h6><h3>{{ stats.total_transactions }}</h3></div></div>
+                <div class="col-md-4"><div class="card bg-light p-3 text-center"><h6>Total Coins Issued</h6><h3>{{ "{:,}".format(stats.total_coins_issued) }}</h3></div></div>
+            </div>
+
+            <h4 class="mt-4">30-Day Performance</h4>
+            <table class="table table-bordered">
+                <tbody>
+                    <tr><td class="fw-bold">Revenue (30 days)</td><td>KSh {{ "%.2f"|format(analytics.revenue_30d) }}</td></tr>
+                    <tr><td class="fw-bold">Orders (7 days)</td><td>{{ analytics.orders_7d }}</td></tr>
+                    <tr><td class="fw-bold">New Users (7 days)</td><td>{{ analytics.users_7d }}</td></tr>
+                    <tr><td class="fw-bold">Avg Daily Revenue</td><td>KSh {{ "%.2f"|format(analytics.revenue_30d / 30) }}</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- REAL-TIME GRAPHS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Performance Graphs (Real-Time)</h2>
+            <div class="row g-4 mb-4">
+                <div class="col-md-6">
+                    <h5>Daily Revenue (30 Days)</h5>
+                    <canvas id="mvpRevenueChart" height="200"></canvas>
+                </div>
+                <div class="col-md-6">
+                    <h5>Daily Orders (30 Days)</h5>
+                    <canvas id="mvpOrdersChart" height="200"></canvas>
+                </div>
+            </div>
+            <div class="row g-4">
+                <div class="col-md-6">
+                    <h5>User Growth (30 Days)</h5>
+                    <canvas id="mvpUsersChart" height="200"></canvas>
+                </div>
+                <div class="col-md-6">
+                    <h5>Sales by Category</h5>
+                    <canvas id="mvpCategoryChart" height="200"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- MONTHLY REVENUE TREND -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Monthly Revenue Trend</h2>
+            <canvas id="mvpMonthlyChart" height="150"></canvas>
+        </div>
+
+        <!-- TECHNICAL ARCHITECTURE (MVP ONLY) -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Technical Architecture (Confidential)</h2>
+
+            <h4>System Stack</h4>
+            <table class="table table-bordered">
+                <tbody>
+                    <tr><td class="fw-bold">Backend Framework</td><td>Python Flask 3.x</td></tr>
+                    <tr><td class="fw-bold">Database</td><td>SQLite (dev) / PostgreSQL (production)</td></tr>
+                    <tr><td class="fw-bold">ORM</td><td>SQLAlchemy with Flask-SQLAlchemy</td></tr>
+                    <tr><td class="fw-bold">Frontend</td><td>Bootstrap 5, Jinja2 Templates, Chart.js</td></tr>
+                    <tr><td class="fw-bold">Payment Gateway</td><td>Safaricom Daraja API (M-Pesa STK Push)</td></tr>
+                    <tr><td class="fw-bold">Email Service</td><td>Resend API (HTTP) with SMTP fallback</td></tr>
+                    <tr><td class="fw-bold">Hosting</td><td>Render.com with auto-deploy from Git</td></tr>
+                    <tr><td class="fw-bold">SSL</td><td>Auto-provisioned via hosting platform</td></tr>
+                    <tr><td class="fw-bold">WSGI Server</td><td>Gunicorn (sync workers)</td></tr>
+                    <tr><td class="fw-bold">Background Jobs</td><td>APScheduler / stdlib threading</td></tr>
+                    <tr><td class="fw-bold">Web Scraping</td><td>Concurrent ThreadPoolExecutor (real-time market intelligence)</td></tr>
+                    <tr><td class="fw-bold">Security</td><td>Flask-Talisman, CSRFProtect, Flask-Limiter, werkzeug password hashing</td></tr>
+                </tbody>
+            </table>
+
+            <h4 class="mt-4">Database Models ({{ stats.total_users }} users)</h4>
+            <p>40+ SQLAlchemy models covering: Users, Products, Orders, Transactions, Shopping Cards, Coins, Events, Raffles, Carriers, POS, BNPL, Market Intelligence, and more.</p>
+
+            <h4 class="mt-4">Key Technical Decisions</h4>
+            <ul>
+                <li>Sync Gunicorn workers to avoid SSL recursion with gevent</li>
+                <li>HTTP-based Resend API to avoid SDK/gevent conflicts</li>
+                <li>Concurrent web scraping (ThreadPoolExecutor) for fast market intelligence</li>
+                <li>Client-side session cookies with secure SECRET_KEY</li>
+                <li>Case-insensitive login (username and email)</li>
+                <li>Two-factor registration with email verification codes</li>
+                <li>Shopping card numbers with prefix {{ settings.get('shopping_card_prefix', '607845') }}</li>
+            </ul>
+        </div>
+
+        <!-- FINANCIAL OVERVIEW (MVP ONLY) -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Financial Overview (Confidential)</h2>
+
+            <h4>Revenue Streams</h4>
+            <ul>
+                <li>Product sales (direct and marketplace commission)</li>
+                <li>Seller commission ({{ settings.get('default_commission', '15') }}% per sale)</li>
+                <li>Shopping Card issuance fees (KSh {{ settings.get('shopping_card_issue_fee_kes', '700') }}/card)</li>
+                <li>Ad campaigns (seller-purchased promotions)</li>
+                <li>BNPL interest/fees</li>
+                <li>Platform margin on raffles ({{ settings.get('raffle_platform_margin_pct', '20') }}%)</li>
+            </ul>
+
+            <h4 class="mt-4">Monthly Revenue Data</h4>
+            <table class="table table-bordered table-sm">
+                <thead class="table-dark"><tr><th>Month</th><th>Revenue (KSh)</th><th>Orders</th></tr></thead>
+                <tbody>
+                    {% for m in analytics.monthly_revenue %}
+                    <tr><td>{{ ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m.month-1] }} {{ m.year }}</td><td>{{ "%.2f"|format(m.revenue) }}</td><td>{{ m.orders }}</td></tr>
+                    {% endfor %}
+                    {% if not analytics.monthly_revenue %}
+                    <tr><td colspan="3" class="text-center text-muted">No revenue data yet</td></tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- OPERATIONAL DETAILS (MVP ONLY) -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Operational Configuration</h2>
+
+            <h4>Platform Settings</h4>
+            <table class="table table-bordered table-sm">
+                <tbody>
+                    <tr><td class="fw-bold">Site Name</td><td>{{ settings.get('site_name', 'SMARKAFRICA') }}</td></tr>
+                    <tr><td class="fw-bold">Contact Email</td><td>{{ settings.get('contact_email', '') }}</td></tr>
+                    <tr><td class="fw-bold">Contact Phone</td><td>{{ settings.get('contact_phone', '+254708615309') }}</td></tr>
+                    <tr><td class="fw-bold">Daraja Environment</td><td>{{ settings.get('daraja_env', 'sandbox') }}</td></tr>
+                    <tr><td class="fw-bold">Checkout Countries</td><td>{{ settings.get('checkout_allowed_countries', 'Kenya') }}</td></tr>
+                    <tr><td class="fw-bold">Seller Signup</td><td>{{ 'Enabled' if settings.get('seller_signup_enabled') == '1' else 'Disabled' }}</td></tr>
+                    <tr><td class="fw-bold">KYC Provider</td><td>{{ settings.get('kyc_provider', 'inbuilt') }}</td></tr>
+                    <tr><td class="fw-bold">Google Analytics</td><td>{{ settings.get('google_analytics_id', 'Not set') }}</td></tr>
+                </tbody>
+            </table>
+
+            <h4 class="mt-4">Coin Economy</h4>
+            <table class="table table-bordered table-sm">
+                <tbody>
+                    <tr><td>Daily Login</td><td>{{ settings.get('coins_daily_login', '5') }} coins</td></tr>
+                    <tr><td>Per KSh 1000 Purchase</td><td>{{ settings.get('coins_purchase_per_1000', '10') }} coins</td></tr>
+                    <tr><td>Referral</td><td>{{ settings.get('coins_referral_bonus', '50') }} coins</td></tr>
+                    <tr><td>Review</td><td>{{ settings.get('coins_review_reward', '10') }} coins</td></tr>
+                    <tr><td>7-Day Streak</td><td>{{ settings.get('coins_streak_bonus_7day', '25') }} coins</td></tr>
+                    <tr><td>Event Participation</td><td>{{ settings.get('coins_event_participation', '20') }} coins</td></tr>
+                    <tr><td class="fw-bold">Total Issued</td><td class="fw-bold">{{ "{:,}".format(stats.total_coins_issued) }} coins</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- EVENTS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Events & Promotions</h2>
+            {% if events %}
+            <table class="table table-bordered">
+                <thead class="table-success"><tr><th>Event</th><th>Date</th><th>Offers</th><th>Status</th></tr></thead>
+                <tbody>
+                    {% for event in events %}
+                    <tr>
+                        <td>{{ event.title }}{% if event.is_hot %} <span class="badge bg-danger">HOT</span>{% endif %}</td>
+                        <td>{{ event.event_date.strftime('%d %b %Y %H:%M') }}</td>
+                        <td>{{ event.offers or '-' }}</td>
+                        <td>{{ 'Active' if event.is_active else 'Inactive' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="text-muted">No events created yet.</p>
+            {% endif %}
+        </div>
+
+        <!-- DEBUGGING & KNOWN ISSUES -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Debugging & Technical Notes</h2>
+            <h4>Resolved Issues</h4>
+            <ul>
+                <li><strong>SSL Recursion Bug:</strong> Switched from gevent to sync Gunicorn workers</li>
+                <li><strong>Resend Email SDK:</strong> Replaced with HTTP API to avoid gevent conflict</li>
+                <li><strong>Login Case Sensitivity:</strong> Fixed - username and email lookup now case-insensitive</li>
+                <li><strong>Settings Password Lock:</strong> Fixed - general settings no longer require password when credentials unchanged</li>
+                <li><strong>Web Scraping Speed:</strong> Upgraded to concurrent ThreadPoolExecutor for parallel fetching</li>
+            </ul>
+            <h4 class="mt-4">Architecture Notes</h4>
+            <ul>
+                <li>Single-file Flask app (main.py) - monolithic for simplicity during MVP phase</li>
+                <li>SQLite in development, PostgreSQL-ready schema for production</li>
+                <li>Background market price refresh every {{ settings.get('market_price_refresh_hours', '6') }} hours</li>
+                <li>30-second auto-refresh on analytics dashboards</li>
+            </ul>
+        </div>
+
+        <!-- LONG TERM GOALS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Long-Term Goals & Partnerships</h2>
+            <h4>5-Year Strategic Plan</h4>
+            <ul>
+                <li>Become #1 e-commerce platform in East Africa</li>
+                <li>1 million+ active users</li>
+                <li>10,000+ verified sellers</li>
+                <li>Expand to 10+ African countries</li>
+                <li>Launch proprietary logistics network</li>
+                <li>Financial services (microloans, savings)</li>
+                <li>Native mobile apps (iOS & Android)</li>
+                <li>AI-powered recommendations and fraud detection</li>
+                <li>B2B wholesale marketplace</li>
+                <li>International cross-border trade</li>
+            </ul>
+        </div>
+
+        <!-- BUSINESS INFO -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Business Information</h2>
+            <table class="table table-bordered">
+                <tbody>
+                    <tr><td class="fw-bold">Legal Business Name</td><td>Smark-Africa</td></tr>
+                    <tr><td class="fw-bold">Owner / Director</td><td>Ngutu Euwin Murumbi</td></tr>
+                    <tr><td class="fw-bold">Country of Registration</td><td>Kenya</td></tr>
+                    <tr><td class="fw-bold">Business Type</td><td>E-Commerce / Online Retail / Digital Marketplace</td></tr>
+                    <tr><td class="fw-bold">Phone</td><td>+254708615309</td></tr>
+                    <tr><td class="fw-bold">Email</td><td>{{ settings.get('contact_email', 'info@smark-africa.com') }}</td></tr>
+                    <tr><td class="fw-bold">Website</td><td>www.smark-africa.com</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="text-center py-4">
+            <p class="text-muted small">End of Document - SMARK-AFRICA MVP Documentation</p>
+            <p class="text-muted small">Generated: {{ now().strftime('%d %B %Y, %H:%M') }} | CONFIDENTIAL</p>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+var data = {{ analytics | tojson }};
+var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+new Chart(document.getElementById('mvpRevenueChart'), {
+    type: 'bar',
+    data: { labels: data.daily_orders.map(function(d){return d.day.slice(5);}), datasets: [{label:'Revenue (KSh)', data: data.daily_orders.map(function(d){return d.revenue;}), backgroundColor:'rgba(25,135,84,0.7)'}] },
+    options: { responsive: true, plugins: { legend: { display: false } } }
+});
+new Chart(document.getElementById('mvpOrdersChart'), {
+    type: 'line',
+    data: { labels: data.daily_orders.map(function(d){return d.day.slice(5);}), datasets: [{label:'Orders', data: data.daily_orders.map(function(d){return d.count;}), borderColor:'#0d6efd', fill:true, backgroundColor:'rgba(13,110,253,0.1)', tension:0.3}] },
+    options: { responsive: true, plugins: { legend: { display: false } } }
+});
+new Chart(document.getElementById('mvpUsersChart'), {
+    type: 'line',
+    data: { labels: data.daily_users.map(function(d){return d.day.slice(5);}), datasets: [{label:'New Users', data: data.daily_users.map(function(d){return d.count;}), borderColor:'#ffc107', fill:true, backgroundColor:'rgba(255,193,7,0.1)', tension:0.3}] },
+    options: { responsive: true, plugins: { legend: { display: false } } }
+});
+new Chart(document.getElementById('mvpCategoryChart'), {
+    type: 'doughnut',
+    data: { labels: data.category_sales.map(function(d){return d.name;}), datasets: [{data: data.category_sales.map(function(d){return d.items_sold;}), backgroundColor:['#198754','#0d6efd','#ffc107','#dc3545','#6f42c1','#20c997','#fd7e14','#0dcaf0','#6c757d','#d63384']}] },
+    options: { responsive: true }
+});
+new Chart(document.getElementById('mvpMonthlyChart'), {
+    type: 'bar',
+    data: { labels: data.monthly_revenue.map(function(d){return months[d.month-1]+' '+d.year;}), datasets: [{label:'Monthly Revenue', data: data.monthly_revenue.map(function(d){return d.revenue;}), backgroundColor:'rgba(13,110,253,0.7)'}] },
+    options: { responsive: true, plugins: { legend: { display: false } } }
+});
+</script>
+
+<style>
+@media print {
+    .d-print-none { display: none !important; }
+    .page-break { page-break-after: always; }
+    .page-break:last-child { page-break-after: avoid; }
+    body { font-size: 11pt; }
+    .container { max-width: 100%; }
+    canvas { max-width: 100%; height: auto !important; }
+    .card { border: 1px solid #ddd !important; break-inside: avoid; }
+}
+</style>
+{% endblock %}

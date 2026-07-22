@@ -5,6 +5,7 @@ SECURITY ENHANCED VERSION
 """
 
 import os, json, uuid, base64, datetime, hashlib, requests, traceback, re, html, mimetypes, logging, csv, socket, hmac
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO, StringIO
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -45,7 +46,7 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     LoyaltyLedger, BNPLPlan, BNPLInstallment, TrustScore, ProductBarcode, Supplier, PurchaseOrder, \
     PurchaseOrderItem, StockMovement, BNPLProductPolicy, SignupVerification, ShoppingCard, \
     ShoppingCardTransaction, KYCIdentityVerification, CardAuthorizationRequest, Raffle, RaffleTicket, \
-    CoinTransaction, CoinDailyCheckIn
+    CoinTransaction, CoinDailyCheckIn, Event
 
 # Import security utilities
 from validators import (RegisterSchema, LoginSchema, ProductSchema, ReviewSchema,
@@ -2160,16 +2161,28 @@ def extract_ksh_prices(text_value):
 def fetch_live_reference_range(reference):
     prices = []
     checked = []
-    for url in reference.get('source_urls', [])[:6]:
+    headers = {'User-Agent': 'Mozilla/5.0 SMARKAFRICA market intelligence'}
+    urls = reference.get('source_urls', [])[:6]
+
+    def fetch_url(url):
         try:
-            response = requests.get(url, timeout=8, headers={'User-Agent': 'Mozilla/5.0 SMARKAFRICA market intelligence'})
+            response = requests.get(url, timeout=6, headers=headers)
             if response.ok:
                 page_prices = extract_ksh_prices(response.text)
                 if page_prices:
-                    prices.extend(page_prices[:6])
-                    checked.append(url)
+                    return url, page_prices[:6]
         except requests.RequestException:
-            continue
+            pass
+        return url, []
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {executor.submit(fetch_url, url): url for url in urls}
+        for future in as_completed(futures):
+            url, page_prices = future.result()
+            if page_prices:
+                prices.extend(page_prices)
+                checked.append(url)
+
     if not prices:
         return None
     floor = float(reference.get('kenya_low', 0)) * 0.75
@@ -2205,37 +2218,56 @@ def live_web_price_scan(product_name, country='Kenya', description='', category_
     search_urls = [
         f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}",
         f"https://www.bing.com/search?q={requests.utils.quote(query)}",
-        f"https://r.jina.ai/http://r.jina.ai/http://www.google.com/search?q={requests.utils.quote(query)}",
     ]
     headers = {'User-Agent': 'Mozilla/5.0 SMARKAFRICA market intelligence'}
-    for search_url in search_urls:
+    blocked_domains = ['duckduckgo', 'bing.com', 'google.com', 'gstatic']
+
+    def fetch_search(url):
         try:
-            response = requests.get(search_url, timeout=10, headers=headers)
-            if not response.ok:
+            r = requests.get(url, timeout=6, headers=headers)
+            return r.text if r.ok else ''
+        except requests.RequestException:
+            return ''
+
+    def fetch_snippet(url):
+        try:
+            r = requests.get(url, timeout=5, headers=headers)
+            if r.ok:
+                return url, extract_ksh_prices(r.text)[:8]
+        except requests.RequestException:
+            pass
+        return url, []
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        search_futures = [executor.submit(fetch_search, u) for u in search_urls]
+        for future in as_completed(search_futures):
+            text_value = future.result()
+            if not text_value:
                 continue
-            text_value = response.text
             prices.extend(extract_ksh_prices(text_value))
-            for snippet_url in re.findall(r'https?://[^\s"&<>]+', text_value):
-                if any(blocked in snippet_url.lower() for blocked in ['duckduckgo', 'bing.com', 'google.com', 'gstatic']):
+            snippet_urls = []
+            for snippet in re.findall(r'https?://[^\s"&<>]+', text_value):
+                if any(b in snippet.lower() for b in blocked_domains):
                     continue
-                try:
-                    page_response = requests.get(snippet_url.rstrip(').,'), timeout=7, headers=headers)
-                    if page_response.ok:
-                        prices.extend(extract_ksh_prices(page_response.text)[:8])
-                        source_url = source_url or snippet_url.rstrip(').,')
-                except requests.RequestException:
-                    pass
-                if len(prices) >= 8:
+                snippet_urls.append(snippet.rstrip(').,'))
+                if len(snippet_urls) >= 6:
+                    break
+            snippet_futures = [executor.submit(fetch_snippet, u) for u in snippet_urls]
+            for sf in as_completed(snippet_futures):
+                url, page_prices = sf.result()
+                if page_prices:
+                    prices.extend(page_prices)
+                    source_url = source_url or url
+                if len(prices) >= 12:
                     break
             hrefs = re.findall(r'href=["\'](https?://[^"\']+)["\']', text_value)
             for href in hrefs:
-                if 'duckduckgo.com' not in href and 'bing.com' not in href:
-                    source_url = href
+                if not any(b in href for b in blocked_domains):
+                    source_url = source_url or href
                     break
             if prices:
                 break
-        except requests.RequestException:
-            continue
+
     filtered = [price for price in prices if 1000 <= price <= 1000000]
     if filtered:
         filtered.sort()
@@ -2298,19 +2330,35 @@ def upsert_market_price_cache(name, category_name, payload):
 def refresh_market_price_cache(limit=30):
     refreshed = 0
     references = PRODUCT_MARKET_REFERENCES[:limit]
-    for reference in references:
-        payload = fetch_live_reference_range(reference)
-        if payload:
-            upsert_market_price_cache(reference['label'], reference.get('category_hint', ''), payload)
-            refreshed += 1
+
+    def fetch_reference(ref):
+        payload = fetch_live_reference_range(ref)
+        return ref, payload
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(fetch_reference, ref) for ref in references]
+        for future in as_completed(futures):
+            ref, payload = future.result()
+            if payload:
+                upsert_market_price_cache(ref['label'], ref.get('category_hint', ''), payload)
+                refreshed += 1
+
     remaining = max(0, limit - refreshed)
     products = Product.query.filter_by(is_active=True).order_by(Product.updated_at.desc()).limit(remaining).all() if remaining else []
-    for product in products:
+
+    def fetch_product_price(product):
         category_name = product.category.name if product.category else ''
         payload = live_web_price_scan(product.name, description=product.description or '', category_name=category_name)
-        if payload:
-            upsert_market_price_cache(product.name, category_name, payload)
-            refreshed += 1
+        return product, category_name, payload
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(fetch_product_price, p) for p in products]
+        for future in as_completed(futures):
+            product, category_name, payload = future.result()
+            if payload:
+                upsert_market_price_cache(product.name, category_name, payload)
+                refreshed += 1
+
     db.session.commit()
     return refreshed
 
@@ -4318,10 +4366,12 @@ def login():
         username = validated_data['username']
         password = validated_data['password']
 
-        # Check by username or email
-        user = User.query.filter_by(username=username).first()
+        # Check by username (case-insensitive) or email
+        user = User.query.filter(func.lower(User.username) == username.lower()).first()
         if not user and '@' in username:
-            user = User.query.filter_by(email=username.lower()).first()
+            user = User.query.filter(func.lower(User.email) == username.lower()).first()
+        if not user:
+            user = User.query.filter(func.lower(User.email) == username.lower()).first()
 
         # Constant-time password check
         if user and user.check_password(password):
@@ -9248,7 +9298,9 @@ def admin_settings():
             new_password = request.form.get('admin_password', '')
             confirm_password = request.form.get('admin_confirm_password', '')
             current_password = request.form.get('admin_current_password', '')
-            credentials_touched = any([new_username, new_email, new_password, confirm_password])
+            username_changed = new_username and new_username != current_user.username
+            email_changed = new_email and new_email != current_user.email
+            credentials_touched = any([username_changed, email_changed, new_password, confirm_password])
 
             if credentials_touched:
                 if not current_password or not current_user.check_password(current_password):
@@ -9406,6 +9458,292 @@ def admin_about_edit():
                            mission=Setting.get('mission'),
                            about_text=Setting.get('about_text'),
                            site_name=Setting.get('site_name', 'SMARKAFRICA'))
+
+
+# ========================================================================
+# ADMIN EVENTS
+# ========================================================================
+
+@app.route('/admin/events')
+@login_required
+@admin_required
+def admin_events():
+    events = Event.query.order_by(Event.event_date.desc()).all()
+    return render_template('admin/events.html', events=events)
+
+
+@app.route('/admin/events/add', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def admin_add_event():
+    if request.method == 'POST':
+        title = request.form.get('title', '').strip()
+        description = request.form.get('description', '').strip()
+        event_date_str = request.form.get('event_date', '')
+        end_date_str = request.form.get('end_date', '')
+        location = request.form.get('location', '').strip()
+        image_url = request.form.get('image_url', '').strip()
+        offers = request.form.get('offers', '').strip()
+        is_hot = request.form.get('is_hot') == '1'
+
+        if not title or not description or not event_date_str:
+            flash('Title, description, and event date are required.', 'danger')
+            return redirect(url_for('admin_add_event'))
+
+        try:
+            event_date = datetime.strptime(event_date_str, '%Y-%m-%dT%H:%M')
+        except ValueError:
+            flash('Invalid event date format.', 'danger')
+            return redirect(url_for('admin_add_event'))
+
+        end_date = None
+        if end_date_str:
+            try:
+                end_date = datetime.strptime(end_date_str, '%Y-%m-%dT%H:%M')
+            except ValueError:
+                pass
+
+        event = Event(
+            title=title,
+            description=description,
+            event_date=event_date,
+            end_date=end_date,
+            location=location,
+            image_url=image_url,
+            offers=offers,
+            is_hot=is_hot,
+            created_by=current_user.id
+        )
+        db.session.add(event)
+        db.session.commit()
+        flash('Event created successfully!', 'success')
+        return redirect(url_for('admin_events'))
+
+    return render_template('admin/add_event.html')
+
+
+@app.route('/admin/events/edit/<int:event_id>', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def admin_edit_event(event_id):
+    event = Event.query.get_or_404(event_id)
+    if request.method == 'POST':
+        event.title = request.form.get('title', '').strip()
+        event.description = request.form.get('description', '').strip()
+        event_date_str = request.form.get('event_date', '')
+        end_date_str = request.form.get('end_date', '')
+        event.location = request.form.get('location', '').strip()
+        event.image_url = request.form.get('image_url', '').strip()
+        event.offers = request.form.get('offers', '').strip()
+        event.is_hot = request.form.get('is_hot') == '1'
+        event.is_active = request.form.get('is_active') == '1'
+
+        try:
+            event.event_date = datetime.strptime(event_date_str, '%Y-%m-%dT%H:%M')
+        except ValueError:
+            flash('Invalid event date format.', 'danger')
+            return redirect(url_for('admin_edit_event', event_id=event_id))
+
+        if end_date_str:
+            try:
+                event.end_date = datetime.strptime(end_date_str, '%Y-%m-%dT%H:%M')
+            except ValueError:
+                event.end_date = None
+        else:
+            event.end_date = None
+
+        db.session.commit()
+        flash('Event updated!', 'success')
+        return redirect(url_for('admin_events'))
+
+    return render_template('admin/edit_event.html', event=event)
+
+
+@app.route('/admin/events/delete/<int:event_id>', methods=['POST'])
+@login_required
+@admin_required
+def admin_delete_event(event_id):
+    event = Event.query.get_or_404(event_id)
+    db.session.delete(event)
+    db.session.commit()
+    flash('Event deleted.', 'success')
+    return redirect(url_for('admin_events'))
+
+
+@app.route('/events')
+def public_events():
+    now = datetime.utcnow()
+    events = Event.query.filter(
+        Event.is_active == True,
+        Event.event_date >= now
+    ).order_by(Event.event_date.asc()).all()
+    past_events = Event.query.filter(
+        Event.is_active == True,
+        Event.event_date < now
+    ).order_by(Event.event_date.desc()).limit(10).all()
+    return render_template('events.html', events=events, past_events=past_events)
+
+
+# ========================================================================
+# ADMIN COINS MANAGEMENT
+# ========================================================================
+
+@app.route('/admin/coins')
+@login_required
+@admin_required
+def admin_coins():
+    settings = {}
+    for s in Setting.query.all():
+        settings[s.key] = s.value
+    total_coins = db.session.query(db.func.sum(CoinTransaction.amount)).scalar() or 0
+    total_users_with_coins = db.session.query(
+        db.func.count(db.distinct(CoinTransaction.user_id))
+    ).scalar() or 0
+    recent_transactions = CoinTransaction.query.order_by(
+        CoinTransaction.created_at.desc()
+    ).limit(50).all()
+    return render_template('admin/coins.html',
+                           settings=settings,
+                           total_coins=total_coins,
+                           total_users_with_coins=total_users_with_coins,
+                           recent_transactions=recent_transactions)
+
+
+@app.route('/admin/coins/settings', methods=['POST'])
+@login_required
+@admin_required
+def admin_coins_settings():
+    coin_keys = [
+        'coins_daily_login', 'coins_purchase_per_1000', 'coins_referral_bonus',
+        'coins_review_reward', 'coins_streak_bonus_7day', 'coins_event_participation'
+    ]
+    for key in coin_keys:
+        value = request.form.get(key, '').strip()
+        if value:
+            Setting.set(key, value)
+    flash('Coin settings updated!', 'success')
+    return redirect(url_for('admin_coins'))
+
+
+# ========================================================================
+# MVP DOCUMENTATION PRINT
+# ========================================================================
+
+def _build_analytics_data():
+    """Build real-time analytics data for documentation and graphs."""
+    now = datetime.utcnow()
+    thirty_days_ago = now - timedelta(days=30)
+    seven_days_ago = now - timedelta(days=7)
+
+    daily_orders = db.session.query(
+        func.date(Order.created_at).label('day'),
+        func.count(Order.id).label('count'),
+        func.sum(Order.total_amount).label('revenue')
+    ).filter(Order.created_at >= thirty_days_ago).group_by(func.date(Order.created_at)).all()
+
+    daily_users = db.session.query(
+        func.date(User.created_at).label('day'),
+        func.count(User.id).label('count')
+    ).filter(User.created_at >= thirty_days_ago).group_by(func.date(User.created_at)).all()
+
+    monthly_revenue = db.session.query(
+        extract('month', Order.created_at).label('month'),
+        extract('year', Order.created_at).label('year'),
+        func.sum(Order.total_amount).label('revenue'),
+        func.count(Order.id).label('orders')
+    ).group_by(extract('year', Order.created_at), extract('month', Order.created_at)).order_by(
+        extract('year', Order.created_at), extract('month', Order.created_at)
+    ).limit(12).all()
+
+    category_sales = db.session.query(
+        Category.name,
+        func.count(OrderItem.id).label('items_sold')
+    ).join(Product, OrderItem.product_id == Product.id).join(
+        Category, Product.category_id == Category.id
+    ).group_by(Category.name).order_by(func.count(OrderItem.id).desc()).limit(10).all()
+
+    return {
+        'daily_orders': [{'day': str(r.day), 'count': r.count, 'revenue': float(r.revenue or 0)} for r in daily_orders],
+        'daily_users': [{'day': str(r.day), 'count': r.count} for r in daily_users],
+        'monthly_revenue': [{'month': int(r.month), 'year': int(r.year), 'revenue': float(r.revenue or 0), 'orders': r.orders} for r in monthly_revenue],
+        'category_sales': [{'name': r[0], 'items_sold': r[1]} for r in category_sales],
+        'users_7d': User.query.filter(User.created_at >= seven_days_ago).count(),
+        'orders_7d': Order.query.filter(Order.created_at >= seven_days_ago).count(),
+        'revenue_30d': float(db.session.query(func.sum(Order.total_amount)).filter(Order.created_at >= thirty_days_ago).scalar() or 0),
+    }
+
+
+@app.route('/admin/print-documentation')
+@login_required
+@mvp_required
+def admin_print_documentation():
+    settings = {}
+    for s in Setting.query.all():
+        settings[s.key] = s.value
+    stats = {
+        'total_users': User.query.count(),
+        'total_products': Product.query.count(),
+        'total_orders': Order.query.count(),
+        'total_categories': Category.query.count(),
+    }
+    events = Event.query.filter_by(is_active=True).order_by(Event.event_date.desc()).all()
+    analytics = _build_analytics_data()
+    return render_template('admin/print_documentation.html', settings=settings, stats=stats, events=events, analytics=analytics, now=datetime.utcnow)
+
+
+@app.route('/admin/print-documentation/mvp')
+@login_required
+@mvp_required
+def admin_print_documentation_mvp():
+    """Full MVP documentation with all details - requires MVP password to access."""
+    mvp_password = request.args.get('auth', '')
+    if not mvp_password or not current_user.check_password(mvp_password):
+        return render_template('admin/print_documentation_auth.html')
+    settings = {}
+    for s in Setting.query.all():
+        settings[s.key] = s.value
+    stats = {
+        'total_users': User.query.count(),
+        'total_products': Product.query.count(),
+        'total_orders': Order.query.count(),
+        'total_categories': Category.query.count(),
+        'total_sellers': User.query.filter(User.seller_status != 'buyer').count(),
+        'total_transactions': Transaction.query.count(),
+        'total_coins_issued': db.session.query(func.sum(CoinTransaction.amount)).filter(CoinTransaction.amount > 0).scalar() or 0,
+    }
+    events = Event.query.filter_by(is_active=True).order_by(Event.event_date.desc()).all()
+    analytics = _build_analytics_data()
+    recent_orders = Order.query.order_by(Order.created_at.desc()).limit(50).all()
+    return render_template('admin/print_documentation_mvp.html',
+                           settings=settings, stats=stats, events=events,
+                           analytics=analytics, recent_orders=recent_orders, now=datetime.utcnow)
+
+
+@app.route('/admin/print-graphs')
+@login_required
+@mvp_required
+def admin_print_graphs():
+    """Print real-time platform analysis graphs."""
+    analytics = _build_analytics_data()
+    settings = {}
+    for s in Setting.query.all():
+        settings[s.key] = s.value
+    return render_template('admin/print_graphs.html', analytics=analytics, settings=settings, now=datetime.utcnow)
+
+
+@app.route('/admin/api/analytics-realtime')
+@login_required
+@mvp_required
+def admin_analytics_realtime_api():
+    """API endpoint for real-time analytics data."""
+    return jsonify(_build_analytics_data())
+
+
+@app.route('/admin/print-business-documents')
+@login_required
+@mvp_required
+def admin_print_business_documents():
+    return render_template('admin/print_business_documents.html')
 
 
 # ========================================================================

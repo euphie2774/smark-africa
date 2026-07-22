@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Add Event - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="fas fa-calendar-plus me-2"></i>Create New Event</h2>
+        <a href="{{ url_for('admin_events') }}" class="btn btn-outline-secondary"><i class="fas fa-arrow-left me-1"></i> Back</a>
+    </div>
+
+    <div class="card border-0 shadow-sm">
+        <div class="card-body">
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="row g-3">
+                    <div class="col-md-8">
+                        <label class="form-label">Event Title</label>
+                        <input type="text" name="title" class="form-control" required placeholder="e.g. Mega Flash Sale Weekend">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Hot Event</label>
+                        <select name="is_hot" class="form-select">
+                            <option value="0">Normal</option>
+                            <option value="1">HOT - Featured prominently</option>
+                        </select>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">Description</label>
+                        <textarea name="description" class="form-control" rows="4" required placeholder="Describe the event, what customers can expect..."></textarea>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">Offers & Deals</label>
+                        <textarea name="offers" class="form-control" rows="3" placeholder="List the crazy offers, discounts, and fun activities..."></textarea>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Event Start Date & Time</label>
+                        <input type="datetime-local" name="event_date" class="form-control" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Event End Date & Time (optional)</label>
+                        <input type="datetime-local" name="end_date" class="form-control">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Location (optional)</label>
+                        <input type="text" name="location" class="form-control" placeholder="Online / Physical location">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Image URL (optional)</label>
+                        <input type="url" name="image_url" class="form-control" placeholder="https://...">
+                    </div>
+                </div>
+                <div class="text-end mt-4">
+                    <button type="submit" class="btn btn-success btn-lg"><i class="fas fa-save me-2"></i>Create Event</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

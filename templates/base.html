@@ -44,6 +44,9 @@
                         <a class="nav-link" href="{{ url_for('about') }}"><i class="fas fa-info-circle me-1"></i>About</a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('public_events') }}"><i class="fas fa-calendar-star me-1"></i>Events</a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link" href="{{ url_for('support') }}"><i class="fas fa-headset me-1"></i>Support</a>
                     </li>
                     {% if current_user.is_authenticated and not current_user.is_admin and seller_signup_enabled %}
@@ -97,6 +100,8 @@
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_market_news') }}"><i class="fas fa-newspaper me-2"></i>Price News</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_business_intelligence') }}"><i class="fas fa-brain me-2"></i>BI Dashboard</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_raffles') }}"><i class="fas fa-ticket me-2"></i>Raffles</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_events') }}"><i class="fas fa-calendar-star me-2"></i>Events</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_coins') }}"><i class="fas fa-coins me-2"></i>Coins</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_pos') }}"><i class="fas fa-cash-register me-2"></i>Point of Sale</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_shopping_cards') }}"><i class="fas fa-id-card me-2"></i>Shopping Cards</a></li>
                             {% if current_user.admin_level == 'mvp' %}
@@ -112,6 +117,10 @@
                             {% if current_user.admin_level == 'mvp' %}
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_intelligent_architecture') }}"><i class="fas fa-network-wired me-2"></i>Intelligent Architecture</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_disbursements') }}"><i class="fas fa-money-bill-transfer me-2"></i>Payment Disbursements</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_print_documentation') }}"><i class="fas fa-book me-2"></i>Print Documentation</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_print_documentation_mvp') }}"><i class="fas fa-book-open me-2"></i>MVP Full Documentation</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_print_graphs') }}"><i class="fas fa-chart-line me-2"></i>Print Graphs</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_print_business_documents') }}"><i class="fas fa-file-certificate me-2"></i>Business Documents</a></li>
                             {% endif %}
                             <li><hr class="dropdown-divider"></li>
                             {% endif %}

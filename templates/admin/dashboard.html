@@ -213,12 +213,30 @@
                         <a href="{{ url_for('admin_messages') }}" class="btn btn-outline-success text-start">
                             <i class="fas fa-comments me-2"></i> Admin Messages
                         </a>
+                        <a href="{{ url_for('admin_events') }}" class="btn btn-outline-success text-start">
+                            <i class="fas fa-calendar-star me-2"></i> Events
+                        </a>
+                        <a href="{{ url_for('admin_coins') }}" class="btn btn-outline-success text-start">
+                            <i class="fas fa-coins me-2"></i> Coins Management
+                        </a>
                         {% if current_user.admin_level == 'mvp' %}
                         <a href="{{ url_for('admin_manufacturers') }}" class="btn btn-outline-warning text-start">
                             <i class="fas fa-industry me-2"></i> Manufacturer Portal
                         </a>
                         <a href="{{ url_for('admin_disbursements') }}" class="btn btn-outline-warning text-start">
                             <i class="fas fa-money-bill-transfer me-2"></i> Payment Disbursements
+                        </a>
+                        <a href="{{ url_for('admin_print_documentation') }}" class="btn btn-outline-warning text-start">
+                            <i class="fas fa-book me-2"></i> Print Documentation
+                        </a>
+                        <a href="{{ url_for('admin_print_documentation_mvp') }}" class="btn btn-outline-warning text-start">
+                            <i class="fas fa-book-open me-2"></i> MVP Full Documentation
+                        </a>
+                        <a href="{{ url_for('admin_print_graphs') }}" class="btn btn-outline-warning text-start">
+                            <i class="fas fa-chart-line me-2"></i> Print Graphs (Real-Time)
+                        </a>
+                        <a href="{{ url_for('admin_print_business_documents') }}" class="btn btn-outline-warning text-start">
+                            <i class="fas fa-file-certificate me-2"></i> Business Documents
                         </a>
                         {% endif %}
                     </div>

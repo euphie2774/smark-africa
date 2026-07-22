@@ -1,0 +1,669 @@
+{% extends "base.html" %}
+{% block title %}Platform Documentation - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4 d-print-none">
+        <h2><i class="fas fa-book me-2"></i>Platform Documentation</h2>
+        <div>
+            <button onclick="window.print()" class="btn btn-success btn-lg"><i class="fas fa-print me-2"></i>Print Documentation</button>
+            <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-secondary ms-2"><i class="fas fa-arrow-left me-1"></i>Back</a>
+        </div>
+    </div>
+
+    <div class="alert alert-info d-print-none">
+        <i class="fas fa-info-circle me-2"></i>This documentation is for MVP access only. Click Print to generate the full platform documentation book.
+    </div>
+
+    <!-- PRINT CONTENT -->
+    <div id="print-content">
+
+        <!-- PAGE 1: COVER PAGE -->
+        <div class="page-break text-center py-5">
+            <div style="margin-top: 100px;">
+                <h1 class="display-2 fw-bold text-success">SMARK-AFRICA</h1>
+                <div class="my-4">
+                    <i class="fas fa-globe-africa text-success" style="font-size: 120px;"></i>
+                </div>
+                <div class="my-4">
+                    <svg viewBox="0 0 400 200" style="max-width: 400px; margin: 0 auto; display: block;">
+                        <rect x="50" y="20" width="300" height="160" rx="10" fill="none" stroke="#198754" stroke-width="2"/>
+                        <text x="200" y="60" text-anchor="middle" font-size="14" fill="#198754">E-COMMERCE PLATFORM</text>
+                        <rect x="80" y="80" width="60" height="40" rx="5" fill="#ffc107"/>
+                        <text x="110" y="105" text-anchor="middle" font-size="10" fill="#000">Shop</text>
+                        <rect x="170" y="80" width="60" height="40" rx="5" fill="#198754"/>
+                        <text x="200" y="105" text-anchor="middle" font-size="10" fill="#fff">Pay</text>
+                        <rect x="260" y="80" width="60" height="40" rx="5" fill="#0d6efd"/>
+                        <text x="290" y="105" text-anchor="middle" font-size="10" fill="#fff">Deliver</text>
+                        <line x1="140" y1="100" x2="170" y2="100" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+                        <line x1="230" y1="100" x2="260" y2="100" stroke="#333" stroke-width="2" marker-end="url(#arrow)"/>
+                        <text x="200" y="155" text-anchor="middle" font-size="12" fill="#666">Kenya's Premier Digital & Physical Marketplace</text>
+                        <defs><marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#333"/></marker></defs>
+                    </svg>
+                </div>
+                <p class="lead text-muted mt-4">Your Premium Digital & Physical Marketplace</p>
+                <p class="text-muted">www.smark-africa.com</p>
+            </div>
+        </div>
+
+        <!-- PAGE 2: ACKNOWLEDGEMENTS -->
+        <div class="page-break py-5">
+            <h2 class="text-center mb-5 border-bottom pb-3">Acknowledgements</h2>
+            <div class="row justify-content-center">
+                <div class="col-md-8">
+                    <table class="table table-borderless">
+                        <tbody>
+                            <tr><td class="fw-bold">Publisher:</td><td>Euwin Murumbi</td></tr>
+                            <tr><td class="fw-bold">Editor:</td><td>Euwin Murumbi</td></tr>
+                            <tr><td class="fw-bold">Director:</td><td>Euwin Murumbi</td></tr>
+                            <tr><td class="fw-bold">Designer:</td><td>Euwin Murumbi</td></tr>
+                        </tbody>
+                    </table>
+
+                    <div class="mt-5">
+                        <h5>Social Media & Contact</h5>
+                        <table class="table table-sm">
+                            <tbody>
+                                <tr><td><i class="fas fa-globe me-2"></i>Website</td><td>www.smark-africa.com</td></tr>
+                                <tr><td><i class="fab fa-facebook me-2"></i>Facebook</td><td>@SmarkAfrica</td></tr>
+                                <tr><td><i class="fab fa-twitter me-2"></i>Twitter / X</td><td>@SmarkAfrica</td></tr>
+                                <tr><td><i class="fab fa-instagram me-2"></i>Instagram</td><td>@SmarkAfrica</td></tr>
+                                <tr><td><i class="fab fa-linkedin me-2"></i>LinkedIn</td><td>Smark-Africa</td></tr>
+                                <tr><td><i class="fas fa-envelope me-2"></i>Email</td><td>{{ settings.get('contact_email', 'info@smark-africa.com') }}</td></tr>
+                                <tr><td><i class="fab fa-youtube me-2"></i>YouTube</td><td>@SmarkAfrica</td></tr>
+                                <tr><td><i class="fab fa-tiktok me-2"></i>TikTok</td><td>@SmarkAfrica</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- PAGE 3: MISSION, VISION, CORE VALUES -->
+        <div class="page-break py-5">
+            <h2 class="text-center mb-5 border-bottom pb-3">Mission, Vision & Core Values</h2>
+
+            <div class="mb-5">
+                <h4 class="text-success"><i class="fas fa-bullseye me-2"></i>Mission</h4>
+                <p class="lead">{{ settings.get('mission', 'To provide an accessible, reliable, and affordable e-commerce platform that empowers African businesses and consumers to trade seamlessly across the continent.') }}</p>
+            </div>
+
+            <div class="mb-5">
+                <h4 class="text-success"><i class="fas fa-eye me-2"></i>Vision</h4>
+                <p class="lead">{{ settings.get('vision', 'To become Africa\'s leading digital marketplace, connecting millions of buyers and sellers across the continent through innovative technology and trusted service.') }}</p>
+            </div>
+
+            <div class="mb-4">
+                <h4 class="text-success"><i class="fas fa-heart me-2"></i>Core Values</h4>
+                <div class="row g-3 mt-3">
+                    <div class="col-md-6">
+                        <div class="card border-success h-100">
+                            <div class="card-body">
+                                <h6 class="text-success">Trust & Transparency</h6>
+                                <p class="small mb-0">Building lasting relationships through honest, transparent business practices.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card border-success h-100">
+                            <div class="card-body">
+                                <h6 class="text-success">Innovation</h6>
+                                <p class="small mb-0">Continuously improving our platform with cutting-edge technology.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card border-success h-100">
+                            <div class="card-body">
+                                <h6 class="text-success">Customer First</h6>
+                                <p class="small mb-0">Every decision is made with our customers' best interests at heart.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card border-success h-100">
+                            <div class="card-body">
+                                <h6 class="text-success">African Excellence</h6>
+                                <p class="small mb-0">Proudly African, competing globally with world-class standards.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card border-success h-100">
+                            <div class="card-body">
+                                <h6 class="text-success">Accessibility</h6>
+                                <p class="small mb-0">Making quality products available to everyone, everywhere in Africa.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card border-success h-100">
+                            <div class="card-body">
+                                <h6 class="text-success">Community</h6>
+                                <p class="small mb-0">Building a thriving ecosystem that benefits all stakeholders.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- PAGE 4: TABLE OF CONTENTS -->
+        <div class="page-break py-5">
+            <h2 class="text-center mb-5 border-bottom pb-3">Table of Contents</h2>
+            <div class="row justify-content-center">
+                <div class="col-md-8">
+                    <ol class="list-group list-group-numbered">
+                        <li class="list-group-item d-flex justify-content-between">Cover Page <span class="text-muted">1</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Acknowledgements <span class="text-muted">2</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Mission, Vision & Core Values <span class="text-muted">3</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Table of Contents <span class="text-muted">4</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Platform Overview & Objectives <span class="text-muted">5-10</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Platform Features & Navigation <span class="text-muted">11-20</span></li>
+                        <li class="list-group-item d-flex justify-content-between">User Guide: Shopping & Checkout <span class="text-muted">21-30</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Shopping Cards & Loyalty Program <span class="text-muted">31-35</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Coins & Rewards System <span class="text-muted">36-40</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Seller Onboarding & Management <span class="text-muted">41-50</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Payment Integration (M-Pesa) <span class="text-muted">51-55</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Shipping & Delivery Network <span class="text-muted">56-60</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Open Plans & Roadmap <span class="text-muted">61-65</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Debugging & Technical Notes <span class="text-muted">66-70</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Achievements & Milestones <span class="text-muted">71-75</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Monthly Analysis & Metrics <span class="text-muted">76-80</span></li>
+                        <li class="list-group-item d-flex justify-content-between">User Statistics & Growth <span class="text-muted">81-85</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Events & Promotions <span class="text-muted">86-88</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Long-Term Goals & Partnerships <span class="text-muted">89-92</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Terms of Use & Membership Benefits <span class="text-muted">93-96</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Business Contacts & Branches <span class="text-muted">97-98</span></li>
+                        <li class="list-group-item d-flex justify-content-between">Security & Compliance <span class="text-muted">99-100</span></li>
+                    </ol>
+                </div>
+            </div>
+        </div>
+
+        <!-- SECTION: PLATFORM OVERVIEW & OBJECTIVES -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">5. Platform Overview & Objectives</h2>
+
+            <h4>About Smark-Africa</h4>
+            <p>{{ settings.get('about_content', 'Smark-Africa is a comprehensive e-commerce platform designed to serve the African market. Our platform connects buyers with quality products from verified sellers, offering both digital and physical goods with integrated M-Pesa payment solutions.') | safe }}</p>
+
+            <h4 class="mt-4">Platform Objectives</h4>
+            <ul>
+                <li>Provide a secure, reliable marketplace for African consumers</li>
+                <li>Enable small and medium businesses to reach a wider customer base</li>
+                <li>Integrate mobile money (M-Pesa) for seamless transactions</li>
+                <li>Build a loyalty and rewards ecosystem (Shopping Cards, Coins)</li>
+                <li>Offer competitive pricing through direct manufacturer relationships</li>
+                <li>Create employment and growth opportunities across the value chain</li>
+                <li>Expand across East Africa and beyond through phased growth</li>
+            </ul>
+
+            <h4 class="mt-4">Platform Statistics (Current)</h4>
+            <table class="table table-bordered">
+                <tbody>
+                    <tr><td class="fw-bold">Total Registered Users</td><td>{{ stats.total_users }}</td></tr>
+                    <tr><td class="fw-bold">Total Products Listed</td><td>{{ stats.total_products }}</td></tr>
+                    <tr><td class="fw-bold">Total Orders Processed</td><td>{{ stats.total_orders }}</td></tr>
+                    <tr><td class="fw-bold">Product Categories</td><td>{{ stats.total_categories }}</td></tr>
+                    <tr><td class="fw-bold">Platform Status</td><td>Active - Kenya</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- SECTION: PLATFORM FEATURES -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">6. Platform Features & Navigation</h2>
+
+            <h4>Key Platform Features</h4>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <h6>For Customers:</h6>
+                    <ul>
+                        <li>Product browsing and search with filters</li>
+                        <li>Shopping cart and wishlist</li>
+                        <li>M-Pesa STK Push checkout</li>
+                        <li>Order tracking and history</li>
+                        <li>Product reviews and ratings</li>
+                        <li>Shopping Cards loyalty program</li>
+                        <li>Coins & daily check-in rewards</li>
+                        <li>Raffles and promotional events</li>
+                        <li>Customer support tickets</li>
+                    </ul>
+                </div>
+                <div class="col-md-6">
+                    <h6>For Sellers:</h6>
+                    <ul>
+                        <li>Seller verification and onboarding</li>
+                        <li>Product listing and management</li>
+                        <li>Order fulfillment dashboard</li>
+                        <li>Sales analytics and reports</li>
+                        <li>Withdrawal requests (M-Pesa)</li>
+                        <li>Ad campaigns and promotions</li>
+                        <li>Inventory management</li>
+                        <li>Carrier partner integration</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h4 class="mt-4">Admin Features</h4>
+            <ul>
+                <li>Full dashboard with sales analytics</li>
+                <li>User management and KYC verification</li>
+                <li>Product and category management</li>
+                <li>Order management and dispute resolution</li>
+                <li>Financial reporting (P&L, transactions)</li>
+                <li>Shipping rate configuration</li>
+                <li>Discount and promotion management</li>
+                <li>Point of Sale (POS) system</li>
+                <li>Business Intelligence dashboard</li>
+                <li>Market Intelligence and price monitoring</li>
+                <li>Quality Management system</li>
+                <li>Automation and Productivity tools</li>
+                <li>BNPL (Buy Now Pay Later) management</li>
+                <li>Email marketing to all users</li>
+            </ul>
+        </div>
+
+        <!-- SECTION: SHOPPING & CHECKOUT -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">7. User Guide: Shopping & Checkout</h2>
+
+            <h4>How to Shop on Smark-Africa</h4>
+            <ol>
+                <li><strong>Browse Products:</strong> Use the shop page to browse by category or search for specific items.</li>
+                <li><strong>Add to Cart:</strong> Click "Add to Cart" on any product you wish to purchase.</li>
+                <li><strong>Review Cart:</strong> Check your cart to adjust quantities or remove items.</li>
+                <li><strong>Checkout:</strong> Proceed to checkout, enter your shipping details.</li>
+                <li><strong>Payment:</strong> Complete payment via M-Pesa STK Push - you'll receive a prompt on your phone.</li>
+                <li><strong>Confirmation:</strong> Receive order confirmation and tracking details.</li>
+                <li><strong>Delivery:</strong> Track your order until it arrives at your doorstep.</li>
+            </ol>
+
+            <h4 class="mt-4">Payment Methods</h4>
+            <p>Currently, Smark-Africa supports M-Pesa (Lipa Na M-Pesa) as the primary payment method. The STK Push technology means you simply confirm the payment on your phone - no need to manually enter payment codes.</p>
+
+            <h4 class="mt-4">Delivery Options</h4>
+            <ul>
+                <li><strong>Doorstep Delivery:</strong> Products delivered directly to your address</li>
+                <li><strong>Pickup Station:</strong> Collect from a nearby pickup point</li>
+            </ul>
+        </div>
+
+        <!-- SECTION: SHOPPING CARDS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">8. Shopping Cards & Loyalty Program</h2>
+
+            <h4>What is a Smark-Africa Shopping Card?</h4>
+            <p>The Shopping Card is a physical loyalty card issued to customers who meet the minimum purchase threshold. It works like a rewards card - earn credits on every purchase and enjoy exclusive benefits.</p>
+
+            <h4 class="mt-3">How to Get a Card</h4>
+            <ul>
+                <li>Accumulate purchases totaling KSh {{ settings.get('shopping_card_min_purchase_kes', '10,000') }} or more</li>
+                <li>Once eligible, request your card from your account dashboard</li>
+                <li>A one-time card issuance fee of KSh {{ settings.get('shopping_card_issue_fee_kes', '700') }} applies</li>
+                <li>Your card will be delivered to your registered address</li>
+            </ul>
+
+            <h4 class="mt-3">Card Benefits</h4>
+            <ul>
+                <li>Earn {{ settings.get('shopping_card_credits_per_100_kes', '1') }} credit(s) for every KSh 100 spent</li>
+                <li>Exclusive card-holder discounts and promotions</li>
+                <li>Priority customer support</li>
+                <li>Early access to flash sales and events</li>
+            </ul>
+
+            <h4 class="mt-3">In Case of Card Loss</h4>
+            <p>If you lose your Smark-Africa Shopping Card:</p>
+            <ol>
+                <li>Log into your account immediately</li>
+                <li>Navigate to "My Card & Credits"</li>
+                <li>Report the card as lost/stolen</li>
+                <li>A replacement card will be issued (replacement fee applies)</li>
+                <li>Your credits and history are safe - they are linked to your account, not the physical card</li>
+            </ol>
+        </div>
+
+        <!-- SECTION: COINS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">9. Coins & Rewards System</h2>
+
+            <h4>Earning Coins</h4>
+            <table class="table table-bordered">
+                <thead class="table-success">
+                    <tr><th>Action</th><th>Coins Earned</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Daily Login Check-In</td><td>{{ settings.get('coins_daily_login', '5') }} coins</td></tr>
+                    <tr><td>Per KSh 1,000 Purchase</td><td>{{ settings.get('coins_purchase_per_1000', '10') }} coins</td></tr>
+                    <tr><td>Referring a Friend</td><td>{{ settings.get('coins_referral_bonus', '50') }} coins</td></tr>
+                    <tr><td>Writing a Product Review</td><td>{{ settings.get('coins_review_reward', '10') }} coins</td></tr>
+                    <tr><td>7-Day Login Streak Bonus</td><td>{{ settings.get('coins_streak_bonus_7day', '25') }} coins</td></tr>
+                    <tr><td>Event Participation</td><td>{{ settings.get('coins_event_participation', '20') }} coins</td></tr>
+                </tbody>
+            </table>
+
+            <h4 class="mt-3">Using Coins</h4>
+            <p>Coins can be redeemed for discounts on purchases, exclusive products, raffle entries, and special promotions. Check the Coins page for current redemption offers.</p>
+        </div>
+
+        <!-- SECTION: OPEN PLANS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">13. Open Plans & Roadmap</h2>
+
+            <h4>Current Phase: Kenya Launch</h4>
+            <ul>
+                <li>Full marketplace functionality with M-Pesa integration</li>
+                <li>Shopping Cards loyalty program</li>
+                <li>Coins reward system</li>
+                <li>POS system for physical retail</li>
+                <li>BNPL (Buy Now Pay Later) for eligible customers</li>
+            </ul>
+
+            <h4 class="mt-4">Upcoming Plans</h4>
+            <ul>
+                <li>Expansion to Uganda, Tanzania, and Rwanda</li>
+                <li>Additional payment methods (Airtel Money, Bank Cards)</li>
+                <li>Mobile app (iOS and Android)</li>
+                <li>Enhanced AI-powered product recommendations</li>
+                <li>Warehouse and fulfillment network</li>
+                <li>B2B wholesale marketplace</li>
+                <li>International shipping partnerships</li>
+                <li>Financial services integration</li>
+            </ul>
+        </div>
+
+        <!-- SECTION: DEBUGGING & TECHNICAL -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">14. Debugging & Technical Notes</h2>
+
+            <h4>Platform Architecture</h4>
+            <ul>
+                <li><strong>Backend:</strong> Python Flask with SQLAlchemy ORM</li>
+                <li><strong>Database:</strong> SQLite (development) / PostgreSQL (production-ready)</li>
+                <li><strong>Frontend:</strong> Bootstrap 5, Jinja2 Templates</li>
+                <li><strong>Payment:</strong> Safaricom Daraja API (M-Pesa STK Push)</li>
+                <li><strong>Email:</strong> Resend API with SMTP fallback</li>
+                <li><strong>Hosting:</strong> Render.com with SSL</li>
+                <li><strong>Security:</strong> Flask-Talisman, CSRF protection, rate limiting</li>
+            </ul>
+
+            <h4 class="mt-4">Key Technical Decisions</h4>
+            <ul>
+                <li>Synchronous workers (not gevent) to avoid SSL recursion issues</li>
+                <li>HTTP API for Resend instead of SDK to avoid gevent conflicts</li>
+                <li>Shopping card numbers use prefix {{ settings.get('shopping_card_prefix', '607845') }} for brand identification</li>
+                <li>Market price caching with configurable refresh intervals</li>
+                <li>Background job scheduling with APScheduler</li>
+            </ul>
+        </div>
+
+        <!-- SECTION: ACHIEVEMENTS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">15. Achievements & Milestones</h2>
+
+            <h4>Platform Milestones</h4>
+            <ul>
+                <li>Platform development and launch</li>
+                <li>M-Pesa Daraja API integration (STK Push)</li>
+                <li>Shopping Cards loyalty system implementation</li>
+                <li>Coins & rewards ecosystem</li>
+                <li>Point of Sale (POS) system with barcode support</li>
+                <li>BNPL (Buy Now Pay Later) system</li>
+                <li>Business Intelligence dashboard</li>
+                <li>Market Intelligence with price monitoring</li>
+                <li>Carrier partner management system</li>
+                <li>Quality Management framework</li>
+                <li>Client Acquisition automation</li>
+                <li>Multi-country checkout preparation</li>
+                <li>KYC identity verification system</li>
+                <li>Admin salary and disbursement management</li>
+            </ul>
+        </div>
+
+        <!-- SECTION: MONTHLY ANALYSIS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">16. Monthly Analysis & Metrics</h2>
+
+            <p class="text-muted">This section is updated monthly with current performance data.</p>
+
+            <h4>Key Metrics Tracked</h4>
+            <ul>
+                <li>Monthly Active Users (MAU)</li>
+                <li>Gross Merchandise Value (GMV)</li>
+                <li>Average Order Value (AOV)</li>
+                <li>Customer Acquisition Cost (CAC)</li>
+                <li>Customer Lifetime Value (CLV)</li>
+                <li>Conversion Rate</li>
+                <li>Return/Refund Rate</li>
+                <li>Seller Performance Scores</li>
+                <li>Platform Uptime</li>
+                <li>Payment Success Rate</li>
+            </ul>
+
+            <div class="alert alert-secondary mt-4">
+                <i class="fas fa-chart-bar me-2"></i>Detailed monthly graphs and analytics are available on the Admin Business Intelligence dashboard.
+            </div>
+        </div>
+
+        <!-- SECTION: USERS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">17. User Statistics & Growth</h2>
+
+            <table class="table table-bordered">
+                <tbody>
+                    <tr><td class="fw-bold">Total Registered Users</td><td>{{ stats.total_users }}</td></tr>
+                    <tr><td class="fw-bold">Total Products</td><td>{{ stats.total_products }}</td></tr>
+                    <tr><td class="fw-bold">Total Orders</td><td>{{ stats.total_orders }}</td></tr>
+                    <tr><td class="fw-bold">Categories</td><td>{{ stats.total_categories }}</td></tr>
+                </tbody>
+            </table>
+
+            <p class="text-muted mt-3">Note: No confidential user information is included in this documentation. All user data is protected under our privacy policy and data protection standards.</p>
+        </div>
+
+        <!-- SECTION: EVENTS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">18. Events & Promotions</h2>
+
+            {% if events %}
+            <table class="table table-bordered">
+                <thead class="table-success">
+                    <tr><th>Event</th><th>Date</th><th>Offers</th></tr>
+                </thead>
+                <tbody>
+                    {% for event in events %}
+                    <tr>
+                        <td>{{ event.title }}{% if event.is_hot %} <span class="badge bg-danger">HOT</span>{% endif %}</td>
+                        <td>{{ event.event_date.strftime('%d %b %Y') }}</td>
+                        <td>{{ event.offers or '-' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="text-muted">Events will be listed here as they are created.</p>
+            {% endif %}
+        </div>
+
+        <!-- SECTION: LONG-TERM GOALS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">19. Long-Term Goals & Partnerships</h2>
+
+            <h4>5-Year Vision</h4>
+            <ul>
+                <li>Become the #1 e-commerce platform in East Africa</li>
+                <li>Serve 1 million+ active users</li>
+                <li>Partner with 10,000+ verified sellers</li>
+                <li>Expand to 10+ African countries</li>
+                <li>Launch proprietary logistics network</li>
+                <li>Offer financial services (microloans, savings)</li>
+                <li>Develop mobile-first experience</li>
+            </ul>
+
+            <h4 class="mt-4">Partnership Opportunities</h4>
+            <ul>
+                <li>Manufacturers and distributors</li>
+                <li>Logistics and courier services</li>
+                <li>Payment providers</li>
+                <li>Technology partners</li>
+                <li>Marketing and media agencies</li>
+                <li>Government trade programs</li>
+            </ul>
+        </div>
+
+        <!-- SECTION: TERMS & MEMBERSHIP -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">20. Terms of Use & Membership Benefits</h2>
+
+            <h4>Membership Benefits</h4>
+            <ul>
+                <li>Free account registration</li>
+                <li>Access to all product categories</li>
+                <li>Daily coin check-in rewards</li>
+                <li>Order tracking and history</li>
+                <li>Product reviews and community participation</li>
+                <li>Raffle and event participation</li>
+                <li>Shopping Card eligibility after qualifying purchases</li>
+                <li>Referral bonuses</li>
+                <li>Customer support access</li>
+            </ul>
+
+            <h4 class="mt-4">Terms of Use Summary</h4>
+            <p>{{ settings.get('terms_content', 'Full terms and conditions are available on the platform at smark-africa.com/terms. Users must be 18+ to create an account. All transactions are subject to Kenyan consumer protection laws.') | safe }}</p>
+        </div>
+
+        <!-- SECTION: BUSINESS CONTACTS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">21. Business Contacts & Branches</h2>
+
+            <h4>Headquarters</h4>
+            <table class="table table-bordered">
+                <tbody>
+                    <tr><td class="fw-bold">Business Name</td><td>Smark-Africa</td></tr>
+                    <tr><td class="fw-bold">Owner</td><td>Ngutu Euwin Murumbi</td></tr>
+                    <tr><td class="fw-bold">Country</td><td>Kenya</td></tr>
+                    <tr><td class="fw-bold">Phone</td><td>{{ settings.get('contact_phone', '+254708615309') }}</td></tr>
+                    <tr><td class="fw-bold">Email</td><td>{{ settings.get('contact_email', 'info@smark-africa.com') }}</td></tr>
+                    <tr><td class="fw-bold">Website</td><td>www.smark-africa.com</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- SECTION: SECURITY -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">22. Security & Compliance</h2>
+
+            <h4>Security Measures</h4>
+            <ul>
+                <li>SSL/TLS encryption for all communications</li>
+                <li>CSRF protection on all forms</li>
+                <li>Rate limiting to prevent abuse</li>
+                <li>Password hashing with industry-standard algorithms</li>
+                <li>KYC verification for high-value transactions</li>
+                <li>Secure payment processing through Safaricom Daraja</li>
+                <li>Content Security Policy headers</li>
+                <li>Regular security audits and updates</li>
+            </ul>
+
+            <h4 class="mt-4">Data Protection</h4>
+            <p>Smark-Africa complies with Kenya's Data Protection Act (2019). User data is collected, processed, and stored in accordance with applicable privacy regulations.</p>
+        </div>
+
+        <!-- REAL-TIME ANALYTICS GRAPHS -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Platform Performance (Real-Time)</h2>
+            <p class="text-muted small">Data as of {{ now().strftime('%d %B %Y, %H:%M') if now is defined else 'print time' }}</p>
+
+            <div class="row g-3 mb-4">
+                <div class="col-md-4"><div class="card bg-light p-3 text-center"><h6>Revenue (30d)</h6><h4>KSh {{ "%.2f"|format(analytics.revenue_30d) }}</h4></div></div>
+                <div class="col-md-4"><div class="card bg-light p-3 text-center"><h6>Orders (7d)</h6><h4>{{ analytics.orders_7d }}</h4></div></div>
+                <div class="col-md-4"><div class="card bg-light p-3 text-center"><h6>New Users (7d)</h6><h4>{{ analytics.users_7d }}</h4></div></div>
+            </div>
+
+            <div class="row g-4 mb-4">
+                <div class="col-md-6">
+                    <h5>Daily Revenue (30 Days)</h5>
+                    <canvas id="docRevenueChart" height="200"></canvas>
+                </div>
+                <div class="col-md-6">
+                    <h5>Daily Orders (30 Days)</h5>
+                    <canvas id="docOrdersChart" height="200"></canvas>
+                </div>
+            </div>
+            <div class="row g-4">
+                <div class="col-md-6">
+                    <h5>User Registrations (30 Days)</h5>
+                    <canvas id="docUsersChart" height="200"></canvas>
+                </div>
+                <div class="col-md-6">
+                    <h5>Sales by Category</h5>
+                    <canvas id="docCategoryChart" height="200"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- MONTHLY TREND -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Monthly Revenue Trend</h2>
+            <canvas id="docMonthlyChart" height="150"></canvas>
+        </div>
+
+        <!-- DAILY UPDATES SECTION -->
+        <div class="page-break py-5">
+            <h2 class="border-bottom pb-3 mb-4">Daily Updates & Reports</h2>
+            <p class="text-muted">This section is continuously updated with daily platform activity, reports, and operational notes. The print function captures the latest state at the time of printing.</p>
+            <div class="alert alert-info">
+                <i class="fas fa-sync me-2"></i>Last updated: <strong>{{ now().strftime('%d %B %Y, %H:%M') if now is defined else 'At time of print' }}</strong>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+var data = {{ analytics | tojson }};
+var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+new Chart(document.getElementById('docRevenueChart'), {
+    type: 'bar',
+    data: { labels: data.daily_orders.map(function(d){return d.day.slice(5);}), datasets: [{label:'Revenue (KSh)', data: data.daily_orders.map(function(d){return d.revenue;}), backgroundColor:'rgba(25,135,84,0.7)'}] },
+    options: { responsive: true, plugins: { legend: { display: false } } }
+});
+new Chart(document.getElementById('docOrdersChart'), {
+    type: 'line',
+    data: { labels: data.daily_orders.map(function(d){return d.day.slice(5);}), datasets: [{label:'Orders', data: data.daily_orders.map(function(d){return d.count;}), borderColor:'#0d6efd', fill:true, backgroundColor:'rgba(13,110,253,0.1)', tension:0.3}] },
+    options: { responsive: true, plugins: { legend: { display: false } } }
+});
+new Chart(document.getElementById('docUsersChart'), {
+    type: 'line',
+    data: { labels: data.daily_users.map(function(d){return d.day.slice(5);}), datasets: [{label:'Users', data: data.daily_users.map(function(d){return d.count;}), borderColor:'#ffc107', fill:true, backgroundColor:'rgba(255,193,7,0.1)', tension:0.3}] },
+    options: { responsive: true, plugins: { legend: { display: false } } }
+});
+new Chart(document.getElementById('docCategoryChart'), {
+    type: 'doughnut',
+    data: { labels: data.category_sales.map(function(d){return d.name;}), datasets: [{data: data.category_sales.map(function(d){return d.items_sold;}), backgroundColor:['#198754','#0d6efd','#ffc107','#dc3545','#6f42c1','#20c997','#fd7e14','#0dcaf0','#6c757d','#d63384']}] },
+    options: { responsive: true }
+});
+new Chart(document.getElementById('docMonthlyChart'), {
+    type: 'bar',
+    data: { labels: data.monthly_revenue.map(function(d){return months[d.month-1]+' '+d.year;}), datasets: [{label:'Monthly Revenue', data: data.monthly_revenue.map(function(d){return d.revenue;}), backgroundColor:'rgba(13,110,253,0.7)'}] },
+    options: { responsive: true, plugins: { legend: { display: false } } }
+});
+</script>
+
+<style>
+@media print {
+    .d-print-none { display: none !important; }
+    .page-break { page-break-after: always; }
+    .page-break:last-child { page-break-after: avoid; }
+    body { font-size: 12pt; }
+    .container { max-width: 100%; }
+    .card { border: 1px solid #ddd !important; break-inside: avoid; }
+    .badge { border: 1px solid #333; }
+    a { text-decoration: none; color: #000; }
+    canvas { max-width: 100%; height: auto !important; }
+}
+</style>
+{% endblock %}

@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% block title %}Platform Analytics & Graphs - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4 d-print-none">
+        <h2><i class="fas fa-chart-line me-2"></i>Platform Analytics & Performance</h2>
+        <div>
+            <button onclick="window.print()" class="btn btn-success btn-lg"><i class="fas fa-print me-2"></i>Print Graphs</button>
+            <button onclick="refreshData()" class="btn btn-outline-primary"><i class="fas fa-sync me-2"></i>Refresh</button>
+            <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-secondary ms-2"><i class="fas fa-arrow-left me-1"></i>Back</a>
+        </div>
+    </div>
+
+    <div class="alert alert-success d-print-none">
+        <i class="fas fa-clock me-2"></i>Data is real-time. Last refreshed: <strong id="last-refresh">{{ now().strftime('%d %B %Y, %H:%M:%S') }}</strong>
+        <span class="ms-3 badge bg-success"><i class="fas fa-circle me-1" style="font-size: 8px;"></i>LIVE</span>
+    </div>
+
+    <!-- Summary Cards -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm bg-primary text-white">
+                <div class="card-body text-center">
+                    <h6>Revenue (30 days)</h6>
+                    <h3 id="revenue-30d">KSh {{ "%.2f"|format(analytics.revenue_30d) }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm bg-success text-white">
+                <div class="card-body text-center">
+                    <h6>Orders (7 days)</h6>
+                    <h3 id="orders-7d">{{ analytics.orders_7d }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm bg-warning text-dark">
+                <div class="card-body text-center">
+                    <h6>New Users (7 days)</h6>
+                    <h3 id="users-7d">{{ analytics.users_7d }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm bg-info text-white">
+                <div class="card-body text-center">
+                    <h6>Avg Daily Revenue</h6>
+                    <h3 id="avg-daily">KSh {{ "%.2f"|format(analytics.revenue_30d / 30) }}</h3>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="row g-4 mb-4">
+        <div class="col-md-6">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Daily Revenue (30 Days)</h5></div>
+                <div class="card-body">
+                    <canvas id="revenueChart" height="250"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Daily Orders (30 Days)</h5></div>
+                <div class="card-body">
+                    <canvas id="ordersChart" height="250"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4 mb-4">
+        <div class="col-md-6">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">New User Registrations (30 Days)</h5></div>
+                <div class="card-body">
+                    <canvas id="usersChart" height="250"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Sales by Category</h5></div>
+                <div class="card-body">
+                    <canvas id="categoryChart" height="250"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4 mb-4">
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Monthly Revenue Trend</h5></div>
+                <div class="card-body">
+                    <canvas id="monthlyChart" height="150"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="text-center text-muted py-3">
+        <p><strong>SMARK-AFRICA</strong> - Platform Analytics Report</p>
+        <p class="small">Generated: {{ now().strftime('%d %B %Y, %H:%M') }} | www.smark-africa.com</p>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+var analyticsData = {{ analytics | tojson }};
+var charts = {};
+
+function renderCharts(data) {
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    if (charts.revenue) charts.revenue.destroy();
+    charts.revenue = new Chart(document.getElementById('revenueChart'), {
+        type: 'bar',
+        data: {
+            labels: data.daily_orders.map(function(d) { return d.day.slice(5); }),
+            datasets: [{
+                label: 'Revenue (KSh)',
+                data: data.daily_orders.map(function(d) { return d.revenue; }),
+                backgroundColor: 'rgba(25, 135, 84, 0.7)',
+                borderColor: '#198754',
+                borderWidth: 1
+            }]
+        },
+        options: { responsive: true, plugins: { legend: { display: false } } }
+    });
+
+    if (charts.orders) charts.orders.destroy();
+    charts.orders = new Chart(document.getElementById('ordersChart'), {
+        type: 'line',
+        data: {
+            labels: data.daily_orders.map(function(d) { return d.day.slice(5); }),
+            datasets: [{
+                label: 'Orders',
+                data: data.daily_orders.map(function(d) { return d.count; }),
+                borderColor: '#0d6efd',
+                backgroundColor: 'rgba(13, 110, 253, 0.1)',
+                fill: true,
+                tension: 0.3
+            }]
+        },
+        options: { responsive: true, plugins: { legend: { display: false } } }
+    });
+
+    if (charts.users) charts.users.destroy();
+    charts.users = new Chart(document.getElementById('usersChart'), {
+        type: 'line',
+        data: {
+            labels: data.daily_users.map(function(d) { return d.day.slice(5); }),
+            datasets: [{
+                label: 'New Users',
+                data: data.daily_users.map(function(d) { return d.count; }),
+                borderColor: '#ffc107',
+                backgroundColor: 'rgba(255, 193, 7, 0.1)',
+                fill: true,
+                tension: 0.3
+            }]
+        },
+        options: { responsive: true, plugins: { legend: { display: false } } }
+    });
+
+    if (charts.category) charts.category.destroy();
+    charts.category = new Chart(document.getElementById('categoryChart'), {
+        type: 'doughnut',
+        data: {
+            labels: data.category_sales.map(function(d) { return d.name; }),
+            datasets: [{
+                data: data.category_sales.map(function(d) { return d.items_sold; }),
+                backgroundColor: ['#198754','#0d6efd','#ffc107','#dc3545','#6f42c1','#20c997','#fd7e14','#0dcaf0','#6c757d','#d63384']
+            }]
+        },
+        options: { responsive: true }
+    });
+
+    if (charts.monthly) charts.monthly.destroy();
+    charts.monthly = new Chart(document.getElementById('monthlyChart'), {
+        type: 'bar',
+        data: {
+            labels: data.monthly_revenue.map(function(d) { return months[d.month-1] + ' ' + d.year; }),
+            datasets: [{
+                label: 'Monthly Revenue (KSh)',
+                data: data.monthly_revenue.map(function(d) { return d.revenue; }),
+                backgroundColor: 'rgba(13, 110, 253, 0.7)',
+                borderColor: '#0d6efd',
+                borderWidth: 1
+            }]
+        },
+        options: { responsive: true, plugins: { legend: { display: false } } }
+    });
+}
+
+renderCharts(analyticsData);
+
+function refreshData() {
+    fetch('{{ url_for("admin_analytics_realtime_api") }}')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            analyticsData = data;
+            renderCharts(data);
+            document.getElementById('revenue-30d').textContent = 'KSh ' + data.revenue_30d.toFixed(2);
+            document.getElementById('orders-7d').textContent = data.orders_7d;
+            document.getElementById('users-7d').textContent = data.users_7d;
+            document.getElementById('avg-daily').textContent = 'KSh ' + (data.revenue_30d / 30).toFixed(2);
+            document.getElementById('last-refresh').textContent = new Date().toLocaleString();
+        });
+}
+
+setInterval(refreshData, 30000);
+</script>
+
+<style>
+@media print {
+    .d-print-none { display: none !important; }
+    canvas { max-width: 100%; height: auto !important; }
+    .card { break-inside: avoid; }
+}
+</style>
+{% endblock %}

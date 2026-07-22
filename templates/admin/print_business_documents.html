@@ -1,0 +1,487 @@
+{% extends "base.html" %}
+{% block title %}Business Documents - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4 d-print-none">
+        <h2><i class="fas fa-file-certificate me-2"></i>Business Documents</h2>
+        <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-secondary"><i class="fas fa-arrow-left me-1"></i>Back</a>
+    </div>
+
+    <div class="alert alert-info d-print-none">
+        <i class="fas fa-info-circle me-2"></i>MVP-only access. Select a document to print. These are standard Kenyan business document templates for Smark-Africa.
+    </div>
+
+    <div class="row g-4 d-print-none">
+        <!-- Business Permit -->
+        <div class="col-md-6 col-lg-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body text-center">
+                    <i class="fas fa-id-card fa-3x text-success mb-3"></i>
+                    <h5>Single Business Permit</h5>
+                    <p class="small text-muted">County Government Single Business Permit</p>
+                    <button onclick="printDocument('business-permit')" class="btn btn-success"><i class="fas fa-print me-1"></i>Print</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Certificate of Registration -->
+        <div class="col-md-6 col-lg-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body text-center">
+                    <i class="fas fa-certificate fa-3x text-primary mb-3"></i>
+                    <h5>Certificate of Registration</h5>
+                    <p class="small text-muted">Business Name Registration Certificate</p>
+                    <button onclick="printDocument('cert-registration')" class="btn btn-primary"><i class="fas fa-print me-1"></i>Print</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- KRA PIN Certificate -->
+        <div class="col-md-6 col-lg-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body text-center">
+                    <i class="fas fa-file-invoice fa-3x text-warning mb-3"></i>
+                    <h5>KRA PIN Certificate</h5>
+                    <p class="small text-muted">Kenya Revenue Authority Tax PIN</p>
+                    <button onclick="printDocument('kra-pin')" class="btn btn-warning"><i class="fas fa-print me-1"></i>Print</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tax Compliance Certificate -->
+        <div class="col-md-6 col-lg-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body text-center">
+                    <i class="fas fa-file-shield fa-3x text-info mb-3"></i>
+                    <h5>Tax Compliance Certificate</h5>
+                    <p class="small text-muted">KRA Tax Compliance Certificate (TCC)</p>
+                    <button onclick="printDocument('tax-compliance')" class="btn btn-info"><i class="fas fa-print me-1"></i>Print</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- NEMA Certificate -->
+        <div class="col-md-6 col-lg-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body text-center">
+                    <i class="fas fa-leaf fa-3x text-success mb-3"></i>
+                    <h5>NEMA License</h5>
+                    <p class="small text-muted">National Environment Management Authority</p>
+                    <button onclick="printDocument('nema')" class="btn btn-success"><i class="fas fa-print me-1"></i>Print</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- County Health Certificate -->
+        <div class="col-md-6 col-lg-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body text-center">
+                    <i class="fas fa-heart-pulse fa-3x text-danger mb-3"></i>
+                    <h5>Health Certificate</h5>
+                    <p class="small text-muted">County Health Department Certificate</p>
+                    <button onclick="printDocument('health-cert')" class="btn btn-danger"><i class="fas fa-print me-1"></i>Print</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Fire Safety Certificate -->
+        <div class="col-md-6 col-lg-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body text-center">
+                    <i class="fas fa-fire-extinguisher fa-3x text-orange mb-3" style="color: #fd7e14;"></i>
+                    <h5>Fire Safety Certificate</h5>
+                    <p class="small text-muted">County Fire Department Safety Clearance</p>
+                    <button onclick="printDocument('fire-safety')" class="btn btn-outline-danger"><i class="fas fa-print me-1"></i>Print</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Data Protection Registration -->
+        <div class="col-md-6 col-lg-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body text-center">
+                    <i class="fas fa-shield-halved fa-3x text-secondary mb-3"></i>
+                    <h5>Data Protection Registration</h5>
+                    <p class="small text-muted">ODPC Data Controller/Processor Registration</p>
+                    <button onclick="printDocument('data-protection')" class="btn btn-secondary"><i class="fas fa-print me-1"></i>Print</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- CR12 -->
+        <div class="col-md-6 col-lg-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body text-center">
+                    <i class="fas fa-users fa-3x text-dark mb-3"></i>
+                    <h5>CR12 Form</h5>
+                    <p class="small text-muted">Company Particulars (Directors & Shareholders)</p>
+                    <button onclick="printDocument('cr12')" class="btn btn-dark"><i class="fas fa-print me-1"></i>Print</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- PRINTABLE DOCUMENTS (hidden on screen, shown when printing) -->
+
+    <!-- BUSINESS PERMIT -->
+    <div id="business-permit" class="print-doc" style="display:none;">
+        <div class="text-center border border-2 border-dark p-4" style="min-height: 90vh;">
+            <div class="mb-3">
+                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/49/Coat_of_arms_of_Kenya_%28Official%29.svg/120px-Coat_of_arms_of_Kenya_%28Official%29.svg.png" alt="Coat of Arms" style="height: 80px;" onerror="this.style.display='none'">
+            </div>
+            <h6 class="text-uppercase">Republic of Kenya</h6>
+            <h4 class="text-uppercase fw-bold">County Government</h4>
+            <h3 class="text-uppercase fw-bold text-success border-top border-bottom border-dark py-2 my-3">Single Business Permit</h3>
+
+            <table class="table table-borderless text-start mx-auto" style="max-width: 500px;">
+                <tbody>
+                    <tr><td class="fw-bold">Permit No:</td><td>SBP/2024/________</td></tr>
+                    <tr><td class="fw-bold">Business Name:</td><td>SMARK-AFRICA</td></tr>
+                    <tr><td class="fw-bold">Owner/Director:</td><td>NGUTU EUWIN MURUMBI</td></tr>
+                    <tr><td class="fw-bold">Business Type:</td><td>E-Commerce / Online Retail</td></tr>
+                    <tr><td class="fw-bold">KRA PIN:</td><td>________________________</td></tr>
+                    <tr><td class="fw-bold">Physical Address:</td><td>________________________</td></tr>
+                    <tr><td class="fw-bold">Sub-County:</td><td>________________________</td></tr>
+                    <tr><td class="fw-bold">Ward:</td><td>________________________</td></tr>
+                    <tr><td class="fw-bold">Date Issued:</td><td>________________________</td></tr>
+                    <tr><td class="fw-bold">Valid Until:</td><td>________________________</td></tr>
+                    <tr><td class="fw-bold">Amount Paid:</td><td>KSh ___________________</td></tr>
+                </tbody>
+            </table>
+
+            <div class="mt-5 pt-4">
+                <div class="row">
+                    <div class="col-6 text-center">
+                        <div class="border-top border-dark pt-2" style="width: 200px; margin: 0 auto;">
+                            <small>County Revenue Officer</small>
+                        </div>
+                    </div>
+                    <div class="col-6 text-center">
+                        <div class="border-top border-dark pt-2" style="width: 200px; margin: 0 auto;">
+                            <small>Official Stamp</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <p class="small text-muted mt-4">This permit is issued under the County Governments Act and must be displayed at the business premises.</p>
+        </div>
+    </div>
+
+    <!-- CERTIFICATE OF REGISTRATION -->
+    <div id="cert-registration" class="print-doc" style="display:none;">
+        <div class="text-center border border-2 border-dark p-4" style="min-height: 90vh;">
+            <div class="mb-3">
+                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/49/Coat_of_arms_of_Kenya_%28Official%29.svg/120px-Coat_of_arms_of_Kenya_%28Official%29.svg.png" alt="Coat of Arms" style="height: 80px;" onerror="this.style.display='none'">
+            </div>
+            <h6 class="text-uppercase">Republic of Kenya</h6>
+            <h5 class="text-uppercase">Office of the Registrar of Companies</h5>
+            <h3 class="text-uppercase fw-bold border-top border-bottom border-dark py-2 my-3">Certificate of Registration of Business Name</h3>
+            <p class="text-uppercase small">The Registration of Business Names Act (Cap 499)</p>
+
+            <div class="text-start mx-auto my-4" style="max-width: 500px;">
+                <p>I hereby certify that:</p>
+                <h4 class="text-center fw-bold my-3 text-success">SMARK-AFRICA</h4>
+                <p>has been registered under the Registration of Business Names Act on this date.</p>
+
+                <table class="table table-borderless">
+                    <tbody>
+                        <tr><td class="fw-bold">Registration No:</td><td>BN/________________________</td></tr>
+                        <tr><td class="fw-bold">Proprietor:</td><td>NGUTU EUWIN MURUMBI</td></tr>
+                        <tr><td class="fw-bold">Nature of Business:</td><td>E-Commerce, Online Retail, Digital Marketplace</td></tr>
+                        <tr><td class="fw-bold">Date of Registration:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Place of Business:</td><td>________________________</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-5 pt-4">
+                <div class="border-top border-dark pt-2 mx-auto" style="width: 250px;">
+                    <small>Registrar of Companies</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- KRA PIN CERTIFICATE -->
+    <div id="kra-pin" class="print-doc" style="display:none;">
+        <div class="text-center border border-2 border-dark p-4" style="min-height: 90vh;">
+            <div class="mb-3">
+                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/49/Coat_of_arms_of_Kenya_%28Official%29.svg/120px-Coat_of_arms_of_Kenya_%28Official%29.svg.png" alt="Coat of Arms" style="height: 80px;" onerror="this.style.display='none'">
+            </div>
+            <h5 class="text-uppercase">Kenya Revenue Authority</h5>
+            <h3 class="text-uppercase fw-bold text-primary border-top border-bottom border-dark py-2 my-3">Personal Identification Number (PIN) Certificate</h3>
+
+            <table class="table table-borderless text-start mx-auto" style="max-width: 500px;">
+                <tbody>
+                    <tr><td class="fw-bold">PIN:</td><td>________________________</td></tr>
+                    <tr><td class="fw-bold">Taxpayer Name:</td><td>SMARK-AFRICA</td></tr>
+                    <tr><td class="fw-bold">Owner:</td><td>NGUTU EUWIN MURUMBI</td></tr>
+                    <tr><td class="fw-bold">Obligation(s):</td><td>Income Tax, VAT (if applicable)</td></tr>
+                    <tr><td class="fw-bold">Date of Registration:</td><td>________________________</td></tr>
+                    <tr><td class="fw-bold">Postal Address:</td><td>________________________</td></tr>
+                    <tr><td class="fw-bold">Email:</td><td>info@smark-africa.com</td></tr>
+                    <tr><td class="fw-bold">Phone:</td><td>+254708615309</td></tr>
+                </tbody>
+            </table>
+
+            <div class="mt-5 pt-4">
+                <div class="border-top border-dark pt-2 mx-auto" style="width: 250px;">
+                    <small>Commissioner General, KRA</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- TAX COMPLIANCE CERTIFICATE -->
+    <div id="tax-compliance" class="print-doc" style="display:none;">
+        <div class="text-center border border-2 border-dark p-4" style="min-height: 90vh;">
+            <div class="mb-3">
+                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/49/Coat_of_arms_of_Kenya_%28Official%29.svg/120px-Coat_of_arms_of_Kenya_%28Official%29.svg.png" alt="Coat of Arms" style="height: 80px;" onerror="this.style.display='none'">
+            </div>
+            <h5 class="text-uppercase">Kenya Revenue Authority</h5>
+            <h3 class="text-uppercase fw-bold text-info border-top border-bottom border-dark py-2 my-3">Tax Compliance Certificate</h3>
+
+            <div class="text-start mx-auto my-4" style="max-width: 500px;">
+                <p>This is to certify that:</p>
+                <h4 class="text-center fw-bold my-3">SMARK-AFRICA</h4>
+                <p>has met its tax obligations and is tax compliant as at the date of issue.</p>
+
+                <table class="table table-borderless">
+                    <tbody>
+                        <tr><td class="fw-bold">TCC No:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">PIN:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Taxpayer:</td><td>NGUTU EUWIN MURUMBI (SMARK-AFRICA)</td></tr>
+                        <tr><td class="fw-bold">Date of Issue:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Expiry Date:</td><td>________________________</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-5 pt-4">
+                <div class="border-top border-dark pt-2 mx-auto" style="width: 250px;">
+                    <small>Commissioner of Domestic Taxes</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- DATA PROTECTION -->
+    <div id="data-protection" class="print-doc" style="display:none;">
+        <div class="text-center border border-2 border-dark p-4" style="min-height: 90vh;">
+            <h5 class="text-uppercase">Office of the Data Protection Commissioner</h5>
+            <h6 class="text-uppercase">Republic of Kenya</h6>
+            <h3 class="text-uppercase fw-bold border-top border-bottom border-dark py-2 my-3">Certificate of Registration<br><small>Data Controller / Data Processor</small></h3>
+
+            <div class="text-start mx-auto my-4" style="max-width: 500px;">
+                <p>Pursuant to Section 18 of the Data Protection Act, 2019:</p>
+                <h4 class="text-center fw-bold my-3">SMARK-AFRICA</h4>
+                <p>is registered as a Data Controller/Processor.</p>
+
+                <table class="table table-borderless">
+                    <tbody>
+                        <tr><td class="fw-bold">Registration No:</td><td>ODPC/________________________</td></tr>
+                        <tr><td class="fw-bold">Entity Name:</td><td>SMARK-AFRICA</td></tr>
+                        <tr><td class="fw-bold">Representative:</td><td>NGUTU EUWIN MURUMBI</td></tr>
+                        <tr><td class="fw-bold">Category:</td><td>E-Commerce Platform</td></tr>
+                        <tr><td class="fw-bold">Date Registered:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Valid Until:</td><td>________________________</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-5 pt-4">
+                <div class="border-top border-dark pt-2 mx-auto" style="width: 250px;">
+                    <small>Data Commissioner</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- NEMA LICENSE -->
+    <div id="nema" class="print-doc" style="display:none;">
+        <div class="text-center border border-2 border-dark p-4" style="min-height: 90vh;">
+            <h5 class="text-uppercase">National Environment Management Authority</h5>
+            <h6 class="text-uppercase">Republic of Kenya</h6>
+            <h3 class="text-uppercase fw-bold text-success border-top border-bottom border-dark py-2 my-3">Environmental Compliance Certificate</h3>
+
+            <div class="text-start mx-auto my-4" style="max-width: 500px;">
+                <table class="table table-borderless">
+                    <tbody>
+                        <tr><td class="fw-bold">License No:</td><td>NEMA/________________________</td></tr>
+                        <tr><td class="fw-bold">Business Name:</td><td>SMARK-AFRICA</td></tr>
+                        <tr><td class="fw-bold">Owner:</td><td>NGUTU EUWIN MURUMBI</td></tr>
+                        <tr><td class="fw-bold">Activity:</td><td>E-Commerce / Digital Services</td></tr>
+                        <tr><td class="fw-bold">Location:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Date Issued:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Expiry:</td><td>________________________</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-5 pt-4">
+                <div class="border-top border-dark pt-2 mx-auto" style="width: 250px;">
+                    <small>Director General, NEMA</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- HEALTH CERTIFICATE -->
+    <div id="health-cert" class="print-doc" style="display:none;">
+        <div class="text-center border border-2 border-dark p-4" style="min-height: 90vh;">
+            <h5 class="text-uppercase">County Government - Department of Health</h5>
+            <h3 class="text-uppercase fw-bold text-danger border-top border-bottom border-dark py-2 my-3">Health Inspection Certificate</h3>
+
+            <div class="text-start mx-auto my-4" style="max-width: 500px;">
+                <table class="table table-borderless">
+                    <tbody>
+                        <tr><td class="fw-bold">Certificate No:</td><td>HC/________________________</td></tr>
+                        <tr><td class="fw-bold">Premises:</td><td>SMARK-AFRICA (Warehouse/Office)</td></tr>
+                        <tr><td class="fw-bold">Owner:</td><td>NGUTU EUWIN MURUMBI</td></tr>
+                        <tr><td class="fw-bold">Location:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Date Inspected:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Valid Until:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Remarks:</td><td>Premises meets health standards</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-5 pt-4">
+                <div class="border-top border-dark pt-2 mx-auto" style="width: 250px;">
+                    <small>County Health Officer</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- FIRE SAFETY -->
+    <div id="fire-safety" class="print-doc" style="display:none;">
+        <div class="text-center border border-2 border-dark p-4" style="min-height: 90vh;">
+            <h5 class="text-uppercase">County Government - Fire & Rescue Services</h5>
+            <h3 class="text-uppercase fw-bold border-top border-bottom border-dark py-2 my-3" style="color: #fd7e14;">Fire Safety Compliance Certificate</h3>
+
+            <div class="text-start mx-auto my-4" style="max-width: 500px;">
+                <table class="table table-borderless">
+                    <tbody>
+                        <tr><td class="fw-bold">Certificate No:</td><td>FS/________________________</td></tr>
+                        <tr><td class="fw-bold">Premises:</td><td>SMARK-AFRICA</td></tr>
+                        <tr><td class="fw-bold">Owner:</td><td>NGUTU EUWIN MURUMBI</td></tr>
+                        <tr><td class="fw-bold">Location:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Inspection Date:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Valid Until:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Status:</td><td>Compliant</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-5 pt-4">
+                <div class="border-top border-dark pt-2 mx-auto" style="width: 250px;">
+                    <small>Chief Fire Officer</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- CR12 -->
+    <div id="cr12" class="print-doc" style="display:none;">
+        <div class="text-center border border-2 border-dark p-4" style="min-height: 90vh;">
+            <h5 class="text-uppercase">Office of the Registrar of Companies</h5>
+            <h6 class="text-uppercase">Republic of Kenya</h6>
+            <h3 class="text-uppercase fw-bold border-top border-bottom border-dark py-2 my-3">Form CR12<br><small>Particulars of Directors / Shareholders</small></h3>
+
+            <div class="text-start mx-auto my-4" style="max-width: 550px;">
+                <table class="table table-borderless">
+                    <tbody>
+                        <tr><td class="fw-bold">Company Name:</td><td>SMARK-AFRICA</td></tr>
+                        <tr><td class="fw-bold">Registration No:</td><td>________________________</td></tr>
+                        <tr><td class="fw-bold">Date of Incorporation:</td><td>________________________</td></tr>
+                    </tbody>
+                </table>
+
+                <h6 class="mt-4 fw-bold">Directors:</h6>
+                <table class="table table-bordered table-sm">
+                    <thead><tr><th>Name</th><th>ID/Passport</th><th>Role</th></tr></thead>
+                    <tbody>
+                        <tr><td>NGUTU EUWIN MURUMBI</td><td>____________</td><td>Director / Owner</td></tr>
+                    </tbody>
+                </table>
+
+                <h6 class="mt-4 fw-bold">Shareholders:</h6>
+                <table class="table table-bordered table-sm">
+                    <thead><tr><th>Name</th><th>Shares</th><th>Percentage</th></tr></thead>
+                    <tbody>
+                        <tr><td>NGUTU EUWIN MURUMBI</td><td>____________</td><td>100%</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="mt-5 pt-4">
+                <div class="border-top border-dark pt-2 mx-auto" style="width: 250px;">
+                    <small>Registrar of Companies</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+function printDocument(docId) {
+    var allDocs = document.querySelectorAll('.print-doc');
+    allDocs.forEach(function(doc) { doc.style.display = 'none'; });
+    var target = document.getElementById(docId);
+    if (target) {
+        target.style.display = 'block';
+        window.print();
+        setTimeout(function() { target.style.display = 'none'; }, 500);
+    }
+}
+</script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Times+New+Roman&family=Playfair+Display:wght@700&family=Libre+Baskerville&display=swap');
+
+.print-doc {
+    font-family: 'Times New Roman', 'Libre Baskerville', Georgia, serif;
+    color: #1a1a1a;
+}
+.print-doc h3, .print-doc h4, .print-doc h5, .print-doc h6 {
+    font-family: 'Playfair Display', 'Times New Roman', Georgia, serif;
+    letter-spacing: 1px;
+}
+.print-doc table td {
+    font-family: 'Times New Roman', Georgia, serif;
+    font-size: 14px;
+    padding: 6px 12px;
+}
+.print-doc .border-2 {
+    border-width: 3px !important;
+    border-color: #000 !important;
+}
+.print-doc small {
+    font-family: 'Times New Roman', Georgia, serif;
+    font-size: 12px;
+}
+
+@media print {
+    .d-print-none { display: none !important; }
+    .print-doc { display: block !important; }
+    body { font-size: 12pt; font-family: 'Times New Roman', Georgia, serif; }
+    .container { max-width: 100%; padding: 0; }
+    .print-doc .border-2 {
+        border: 3px solid #000 !important;
+        padding: 40px !important;
+        min-height: 100vh;
+    }
+    .print-doc h3 { font-size: 22pt; }
+    .print-doc h5 { font-size: 14pt; }
+    .print-doc table { font-size: 12pt; }
+    @page { margin: 15mm; size: A4; }
+}
+@media screen {
+    .print-doc { display: none; }
+}
+</style>
+{% endblock %}

@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Events & Offers - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="text-center mb-4">
+        <h2><i class="fas fa-calendar-star me-2 text-warning"></i>Upcoming Events & Offers</h2>
+        <p class="text-muted">Hot deals, crazy offers, and fun activities coming your way!</p>
+    </div>
+
+    {% if events %}
+    <div class="row g-4 mb-5">
+        {% for event in events %}
+        <div class="col-md-6 col-lg-4">
+            <div class="card border-0 shadow-sm h-100 {{ 'border-danger border-2' if event.is_hot else '' }}">
+                {% if event.image_url %}
+                <img src="{{ event.image_url }}" class="card-img-top" alt="{{ event.title }}" style="height: 200px; object-fit: cover;">
+                {% endif %}
+                <div class="card-body">
+                    {% if event.is_hot %}
+                    <span class="badge bg-danger mb-2"><i class="fas fa-fire me-1"></i>HOT EVENT</span>
+                    {% endif %}
+                    <h5 class="card-title">{{ event.title }}</h5>
+                    <p class="card-text text-muted small">{{ event.description[:200] }}{% if event.description|length > 200 %}...{% endif %}</p>
+                    {% if event.offers %}
+                    <div class="alert alert-warning small py-2 px-3 mb-2">
+                        <i class="fas fa-gift me-1"></i><strong>Offers:</strong> {{ event.offers[:150] }}
+                    </div>
+                    {% endif %}
+                    <div class="d-flex justify-content-between align-items-center mt-3">
+                        <small class="text-muted">
+                            <i class="fas fa-clock me-1"></i>{{ event.event_date.strftime('%d %b %Y, %H:%M') }}
+                        </small>
+                        {% if event.location %}
+                        <small class="text-muted">
+                            <i class="fas fa-map-marker-alt me-1"></i>{{ event.location }}
+                        </small>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-center py-5 text-muted">
+        <i class="fas fa-calendar fa-3x mb-3"></i>
+        <p>No upcoming events right now. Check back soon!</p>
+    </div>
+    {% endif %}
+
+    {% if past_events %}
+    <hr class="my-4">
+    <h4 class="text-muted mb-3"><i class="fas fa-history me-2"></i>Past Events</h4>
+    <div class="row g-3">
+        {% for event in past_events %}
+        <div class="col-md-6">
+            <div class="card border-0 shadow-sm opacity-75">
+                <div class="card-body py-3">
+                    <h6 class="mb-1">{{ event.title }}</h6>
+                    <small class="text-muted">{{ event.event_date.strftime('%d %b %Y') }}</small>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
