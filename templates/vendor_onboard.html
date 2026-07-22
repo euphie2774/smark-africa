@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Become a Seller - {{ super() }}{% endblock %}
+{% block content %}
+<div class="container py-5">
+    <h3 class="text-center mb-4"><i class="fas fa-store me-2"></i>Become a Seller on SMARKAFRICA</h3>
+    <p class="text-center text-muted mb-5">Choose a plan and start selling to millions of buyers across Africa.</p>
+
+    <div class="row g-4 justify-content-center">
+        {% for key, plan in plans.items() %}
+        <div class="col-md-5">
+            <div class="card h-100 {{ 'border-success shadow' if key == 'premium' else '' }}">
+                {% if key == 'premium' %}<div class="card-header bg-success text-white text-center fw-bold">Recommended</div>{% endif %}
+                <div class="card-body text-center">
+                    <h4>{{ key|title }} Seller</h4>
+                    <p class="display-5 fw-bold text-success">KSh {{ "{:,.0f}".format(plan.fee) }}</p>
+                    <p class="text-muted">One-time fee</p>
+                    <ul class="list-unstyled text-start">
+                        {% for perk in plan.perks %}
+                        <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i>{{ perk }}</li>
+                        {% endfor %}
+                    </ul>
+                    <form method="POST">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="plan" value="{{ key }}">
+                        <button type="submit" class="btn {{ 'btn-success' if key == 'premium' else 'btn-outline-success' }} w-100 btn-lg mt-3">Get Started</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

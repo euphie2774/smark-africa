@@ -1228,5 +1228,230 @@ class Event(db.Model):
     created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    ticket_price = db.Column(db.Float, default=0.0)
+    ticket_types = db.Column(db.Text)  # JSON: [{"name":"general","price":500},{"name":"vip","price":2000}]
+    max_tickets = db.Column(db.Integer, default=0)
+    tickets_sold = db.Column(db.Integer, default=0)
+    platform_fee_percent = db.Column(db.Float, default=10.0)
 
     creator = db.relationship('User', lazy=True)
+
+
+# ========================================================================
+# REVENUE / EARNING MODELS
+# ========================================================================
+
+class PromotedListing(db.Model):
+    """Sellers pay to boost their product visibility in search/homepage."""
+    __tablename__ = 'promoted_listings'
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=False)
+    seller_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    plan = db.Column(db.String(30), default='basic')  # basic, premium, spotlight
+    daily_rate = db.Column(db.Float, nullable=False)
+    total_paid = db.Column(db.Float, default=0.0)
+    impressions = db.Column(db.Integer, default=0)
+    clicks = db.Column(db.Integer, default=0)
+    starts_at = db.Column(db.DateTime, nullable=False)
+    ends_at = db.Column(db.DateTime, nullable=False)
+    status = db.Column(db.String(30), default='pending_payment')
+    mpesa_receipt = db.Column(db.String(50))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    product = db.relationship('Product', lazy=True)
+    seller = db.relationship('User', lazy=True)
+
+
+class AffiliateLink(db.Model):
+    """Earn commission by sharing product links externally."""
+    __tablename__ = 'affiliate_links'
+    __table_args__ = (
+        db.Index('ix_affiliate_links_user_product', 'user_id', 'product_id'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=True)
+    code = db.Column(db.String(20), unique=True, nullable=False)
+    clicks = db.Column(db.Integer, default=0)
+    conversions = db.Column(db.Integer, default=0)
+    total_earned = db.Column(db.Float, default=0.0)
+    commission_percent = db.Column(db.Float, default=5.0)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', lazy=True)
+    product = db.relationship('Product', lazy=True)
+
+
+class AffiliateConversion(db.Model):
+    """Tracks each successful affiliate sale."""
+    __tablename__ = 'affiliate_conversions'
+    id = db.Column(db.Integer, primary_key=True)
+    link_id = db.Column(db.Integer, db.ForeignKey('affiliate_links.id'), nullable=False)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False)
+    order_amount = db.Column(db.Float, nullable=False)
+    commission_earned = db.Column(db.Float, nullable=False)
+    status = db.Column(db.String(30), default='pending')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    link = db.relationship('AffiliateLink', lazy=True)
+
+
+class SellerSubscription(db.Model):
+    """Monthly subscription for premium seller features."""
+    __tablename__ = 'seller_subscriptions'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    plan = db.Column(db.String(30), nullable=False)  # starter, professional, enterprise
+    monthly_fee = db.Column(db.Float, nullable=False)
+    features = db.Column(db.Text)
+    starts_at = db.Column(db.DateTime, nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    auto_renew = db.Column(db.Boolean, default=True)
+    status = db.Column(db.String(30), default='active')
+    mpesa_receipt = db.Column(db.String(50))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', lazy=True)
+
+
+class SponsoredBanner(db.Model):
+    """Businesses pay for banner ad space on the platform."""
+    __tablename__ = 'sponsored_banners'
+    id = db.Column(db.Integer, primary_key=True)
+    advertiser_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    advertiser_name = db.Column(db.String(160), nullable=False)
+    advertiser_email = db.Column(db.String(160))
+    advertiser_phone = db.Column(db.String(40))
+    title = db.Column(db.String(200), nullable=False)
+    image_url = db.Column(db.String(500))
+    link_url = db.Column(db.String(500))
+    placement = db.Column(db.String(40), default='homepage')
+    daily_rate = db.Column(db.Float, nullable=False)
+    total_paid = db.Column(db.Float, default=0.0)
+    impressions = db.Column(db.Integer, default=0)
+    clicks = db.Column(db.Integer, default=0)
+    starts_at = db.Column(db.DateTime, nullable=False)
+    ends_at = db.Column(db.DateTime, nullable=False)
+    status = db.Column(db.String(30), default='pending_payment')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    advertiser = db.relationship('User', lazy=True)
+
+
+class EventTicket(db.Model):
+    """Paid event tickets - platform takes commission."""
+    __tablename__ = 'event_tickets'
+    __table_args__ = (
+        db.Index('ix_event_tickets_event_user', 'event_id', 'user_id'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    event_id = db.Column(db.Integer, db.ForeignKey('events.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    ticket_type = db.Column(db.String(60), default='general')
+    price = db.Column(db.Float, nullable=False)
+    platform_fee = db.Column(db.Float, default=0.0)
+    quantity = db.Column(db.Integer, default=1)
+    ticket_code = db.Column(db.String(40), unique=True)
+    status = db.Column(db.String(30), default='valid')
+    mpesa_receipt = db.Column(db.String(50))
+    purchased_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    event = db.relationship('Event', lazy=True)
+    user = db.relationship('User', lazy=True)
+
+
+class FeaturedPlacementBid(db.Model):
+    """Businesses bid for premium homepage spotlight placement."""
+    __tablename__ = 'featured_placement_bids'
+    id = db.Column(db.Integer, primary_key=True)
+    bidder_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=True)
+    business_name = db.Column(db.String(200))
+    bid_amount = db.Column(db.Float, nullable=False)
+    duration_days = db.Column(db.Integer, default=7)
+    placement_slot = db.Column(db.String(40), default='homepage_hero')
+    status = db.Column(db.String(30), default='pending')
+    starts_at = db.Column(db.DateTime)
+    ends_at = db.Column(db.DateTime)
+    mpesa_receipt = db.Column(db.String(50))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    bidder = db.relationship('User', lazy=True)
+    product = db.relationship('Product', lazy=True)
+
+
+class ServiceListing(db.Model):
+    """Freelance/service marketplace - platform takes commission."""
+    __tablename__ = 'service_listings'
+    id = db.Column(db.Integer, primary_key=True)
+    provider_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text)
+    category = db.Column(db.String(80), nullable=False)
+    price_type = db.Column(db.String(30), default='fixed')
+    price = db.Column(db.Float, nullable=False)
+    delivery_days = db.Column(db.Integer, default=3)
+    image_url = db.Column(db.String(500))
+    is_active = db.Column(db.Boolean, default=True)
+    orders_completed = db.Column(db.Integer, default=0)
+    rating = db.Column(db.Float, default=0.0)
+    platform_commission = db.Column(db.Float, default=15.0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    provider = db.relationship('User', lazy=True)
+
+
+class ServiceOrder(db.Model):
+    """Orders for freelance services."""
+    __tablename__ = 'service_orders'
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.Integer, db.ForeignKey('service_listings.id'), nullable=False)
+    client_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    provider_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    platform_fee = db.Column(db.Float, default=0.0)
+    provider_payout = db.Column(db.Float, default=0.0)
+    requirements = db.Column(db.Text)
+    status = db.Column(db.String(30), default='pending')
+    due_date = db.Column(db.DateTime)
+    completed_at = db.Column(db.DateTime)
+    mpesa_receipt = db.Column(db.String(50))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    service = db.relationship('ServiceListing', lazy=True)
+    client = db.relationship('User', foreign_keys=[client_id], lazy=True)
+    provider = db.relationship('User', foreign_keys=[provider_id], lazy=True)
+
+
+class VendorOnboardingFee(db.Model):
+    """One-time fee for sellers to start selling on the platform."""
+    __tablename__ = 'vendor_onboarding_fees'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    fee_amount = db.Column(db.Float, nullable=False)
+    plan = db.Column(db.String(30), default='standard')
+    mpesa_receipt = db.Column(db.String(50))
+    status = db.Column(db.String(30), default='pending')
+    paid_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', lazy=True)
+
+
+class PlatformRevenue(db.Model):
+    """Tracks all platform earnings from various streams."""
+    __tablename__ = 'platform_revenue'
+    __table_args__ = (
+        db.Index('ix_platform_revenue_stream_created', 'revenue_stream', 'created_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    revenue_stream = db.Column(db.String(60), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    description = db.Column(db.String(300))
+    reference_id = db.Column(db.String(80))
+    reference_type = db.Column(db.String(40))
+    payer_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    payer = db.relationship('User', lazy=True)

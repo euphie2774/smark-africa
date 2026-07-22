@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Sponsored Banners - {{ super() }}{% endblock %}
+{% block content %}
+<div class="container py-5">
+    <h3><i class="fas fa-ad me-2"></i>Sponsored Banners</h3>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <h5>Create New Banner</h5>
+            <form method="POST" enctype="multipart/form-data">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <input type="text" class="form-control" name="advertiser_name" placeholder="Advertiser Name" required>
+                    </div>
+                    <div class="col-md-6">
+                        <input type="text" class="form-control" name="title" placeholder="Banner Title" required>
+                    </div>
+                    <div class="col-md-4">
+                        <input type="email" class="form-control" name="advertiser_email" placeholder="Email">
+                    </div>
+                    <div class="col-md-4">
+                        <input type="tel" class="form-control" name="advertiser_phone" placeholder="Phone">
+                    </div>
+                    <div class="col-md-4">
+                        <input type="url" class="form-control" name="link_url" placeholder="Link URL">
+                    </div>
+                    <div class="col-md-3">
+                        <select class="form-select" name="placement">
+                            <option value="homepage">Homepage</option>
+                            <option value="shop">Shop Page</option>
+                            <option value="category">Category Page</option>
+                            <option value="checkout">Checkout</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <input type="number" class="form-control" name="daily_rate" placeholder="Daily Rate (KSh)" value="200" min="50">
+                    </div>
+                    <div class="col-md-3">
+                        <input type="number" class="form-control" name="days" placeholder="Days" value="7" min="1" max="90">
+                    </div>
+                    <div class="col-md-3">
+                        <input type="file" class="form-control" name="banner_image" accept="image/*">
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-success mt-3"><i class="fas fa-plus me-1"></i>Create Banner</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="table-responsive">
+        <table class="table table-sm">
+            <thead><tr><th>Advertiser</th><th>Title</th><th>Placement</th><th>Rate/Day</th><th>Total</th><th>Status</th></tr></thead>
+            <tbody>
+            {% for b in banners %}
+            <tr>
+                <td>{{ b.advertiser_name }}</td>
+                <td>{{ b.title }}</td>
+                <td>{{ b.placement }}</td>
+                <td>KSh {{ "%.0f"|format(b.daily_rate) }}</td>
+                <td>KSh {{ "%.0f"|format(b.total_paid) }}</td>
+                <td><span class="badge bg-{{ 'success' if b.status == 'active' else 'secondary' }}">{{ b.status }}</span></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

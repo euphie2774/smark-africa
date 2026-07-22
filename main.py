@@ -46,7 +46,9 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     LoyaltyLedger, BNPLPlan, BNPLInstallment, TrustScore, ProductBarcode, Supplier, PurchaseOrder, \
     PurchaseOrderItem, StockMovement, BNPLProductPolicy, SignupVerification, ShoppingCard, \
     ShoppingCardTransaction, KYCIdentityVerification, CardAuthorizationRequest, Raffle, RaffleTicket, \
-    CoinTransaction, CoinDailyCheckIn, Event
+    CoinTransaction, CoinDailyCheckIn, Event, \
+    PromotedListing, AffiliateLink, AffiliateConversion, SellerSubscription, SponsoredBanner, \
+    EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue
 
 # Import security utilities
 from validators import (RegisterSchema, LoginSchema, ProductSchema, ReviewSchema,
@@ -155,6 +157,8 @@ except Exception:
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(os.path.join(app.static_folder, 'uploads', 'products'), exist_ok=True)
 os.makedirs(os.path.join(app.static_folder, 'uploads', 'digital'), exist_ok=True)
+os.makedirs(os.path.join(app.static_folder, 'uploads', 'banners'), exist_ok=True)
+os.makedirs(os.path.join(app.static_folder, 'uploads', 'services'), exist_ok=True)
 
 db.init_app(app)
 
@@ -2116,13 +2120,19 @@ def category_market_key(category_name):
 
 
 def market_signal_for(category_name, base_price, tick):
-    seed = int(hashlib.sha256(f'{category_name}:{tick // 12}'.encode()).hexdigest()[:8], 16)
-    wave = ((tick + seed) % 18) - 9
-    percent_change = round((wave / 9.0) * 1.8, 2)
+    hour_block = tick // 3600
+    day_block = tick // 86400
+    seed_fast = int(hashlib.sha256(f'{category_name}:h:{hour_block}'.encode()).hexdigest()[:8], 16)
+    seed_slow = int(hashlib.sha256(f'{category_name}:d:{day_block}'.encode()).hexdigest()[:8], 16)
+    fast_wave = ((seed_fast % 20) - 10) / 10.0
+    slow_wave = ((seed_slow % 30) - 15) / 15.0
+    volatility_seed = int(hashlib.sha256(f'{category_name}:v'.encode()).hexdigest()[:4], 16) % 100
+    volatility = 2.5 + (volatility_seed / 100.0) * 5.5
+    percent_change = round((fast_wave * 0.4 + slow_wave * 0.6) * volatility, 2)
     predicted_price = round(max(1, base_price * (1 + percent_change / 100)), 2)
-    if percent_change > 0.25:
+    if percent_change > 1.0:
         direction = 'increase'
-    elif percent_change < -0.25:
+    elif percent_change < -1.0:
         direction = 'drop'
     else:
         direction = 'stagnant'
@@ -2647,28 +2657,51 @@ def market_news_category_rows():
 def market_news_recommendation(row):
     direction = row.get('direction', 'stagnant')
     category = row.get('category', 'Marketplace')
+    kenya_price = row.get('kenya_price', row.get('current_price', 0))
+    world_price = row.get('world_price', 0)
     if direction == 'increase':
-        return f'Prioritize margin checks, supplier follow-up, and early replenishment for {category}.'
+        return f'ACTION: Stock {category} NOW at KSh {kenya_price:,.0f}. Prices climbing. Import at KSh {world_price:,.0f} before landed costs jump.'
     if direction == 'drop':
-        return f'Watch discount timing and procurement opportunities before competitors adjust {category} offers.'
-    return f'Keep monitoring demand, stock health, logistics cost, and customer interest signals for {category}.'
+        return f'ACTION: WAIT on {category}. Prices falling toward KSh {world_price:,.0f}. Buy opportunity incoming. Set alerts.'
+    return f'WATCH: {category} stable. Fair buy at KSh {kenya_price:,.0f}. Compare suppliers, negotiate bulk for better margin.'
 
 
 def build_category_market_news_item(row):
     category = row.get('category', 'Marketplace')
     direction = row.get('direction', 'stagnant')
+    percent = row.get('percent_change', 0)
+    kenya_price = row.get('kenya_price', row.get('current_price', 0))
+    world_price = row.get('world_price', 0)
+    hour_seed = int(hashlib.sha256(f'{category}:{int(utcnow().timestamp()) // 3600}'.encode()).hexdigest()[:4], 16)
+    variant = hour_seed % 4
     if direction == 'increase':
-        title = f'{category} market pressure is rising'
+        titles = [
+            f'{category}: prices rising {abs(percent):.1f}% - BUY NOW',
+            f'HOT: {category} demand outpacing supply',
+            f'{category} costs up - restock before margin squeeze',
+            f'URGENT: {category} prices climbing fast',
+        ]
+        title = titles[variant]
     elif direction == 'drop':
-        title = f'{category} prices may soften'
+        titles = [
+            f'{category}: prices falling {abs(percent):.1f}% - WAIT',
+            f'DEAL WINDOW: {category} getting cheaper',
+            f'{category} oversupply detected - negotiate hard',
+            f'{category} discounts spotted - bulk buy opportunity',
+        ]
+        title = titles[variant]
     else:
-        title = f'{category} market looks stable'
+        titles = [
+            f'{category}: stable market - compare suppliers',
+            f'{category}: no pressure - negotiate calmly',
+            f'{category}: flat trend - set price alerts',
+            f'{category}: range-bound - good time to plan',
+        ]
+        title = titles[variant]
     body = (
-        f"Category intelligence for {category}: Kenya estimate KSh {row.get('kenya_price', row.get('current_price', 0)):,.2f}; "
-        f"world/manufacturer estimate KSh {row.get('world_price', 0):,.2f}; "
-        f"predicted movement {row.get('percent_change', 0)}%. "
-        f"Signal source: {row.get('source', 'marketplace source index')}. "
-        f"{row.get('importer_note', '')} {market_news_recommendation(row)}"
+        f"{category} | Kenya: KSh {kenya_price:,.0f} | World: KSh {world_price:,.0f} | "
+        f"Movement: {percent:+.1f}% | Source: {row.get('source', 'marketplace index')} | "
+        f"{market_news_recommendation(row)}"
     )
     image_payload = trend_image_payload(category, row.get('market_key', category))
     return MarketNews(
@@ -2715,7 +2748,7 @@ def generate_market_news_if_due(force=False):
         Setting.set('market_news_generation_lock', '1')
         db.session.remove()
     latest = MarketNews.query.order_by(MarketNews.created_at.desc()).first()
-    if latest and not force and latest.created_at and latest.created_at > utcnow() - timedelta(hours=24):
+    if latest and not force and latest.created_at and latest.created_at > utcnow() - timedelta(hours=2):
         return 0
 
     pending_news = []
@@ -2724,7 +2757,7 @@ def generate_market_news_if_due(force=False):
         existing = MarketNews.query.filter(
             MarketNews.generated_by == 'marketplace_intelligence',
             MarketNews.product_name == category_name,
-            MarketNews.created_at > utcnow() - timedelta(hours=24)
+            MarketNews.created_at > utcnow() - timedelta(hours=2)
         ).first()
         if existing and not force:
             continue
@@ -2739,7 +2772,7 @@ def generate_market_news_if_due(force=False):
         existing = MarketNews.query.filter(
             MarketNews.generated_by == 'product_price_signal',
             MarketNews.product_name == product.name,
-            MarketNews.created_at > utcnow() - timedelta(hours=24)
+            MarketNews.created_at > utcnow() - timedelta(hours=2)
         ).first()
         if existing and not force:
             continue
@@ -2755,19 +2788,65 @@ def generate_market_news_if_due(force=False):
             continue
         _, percent_change, direction = market_signal_for(product.name, row['recommended_price'], int(utcnow().timestamp()))
         label = row['label']
+        store_price = product.discounted_price or product.selling_price or 0
+        margin_vs_low = round(((store_price - row['kenya_low']) / max(row['kenya_low'], 1)) * 100, 1) if row['kenya_low'] else 0
+        hour_seed = int(hashlib.sha256(f'{product.name}:{int(utcnow().timestamp()) // 3600}'.encode()).hexdigest()[:4], 16)
+        signal_variant = hour_seed % 5
         if direction == 'increase':
-            title = f"{label} prices may increase"
-            action = 'Consider early replenishment and review margins before landed costs rise.'
+            titles = [
+                f"{label} prices trending UP - stock now",
+                f"BUY SIGNAL: {label} costs rising",
+                f"{label} supply tightening - prices climbing",
+                f"ALERT: {label} prices increasing",
+                f"{label} demand surge - act fast",
+            ]
+            actions = [
+                f'Buy now at KSh {row["kenya_low"]:,.0f} before prices hit KSh {row["kenya_high"]:,.0f}.',
+                f'Restock immediately. Source at KSh {row["kenya_low"]:,.0f} won\'t last. Predicted +{abs(percent_change):.1f}%.',
+                f'Lock in supplier prices today. Market moving to KSh {row["kenya_high"]:,.0f}+.',
+                f'Competitor prices rising. Buy window: KSh {row["kenya_low"]:,.0f}-{row["kenya_high"]:,.0f}.',
+                f'Secure stock at KSh {row["kenya_low"]:,.0f} before {abs(percent_change):.1f}% jump.',
+            ]
+            title = titles[signal_variant]
+            action = actions[signal_variant]
         elif direction == 'drop':
-            title = f"{label} prices may decrease"
-            action = 'Watch for buying opportunities, price drops, and promotion timing before competitors react.'
+            titles = [
+                f"{label} prices DROPPING - wait to buy",
+                f"HOLD: {label} getting cheaper",
+                f"{label} oversupply - prices falling",
+                f"DEAL: {label} at {abs(percent_change):.1f}% discount",
+                f"{label} liquidation opportunity",
+            ]
+            actions = [
+                f'Wait 24-48h. Dropping from KSh {row["kenya_high"]:,.0f} toward KSh {row["kenya_low"]:,.0f}.',
+                f'Sellers discounting stock. Target: KSh {row["kenya_low"]:,.0f}. Don\'t overpay.',
+                f'Oversupply = negotiation power. Push for KSh {row["kenya_low"]:,.0f} or below.',
+                f'Buy at KSh {row["kenya_low"]:,.0f}, sell at KSh {store_price:,.0f} for {margin_vs_low:.0f}% margin.',
+                f'Flash deal window. Source at KSh {row["kenya_low"]:,.0f} and flip before competitors notice.',
+            ]
+            title = titles[signal_variant]
+            action = actions[signal_variant]
         else:
-            title = f"{label} prices look stable"
-            action = 'No immediate price move detected; keep watching demand, stock, and rating changes.'
+            titles = [
+                f"{label} stable - good entry point",
+                f"{label} neutral - compare before buying",
+                f"{label} steady at KSh {row['kenya_low']:,.0f}-{row['kenya_high']:,.0f}",
+                f"{label} flat - watch for breakout",
+                f"{label} consolidating - set alerts",
+            ]
+            actions = [
+                f'Fair range: KSh {row["kenya_low"]:,.0f}-{row["kenya_high"]:,.0f}. Safe to buy.',
+                f'Compare 3+ suppliers. Fair price: KSh {row["recommended_price"]:,.0f}.',
+                f'Negotiate bulk at KSh {row["kenya_low"]:,.0f}. No price pressure.',
+                f'Set alert: below KSh {row["kenya_low"]:,.0f} (buy) or above KSh {row["kenya_high"]:,.0f} (sell).',
+                f'Your price KSh {store_price:,.0f} vs market KSh {row["recommended_price"]:,.0f}. Margin {"healthy" if margin_vs_low > 10 else "tight"}.',
+            ]
+            title = titles[signal_variant]
+            action = actions[signal_variant]
         body = (
-            f"{product.name} in {category_name}: Kenya source range KSh {row['kenya_low']:,.2f} - "
-            f"KSh {row['kenya_high']:,.2f}. Manufacturer/import estimate: KSh {row['manufacturer_price']:,.2f}. "
-            f"Signal: {direction} ({percent_change}%). Source: {row.get('source', 'market reference')}. {action}"
+            f"{product.name} ({category_name}) | Kenya: KSh {row['kenya_low']:,.0f}-{row['kenya_high']:,.0f} | "
+            f"Import: KSh {row['manufacturer_price']:,.0f} | Store: KSh {store_price:,.0f} | "
+            f"Signal: {direction.upper()} ({percent_change:+.1f}%) | {action}"
         )
         pending_news.append(MarketNews(
             title=title,
@@ -3849,27 +3928,26 @@ def auto_verify_seller_payload(legal_name, country, phone, document_filename, se
 def verify_kyc_faces(document_path, selfie_path):
     """Compare face in document photo with selfie using DeepFace."""
     try:
-        #from deepface import DeepFace
+        from deepface import DeepFace
 
-        # Verify faces match between document and selfie
-        #result = DeepFace.verify(
-            #img1_path=document_path,
-            #img2_path=selfie_path,
-            #model_name='VGG-Face',
-            #detector_backend='opencv',
-            #enforce_detection=False
-        #)
+        result = DeepFace.verify(
+            img1_path=document_path,
+            img2_path=selfie_path,
+            model_name='VGG-Face',
+            detector_backend='opencv',
+            enforce_detection=False
+        )
 
-        #face_match_score = round((1 - result.get('distance', 1)) * 100, 2)
-        #verified = result.get('verified', False)
+        face_match_score = round((1 - result.get('distance', 1)) * 100, 2)
+        verified = result.get('verified', False)
 
         return {
             'success': True,
-            'face_match_score': 100,
-            'verified': True,
-            'distance': 0,
-            'threshold': 0.4,
-            'model': 'diabled',
+            'face_match_score': face_match_score,
+            'verified': verified,
+            'distance': result.get('distance', 1),
+            'threshold': result.get('threshold', 0.4),
+            'model': 'VGG-Face',
         }
     except Exception as e:
         logger.error(f'Face verification failed: {e}')
@@ -6325,7 +6403,10 @@ def admin_market_intelligence_api():
 
 @app.route('/api/market-news')
 def market_news_api():
-    generate_market_news_if_due()
+    try:
+        generate_market_news_if_due()
+    except OperationalError:
+        db.session.rollback()
     category = request.args.get('category', '').strip()
     query = MarketNews.query.filter_by(is_cleared=False)
     if category:
@@ -6429,7 +6510,13 @@ def admin_market_news():
 @admin_required
 def admin_product_trends():
     manual_refresh = request.args.get('refresh') == '1'
-    generate_market_news_if_due(force=manual_refresh)
+    try:
+        generate_market_news_if_due(force=manual_refresh)
+    except OperationalError:
+        db.session.rollback()
+        Setting.set('market_news_generation_lock', '0')
+        db.session.commit()
+        flash('News generation hit a database lock. Try again in a moment.', 'warning')
     trend_seed = int(utcnow().timestamp()) if manual_refresh else int(utcnow().timestamp() // 3600)
     news_items = MarketNews.query.filter(
         MarketNews.is_cleared == False
@@ -9758,14 +9845,11 @@ def admin_print_documentation():
     return render_template('admin/print_documentation.html', settings=settings, stats=stats, events=events, analytics=analytics, now=datetime.utcnow)
 
 
-@app.route('/admin/print-documentation/mvp', methods=['GET', 'POST'])
+@app.route('/admin/print-documentation/mvp')
 @login_required
 @mvp_required
 def admin_print_documentation_mvp():
-    """Full MVP documentation with all details - requires MVP password to access."""
-    mvp_password = request.form.get('auth', '') if request.method == 'POST' else ''
-    if not mvp_password or not current_user.check_password(mvp_password):
-        return render_template('admin/print_documentation_auth.html')
+    """Full MVP documentation with all details - MVP login is sufficient."""
     settings = {}
     for s in Setting.query.all():
         settings[s.key] = s.value
@@ -9811,6 +9895,403 @@ def admin_analytics_realtime_api():
 @mvp_required
 def admin_print_business_documents():
     return render_template('admin/print_business_documents.html')
+
+
+# ========================================================================
+# REVENUE & EARNING ROUTES
+# ========================================================================
+
+def record_platform_revenue(stream, amount, description='', reference_id='', reference_type='', payer_id=None):
+    """Record a platform earning from any revenue stream."""
+    entry = PlatformRevenue(
+        revenue_stream=stream,
+        amount=amount,
+        description=description[:300] if description else '',
+        reference_id=str(reference_id)[:80] if reference_id else '',
+        reference_type=reference_type[:40] if reference_type else '',
+        payer_id=payer_id,
+    )
+    db.session.add(entry)
+    return entry
+
+
+# --- 1. Promoted Listings ---
+@app.route('/seller/promote/<int:product_id>', methods=['GET', 'POST'])
+@login_required
+def promote_product(product_id):
+    product = Product.query.get_or_404(product_id)
+    if product.seller_id != current_user.id and not current_user.is_admin:
+        abort(403)
+    plans = {
+        'basic': {'daily_rate': 50, 'label': 'Basic Boost (KSh 50/day)'},
+        'premium': {'daily_rate': 150, 'label': 'Premium Boost (KSh 150/day)'},
+        'spotlight': {'daily_rate': 500, 'label': 'Spotlight (KSh 500/day)'},
+    }
+    if request.method == 'POST':
+        plan_key = request.form.get('plan', 'basic')
+        days = max(1, min(30, int(request.form.get('days', 7))))
+        plan = plans.get(plan_key, plans['basic'])
+        total = plan['daily_rate'] * days
+        promo = PromotedListing(
+            product_id=product.id,
+            seller_id=current_user.id,
+            plan=plan_key,
+            daily_rate=plan['daily_rate'],
+            total_paid=total,
+            starts_at=utcnow(),
+            ends_at=utcnow() + timedelta(days=days),
+            status='active',
+        )
+        db.session.add(promo)
+        record_platform_revenue('promoted_listing', total, f'{plan_key} promo for {product.name}', str(product.id), 'product', current_user.id)
+        db.session.commit()
+        flash(f'Product promoted with {plan_key} plan for {days} days (KSh {total:,.0f}).', 'success')
+        return redirect(url_for('product_page', slug=product.slug))
+    return render_template('promote_product.html', product=product, plans=plans)
+
+
+# --- 2. Affiliate Program ---
+@app.route('/affiliate/dashboard')
+@login_required
+def affiliate_dashboard():
+    links = AffiliateLink.query.filter_by(user_id=current_user.id).order_by(AffiliateLink.created_at.desc()).all()
+    total_earned = sum(l.total_earned for l in links)
+    total_clicks = sum(l.clicks for l in links)
+    total_conversions = sum(l.conversions for l in links)
+    return render_template('affiliate_dashboard.html', links=links, total_earned=total_earned,
+                           total_clicks=total_clicks, total_conversions=total_conversions)
+
+
+@app.route('/affiliate/generate', methods=['POST'])
+@login_required
+def generate_affiliate_link():
+    import secrets as _secrets
+    product_id = request.form.get('product_id', type=int)
+    product = Product.query.get(product_id) if product_id else None
+    code = _secrets.token_urlsafe(8)[:10]
+    link = AffiliateLink(
+        user_id=current_user.id,
+        product_id=product.id if product else None,
+        code=code,
+        commission_percent=float(Setting.get('affiliate_commission_percent', '5') or 5),
+    )
+    db.session.add(link)
+    db.session.commit()
+    flash(f'Affiliate link generated: {url_for("affiliate_redirect", code=code, _external=True)}', 'success')
+    return redirect(url_for('affiliate_dashboard'))
+
+
+@app.route('/ref/<code>')
+def affiliate_redirect(code):
+    link = AffiliateLink.query.filter_by(code=code, is_active=True).first_or_404()
+    link.clicks += 1
+    db.session.commit()
+    session['affiliate_code'] = code
+    if link.product_id:
+        product = Product.query.get(link.product_id)
+        if product:
+            return redirect(url_for('product_page', slug=product.slug))
+    return redirect(url_for('shop'))
+
+
+# --- 3. Seller Subscriptions ---
+SELLER_PLANS = {
+    'starter': {'monthly_fee': 500, 'features': ['5 product listings', 'Basic analytics', 'Email support']},
+    'professional': {'monthly_fee': 2000, 'features': ['50 product listings', 'Full analytics', 'Priority support', 'Promoted badge']},
+    'enterprise': {'monthly_fee': 5000, 'features': ['Unlimited listings', 'API access', 'Dedicated support', 'Custom storefront', 'Ad credits']},
+}
+
+
+@app.route('/seller/subscribe', methods=['GET', 'POST'])
+@login_required
+def seller_subscribe():
+    active_sub = SellerSubscription.query.filter_by(user_id=current_user.id, status='active').first()
+    if request.method == 'POST':
+        plan_key = request.form.get('plan', 'starter')
+        plan = SELLER_PLANS.get(plan_key)
+        if not plan:
+            flash('Invalid plan selected.', 'danger')
+            return redirect(url_for('seller_subscribe'))
+        sub = SellerSubscription(
+            user_id=current_user.id,
+            plan=plan_key,
+            monthly_fee=plan['monthly_fee'],
+            features=json.dumps(plan['features']),
+            starts_at=utcnow(),
+            expires_at=utcnow() + timedelta(days=30),
+            status='active',
+        )
+        db.session.add(sub)
+        record_platform_revenue('subscription', plan['monthly_fee'], f'{plan_key} seller subscription', str(current_user.id), 'user', current_user.id)
+        db.session.commit()
+        flash(f'Subscribed to {plan_key.title()} plan (KSh {plan["monthly_fee"]:,.0f}/month).', 'success')
+        return redirect(url_for('affiliate_dashboard'))
+    return render_template('seller_subscribe.html', plans=SELLER_PLANS, active_sub=active_sub)
+
+
+# --- 4. Sponsored Banners (Admin manages) ---
+@app.route('/admin/banners', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def admin_banners():
+    if request.method == 'POST':
+        banner = SponsoredBanner(
+            advertiser_name=request.form.get('advertiser_name', '').strip(),
+            advertiser_email=request.form.get('advertiser_email', '').strip(),
+            advertiser_phone=request.form.get('advertiser_phone', '').strip(),
+            title=request.form.get('title', '').strip(),
+            link_url=request.form.get('link_url', '').strip(),
+            placement=request.form.get('placement', 'homepage'),
+            daily_rate=float(request.form.get('daily_rate', 200)),
+            starts_at=utcnow(),
+            ends_at=utcnow() + timedelta(days=int(request.form.get('days', 7))),
+            status='active',
+            total_paid=float(request.form.get('daily_rate', 200)) * int(request.form.get('days', 7)),
+        )
+        if request.files.get('banner_image'):
+            banner.image_url = save_uploaded_file(request.files['banner_image'], 'banners')
+        db.session.add(banner)
+        record_platform_revenue('banner', banner.total_paid, f'Banner: {banner.title}', str(banner.id), 'banner')
+        db.session.commit()
+        flash('Sponsored banner created.', 'success')
+        return redirect(url_for('admin_banners'))
+    banners = SponsoredBanner.query.order_by(SponsoredBanner.created_at.desc()).limit(50).all()
+    return render_template('admin/banners.html', banners=banners)
+
+
+# --- 5. Event Tickets ---
+@app.route('/event/<int:event_id>/buy-ticket', methods=['POST'])
+@login_required
+def buy_event_ticket(event_id):
+    import secrets as _secrets
+    event = Event.query.get_or_404(event_id)
+    if not event.ticket_price or event.ticket_price <= 0:
+        flash('This event has no paid tickets.', 'info')
+        return redirect(url_for('public_events'))
+    ticket_type = request.form.get('ticket_type', 'general')
+    price = event.ticket_price
+    platform_fee = round(price * (event.platform_fee_percent or 10) / 100, 2)
+    ticket = EventTicket(
+        event_id=event.id,
+        user_id=current_user.id,
+        ticket_type=ticket_type,
+        price=price,
+        platform_fee=platform_fee,
+        ticket_code=_secrets.token_urlsafe(16)[:20],
+        status='valid',
+    )
+    db.session.add(ticket)
+    event.tickets_sold = (event.tickets_sold or 0) + 1
+    record_platform_revenue('event_ticket', platform_fee, f'Ticket for {event.title}', str(event.id), 'event', current_user.id)
+    db.session.commit()
+    flash(f'Ticket purchased! Your code: {ticket.ticket_code}', 'success')
+    return redirect(url_for('public_events'))
+
+
+# --- 6. Featured Placement Bidding ---
+@app.route('/placement/bid', methods=['GET', 'POST'])
+@login_required
+def placement_bid():
+    if request.method == 'POST':
+        product_id = request.form.get('product_id', type=int)
+        bid_amount = float(request.form.get('bid_amount', 0))
+        duration_days = max(1, min(30, int(request.form.get('duration_days', 7))))
+        slot = request.form.get('slot', 'homepage_hero')
+        if bid_amount < 500:
+            flash('Minimum bid is KSh 500.', 'danger')
+            return redirect(url_for('placement_bid'))
+        bid = FeaturedPlacementBid(
+            bidder_id=current_user.id,
+            product_id=product_id,
+            business_name=request.form.get('business_name', current_user.username),
+            bid_amount=bid_amount,
+            duration_days=duration_days,
+            placement_slot=slot,
+            status='active',
+            starts_at=utcnow(),
+            ends_at=utcnow() + timedelta(days=duration_days),
+        )
+        db.session.add(bid)
+        record_platform_revenue('placement_bid', bid_amount, f'Placement bid: {slot}', str(bid.id), 'bid', current_user.id)
+        db.session.commit()
+        flash(f'Your bid of KSh {bid_amount:,.0f} for {slot} has been placed!', 'success')
+        return redirect(url_for('home'))
+    products = Product.query.filter_by(is_active=True, seller_id=current_user.id).all() if not current_user.is_admin else Product.query.filter_by(is_active=True).limit(50).all()
+    return render_template('placement_bid.html', products=products)
+
+
+# --- 7. Service Marketplace ---
+@app.route('/services')
+def services_marketplace():
+    category = request.args.get('category', '')
+    query = ServiceListing.query.filter_by(is_active=True)
+    if category:
+        query = query.filter_by(category=category)
+    services = query.order_by(ServiceListing.orders_completed.desc(), ServiceListing.created_at.desc()).limit(60).all()
+    categories = db.session.query(ServiceListing.category).distinct().all()
+    return render_template('services.html', services=services, categories=[c[0] for c in categories], current_category=category)
+
+
+@app.route('/services/create', methods=['GET', 'POST'])
+@login_required
+def create_service():
+    if request.method == 'POST':
+        service = ServiceListing(
+            provider_id=current_user.id,
+            title=request.form.get('title', '').strip(),
+            description=request.form.get('description', '').strip(),
+            category=request.form.get('category', '').strip(),
+            price_type=request.form.get('price_type', 'fixed'),
+            price=float(request.form.get('price', 0)),
+            delivery_days=int(request.form.get('delivery_days', 3)),
+            platform_commission=float(Setting.get('service_commission_percent', '15') or 15),
+        )
+        if request.files.get('service_image'):
+            service.image_url = save_uploaded_file(request.files['service_image'], 'services')
+        db.session.add(service)
+        db.session.commit()
+        flash('Service listed successfully!', 'success')
+        return redirect(url_for('services_marketplace'))
+    return render_template('create_service.html')
+
+
+@app.route('/services/<int:service_id>/order', methods=['POST'])
+@login_required
+def order_service(service_id):
+    service = ServiceListing.query.get_or_404(service_id)
+    if service.provider_id == current_user.id:
+        flash('You cannot order your own service.', 'danger')
+        return redirect(url_for('services_marketplace'))
+    platform_fee = round(service.price * service.platform_commission / 100, 2)
+    provider_payout = service.price - platform_fee
+    order = ServiceOrder(
+        service_id=service.id,
+        client_id=current_user.id,
+        provider_id=service.provider_id,
+        amount=service.price,
+        platform_fee=platform_fee,
+        provider_payout=provider_payout,
+        requirements=request.form.get('requirements', '').strip(),
+        status='pending',
+        due_date=utcnow() + timedelta(days=service.delivery_days),
+    )
+    db.session.add(order)
+    record_platform_revenue('service_commission', platform_fee, f'Service: {service.title}', str(service.id), 'service', current_user.id)
+    service.orders_completed += 1
+    db.session.commit()
+    flash(f'Service ordered! Provider will deliver within {service.delivery_days} days.', 'success')
+    return redirect(url_for('services_marketplace'))
+
+
+# --- 8. Vendor Onboarding Fee ---
+@app.route('/seller/onboard', methods=['GET', 'POST'])
+@login_required
+def vendor_onboard():
+    existing = VendorOnboardingFee.query.filter_by(user_id=current_user.id, status='paid').first()
+    if existing:
+        flash('You have already completed vendor onboarding.', 'info')
+        return redirect(url_for('home'))
+    onboard_plans = {
+        'standard': {'fee': 1000, 'label': 'Standard Seller (KSh 1,000)', 'perks': ['Up to 20 listings', 'Standard support']},
+        'premium': {'fee': 3000, 'label': 'Premium Seller (KSh 3,000)', 'perks': ['Unlimited listings', 'Priority support', 'Verified badge', 'Analytics dashboard']},
+    }
+    if request.method == 'POST':
+        plan_key = request.form.get('plan', 'standard')
+        plan = onboard_plans.get(plan_key, onboard_plans['standard'])
+        fee = VendorOnboardingFee(
+            user_id=current_user.id,
+            fee_amount=plan['fee'],
+            plan=plan_key,
+            status='paid',
+            paid_at=utcnow(),
+        )
+        db.session.add(fee)
+        current_user.seller_status = 'pending'
+        record_platform_revenue('vendor_fee', plan['fee'], f'Vendor onboarding: {plan_key}', str(current_user.id), 'user', current_user.id)
+        db.session.commit()
+        flash(f'Onboarding complete! You are now a {plan_key} seller.', 'success')
+        return redirect(url_for('home'))
+    return render_template('vendor_onboard.html', plans=onboard_plans)
+
+
+# --- 9. Coin-to-Cash Conversion ---
+@app.route('/coins/convert', methods=['POST'])
+@login_required
+def convert_coins_to_cash():
+    coins_to_convert = int(request.form.get('coins', 0))
+    if coins_to_convert < 100:
+        flash('Minimum conversion is 100 coins.', 'danger')
+        return redirect(url_for('coins_page'))
+    balance = get_user_coin_balance(current_user.id)
+    if coins_to_convert > balance:
+        flash('Insufficient coin balance.', 'danger')
+        return redirect(url_for('coins_page'))
+    conversion_rate = float(Setting.get('coin_to_cash_rate', '0.5') or 0.5)
+    conversion_fee_percent = float(Setting.get('coin_conversion_fee_percent', '10') or 10)
+    cash_value = coins_to_convert * conversion_rate
+    fee = round(cash_value * conversion_fee_percent / 100, 2)
+    net_cash = cash_value - fee
+    spend_coins(current_user.id, coins_to_convert, 'cash_conversion', f'Converted {coins_to_convert} coins to KSh {net_cash:.2f}')
+    record_platform_revenue('coin_conversion', fee, f'Coin conversion fee ({coins_to_convert} coins)', str(current_user.id), 'user', current_user.id)
+    db.session.commit()
+    flash(f'Converted {coins_to_convert} coins to KSh {net_cash:.2f} (fee: KSh {fee:.2f}).', 'success')
+    return redirect(url_for('coins_page'))
+
+
+# --- 10. Transaction Processing Fee ---
+def apply_transaction_processing_fee(order_amount, order_id, payer_id=None):
+    """Apply a small processing fee on every transaction. Called during checkout."""
+    fee_percent = float(Setting.get('transaction_fee_percent', '2.5') or 2.5)
+    fee = round(order_amount * fee_percent / 100, 2)
+    if fee > 0:
+        record_platform_revenue('processing_fee', fee, f'Transaction fee on order #{order_id}', str(order_id), 'order', payer_id)
+    return fee
+
+
+# --- 11. Premium Support Tier ---
+@app.route('/support/premium', methods=['GET', 'POST'])
+@login_required
+def premium_support():
+    if request.method == 'POST':
+        fee = float(Setting.get('premium_support_fee', '200') or 200)
+        ticket = SupportTicket(
+            user_id=current_user.id,
+            subject=request.form.get('subject', 'Premium Support Request').strip(),
+            body=request.form.get('message', '').strip(),
+            severity='urgent',
+            status='open',
+        )
+        db.session.add(ticket)
+        record_platform_revenue('premium_support', fee, f'Premium support ticket', str(current_user.id), 'user', current_user.id)
+        db.session.commit()
+        flash(f'Premium support ticket created (KSh {fee:.0f}). We will respond within 2 hours.', 'success')
+        return redirect(url_for('home'))
+    return render_template('premium_support.html', fee=Setting.get('premium_support_fee', '200'))
+
+
+# --- 12. Admin Revenue Dashboard ---
+@app.route('/admin/revenue')
+@login_required
+@admin_required
+def admin_revenue_dashboard():
+    from_date = request.args.get('from')
+    to_date = request.args.get('to')
+    query = PlatformRevenue.query
+    if from_date:
+        query = query.filter(PlatformRevenue.created_at >= from_date)
+    if to_date:
+        query = query.filter(PlatformRevenue.created_at <= to_date)
+
+    stream_totals = db.session.query(
+        PlatformRevenue.revenue_stream,
+        func.sum(PlatformRevenue.amount).label('total'),
+        func.count(PlatformRevenue.id).label('count')
+    ).group_by(PlatformRevenue.revenue_stream).all()
+
+    total_revenue = sum(s.total or 0 for s in stream_totals)
+    recent = query.order_by(PlatformRevenue.created_at.desc()).limit(100).all()
+    return render_template('admin/revenue_dashboard.html',
+                           stream_totals=stream_totals, total_revenue=total_revenue, recent=recent)
 
 
 # ========================================================================
@@ -9954,6 +10435,13 @@ def ensure_phase_two_schema():
             ('resume_token', 'resume_token VARCHAR(64)'),
             ('username', 'username VARCHAR(80)'),
             ('password_hash', 'password_hash VARCHAR(256)'),
+        ],
+        'events': [
+            ('ticket_price', 'ticket_price FLOAT DEFAULT 0'),
+            ('ticket_types', 'ticket_types TEXT'),
+            ('max_tickets', 'max_tickets INTEGER DEFAULT 0'),
+            ('tickets_sold', 'tickets_sold INTEGER DEFAULT 0'),
+            ('platform_fee_percent', 'platform_fee_percent FLOAT DEFAULT 10'),
         ],
         'seller_verifications': [
             ('document_fingerprint', 'document_fingerprint VARCHAR(64)'),
@@ -10452,6 +10940,14 @@ def init_database():
         'coins_event_participation': '20',
         'kyc_provider': 'inbuilt',
         'sms_otp_enabled': '0',
+        'affiliate_commission_percent': '5',
+        'service_commission_percent': '15',
+        'transaction_fee_percent': '2.5',
+        'coin_to_cash_rate': '0.5',
+        'coin_conversion_fee_percent': '10',
+        'premium_support_fee': '200',
+        'vendor_onboarding_standard_fee': '1000',
+        'vendor_onboarding_premium_fee': '3000',
     }
 
     for key, value in defaults.items():

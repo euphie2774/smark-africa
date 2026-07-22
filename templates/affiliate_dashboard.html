@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Affiliate Program - {{ super() }}{% endblock %}
+{% block content %}
+<div class="container py-5">
+    <h3><i class="fas fa-link me-2"></i>Affiliate Program</h3>
+    <p class="text-muted">Share product links and earn commission on every sale.</p>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="card text-center p-3">
+                <h6 class="text-muted">Total Earned</h6>
+                <p class="display-6 text-success fw-bold">KSh {{ "%.2f"|format(total_earned) }}</p>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card text-center p-3">
+                <h6 class="text-muted">Total Clicks</h6>
+                <p class="display-6 fw-bold">{{ total_clicks }}</p>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card text-center p-3">
+                <h6 class="text-muted">Conversions</h6>
+                <p class="display-6 fw-bold">{{ total_conversions }}</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <h5>Generate New Affiliate Link</h5>
+            <form method="POST" action="{{ url_for('generate_affiliate_link') }}" class="d-flex gap-2">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="number" name="product_id" class="form-control" placeholder="Product ID (optional)" style="max-width:200px;">
+                <button type="submit" class="btn btn-primary"><i class="fas fa-plus me-1"></i>Generate Link</button>
+            </form>
+        </div>
+    </div>
+
+    {% if links %}
+    <div class="table-responsive">
+        <table class="table table-sm">
+            <thead><tr><th>Link</th><th>Product</th><th>Clicks</th><th>Sales</th><th>Earned</th></tr></thead>
+            <tbody>
+            {% for link in links %}
+            <tr>
+                <td><code>{{ url_for('affiliate_redirect', code=link.code, _external=True) }}</code></td>
+                <td>{{ link.product.name if link.product else 'All products' }}</td>
+                <td>{{ link.clicks }}</td>
+                <td>{{ link.conversions }}</td>
+                <td>KSh {{ "%.2f"|format(link.total_earned) }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="text-muted">No affiliate links yet. Generate one above to start earning!</p>
+    {% endif %}
+</div>
+{% endblock %}

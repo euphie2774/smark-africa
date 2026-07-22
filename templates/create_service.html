@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Offer a Service - {{ super() }}{% endblock %}
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <h3><i class="fas fa-plus-circle me-2"></i>Offer a Service</h3>
+            <p class="text-muted">List your skills and earn money from clients on SMARKAFRICA.</p>
+            <form method="POST" enctype="multipart/form-data">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="mb-3">
+                    <label class="form-label">Service Title</label>
+                    <input type="text" class="form-control" name="title" placeholder="e.g. Professional Logo Design" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Description</label>
+                    <textarea class="form-control" name="description" rows="4" placeholder="Describe what you offer, your experience, and what the client gets..." required></textarea>
+                </div>
+                <div class="row g-3 mb-3">
+                    <div class="col-md-4">
+                        <label class="form-label">Category</label>
+                        <select class="form-select" name="category" required>
+                            <option value="graphic-design">Graphic Design</option>
+                            <option value="web-development">Web Development</option>
+                            <option value="writing">Writing & Content</option>
+                            <option value="video-editing">Video Editing</option>
+                            <option value="marketing">Marketing</option>
+                            <option value="tutoring">Tutoring</option>
+                            <option value="photography">Photography</option>
+                            <option value="music">Music & Audio</option>
+                            <option value="translation">Translation</option>
+                            <option value="other">Other</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Price (KSh)</label>
+                        <input type="number" class="form-control" name="price" min="100" step="50" required>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Delivery (days)</label>
+                        <input type="number" class="form-control" name="delivery_days" value="3" min="1" max="30">
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Service Image (optional)</label>
+                    <input type="file" class="form-control" name="service_image" accept="image/*">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Pricing Type</label>
+                    <select class="form-select" name="price_type">
+                        <option value="fixed">Fixed Price</option>
+                        <option value="hourly">Hourly Rate</option>
+                        <option value="negotiable">Negotiable</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-success btn-lg"><i class="fas fa-check me-2"></i>List Service</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

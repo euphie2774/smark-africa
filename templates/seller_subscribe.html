@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Seller Subscription - {{ super() }}{% endblock %}
+{% block content %}
+<div class="container py-5">
+    <h3><i class="fas fa-crown me-2"></i>Seller Subscription Plans</h3>
+    <p class="text-muted">Unlock premium selling features with a monthly subscription.</p>
+
+    {% if active_sub %}
+    <div class="alert alert-success">
+        <strong>Active Plan:</strong> {{ active_sub.plan|title }} (expires {{ active_sub.expires_at.strftime('%d %b %Y') }})
+    </div>
+    {% endif %}
+
+    <div class="row g-4">
+        {% for key, plan in plans.items() %}
+        <div class="col-md-4">
+            <div class="card h-100 {{ 'border-primary shadow' if key == 'professional' else '' }}">
+                {% if key == 'professional' %}<div class="card-header bg-primary text-white text-center fw-bold">Most Popular</div>{% endif %}
+                <div class="card-body text-center">
+                    <h4>{{ key|title }}</h4>
+                    <p class="display-5 fw-bold text-success">KSh {{ "{:,.0f}".format(plan.monthly_fee) }}</p>
+                    <p class="text-muted">/month</p>
+                    <ul class="list-unstyled text-start">
+                        {% for feature in plan.features %}
+                        <li><i class="fas fa-check text-success me-2"></i>{{ feature }}</li>
+                        {% endfor %}
+                    </ul>
+                    <form method="POST">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="plan" value="{{ key }}">
+                        <button type="submit" class="btn {{ 'btn-primary' if key == 'professional' else 'btn-outline-primary' }} w-100 mt-3">Subscribe</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

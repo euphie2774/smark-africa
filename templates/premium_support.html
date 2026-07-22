@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Premium Support - {{ super() }}{% endblock %}
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <h3><i class="fas fa-headset me-2"></i>Premium Support</h3>
+            <div class="alert alert-info">
+                <strong>KSh {{ fee }}</strong> per ticket. Priority response within 2 hours guaranteed.
+            </div>
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="mb-3">
+                    <label class="form-label">Subject</label>
+                    <input type="text" class="form-control" name="subject" placeholder="Brief description of your issue" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Message</label>
+                    <textarea class="form-control" name="message" rows="6" placeholder="Describe your issue in detail..." required></textarea>
+                </div>
+                <button type="submit" class="btn btn-warning btn-lg"><i class="fas fa-paper-plane me-2"></i>Submit Premium Ticket (KSh {{ fee }})</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
