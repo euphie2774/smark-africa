@@ -31,6 +31,9 @@ class Config:
             with open(_key_file, 'w') as f:
                 f.write(SECRET_KEY)
 
+    from datetime import timedelta as _td
+    PERMANENT_SESSION_LIFETIME = _td(days=30)
+
     SQLALCHEMY_DATABASE_URI = _database_url(os.environ.get('FLASK_ENV') == 'production')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {
@@ -48,8 +51,12 @@ class Config:
     RATELIMIT_STRATEGY = 'fixed-window'
     RATELIMIT_HEADERS_ENABLED = True
 
-    CACHE_TYPE = os.environ.get('CACHE_TYPE', 'RedisCache' if os.environ.get('REDIS_URL') else 'SimpleCache')
-    CACHE_REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+    if os.environ.get('REDIS_URL'):
+        CACHE_TYPE = os.environ.get('CACHE_TYPE', 'RedisCache')
+        CACHE_REDIS_URL = os.environ.get('REDIS_URL')
+    else:
+        CACHE_TYPE = os.environ.get('CACHE_TYPE', 'FileSystemCache')
+        CACHE_DIR = os.path.join(BASE_DIR, '.cache')
     CACHE_DEFAULT_TIMEOUT = int(os.environ.get('CACHE_DEFAULT_TIMEOUT', '300'))
 
     LOG_DIR = os.environ.get('LOG_DIR', os.path.join(BASE_DIR, 'logs'))
@@ -120,6 +127,8 @@ class ProductionConfig(Config):
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
     REMEMBER_COOKIE_SECURE = True
+    REMEMBER_COOKIE_HTTPONLY = True
+    REMEMBER_COOKIE_DURATION = Config._td(days=30)
     PREFERRED_URL_SCHEME = 'https'
 
 

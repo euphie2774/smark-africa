@@ -1007,6 +1007,9 @@ class SignupVerification(db.Model):
     expires_at = db.Column(db.DateTime, nullable=False)
     consumed_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    resume_token = db.Column(db.String(64), unique=True)
+    username = db.Column(db.String(80))
+    password_hash = db.Column(db.String(256))
 
     def set_code(self, code):
         self.code_hash = generate_password_hash(str(code))

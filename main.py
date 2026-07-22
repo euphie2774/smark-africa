@@ -13,7 +13,7 @@ from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, send_from_directory, abort, make_response
 from flask_login import (LoginManager, login_user, logout_user,
                          login_required, current_user)
-from flask_wtf.csrf import CSRFProtect
+from flask_wtf.csrf import CSRFProtect, CSRFError
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
@@ -65,6 +65,13 @@ app.config.from_object(config_class)
 
 # CSRF Protection
 csrf = CSRFProtect(app)
+
+
+@app.errorhandler(CSRFError)
+def handle_csrf_error(e):
+    flash('Your session expired. Please try again.', 'warning')
+    return redirect(request.url)
+
 
 # Rate Limiting
 limiter = Limiter(
@@ -119,7 +126,13 @@ try:
         app,
         force_https=force_https,
         strict_transport_security=force_https,
-        content_security_policy=csp
+        strict_transport_security_max_age=31536000,
+        strict_transport_security_include_subdomains=True,
+        strict_transport_security_preload=True,
+        content_security_policy=csp,
+        session_cookie_secure=force_https,
+        session_cookie_http_only=True,
+        session_cookie_samesite='Lax',
     )
 except Exception as e:
     logger.warning(f'Flask-Talisman initialization warning: {e}. Continuing without some security headers.')
@@ -128,6 +141,8 @@ except Exception as e:
 # Caching
 try:
     from flask_caching import Cache
+    if app.config.get('CACHE_DIR'):
+        os.makedirs(app.config['CACHE_DIR'], exist_ok=True)
     cache = Cache(app)
 except ImportError:
     logger.warning('Flask-Caching is not installed; continuing without app cache')
@@ -227,13 +242,22 @@ def generate_signup_code():
     return str(uuid.uuid4().int % 1000000).zfill(6)
 
 
-def send_signup_verification(email, phone, code):
+def send_signup_verification(email, phone, code, resume_token=None):
+    resume_link = ''
+    if resume_token:
+        try:
+            with app.app_context():
+                resume_url = url_for('resume_registration', token=resume_token, _external=True)
+                resume_link = f'<p style="margin-top:12px"><a href="{resume_url}">Tap here to return to verification</a> if the page closed.</p>'
+        except Exception:
+            pass
     subject = 'Your SMARKAFRICA verification code'
     body = f"""
     <h3>SMARKAFRICA verification</h3>
     <p>Your sign-up verification code is:</p>
     <h2 style="letter-spacing:3px">{html.escape(code)}</h2>
     <p>This code expires in 15 minutes. If you did not request this, ignore this email.</p>
+    {resume_link}
     """
     sent = send_email(email, subject, body) if email else False
     if phone:
@@ -4387,7 +4411,7 @@ def login():
             else:
                 # Regenerate session to prevent session fixation
                 session.clear()
-                login_user(user)
+                login_user(user, remember=True)
                 session.permanent = True
 
                 user.last_login = utcnow()
@@ -4509,11 +4533,16 @@ def register():
             flash('Phone number already registered.', 'danger')
             return render_template('register.html')
 
+        import secrets as _secrets
         code = generate_signup_code()
+        resume_token = _secrets.token_urlsafe(32)
         verification = SignupVerification(
             email=email,
             phone=phone,
             expires_at=utcnow() + timedelta(minutes=15),
+            resume_token=resume_token,
+            username=username,
+            password_hash=generate_password_hash(password),
         )
         verification.set_code(code)
         db.session.add(verification)
@@ -4523,9 +4552,10 @@ def register():
             'username': username,
             'email': email,
             'phone': phone,
-            'password_hash': generate_password_hash(password),
+            'password_hash': verification.password_hash,
+            'resume_token': resume_token,
         }
-        send_signup_verification(email, phone, code)
+        send_signup_verification(email, phone, code, resume_token=resume_token)
         dest = 'your email' + (' and phone' if phone else '')
         flash(f'We sent a 6-digit verification code to {dest}. Enter it to finish registration.', 'info')
         return render_template('register.html', pending_registration=session['pending_registration'])
@@ -4546,22 +4576,51 @@ def resend_verification_code():
         old_verification.consumed_at = utcnow()
         db.session.commit()
 
+    import secrets as _secrets
     code = generate_signup_code()
+    resume_token = _secrets.token_urlsafe(32)
     verification = SignupVerification(
         email=pending['email'],
         phone=pending.get('phone'),
         expires_at=utcnow() + timedelta(minutes=15),
+        resume_token=resume_token,
+        username=pending.get('username'),
+        password_hash=pending.get('password_hash'),
     )
     verification.set_code(code)
     db.session.add(verification)
     db.session.commit()
 
     pending['verification_id'] = verification.id
+    pending['resume_token'] = resume_token
     session['pending_registration'] = pending
 
-    send_signup_verification(pending['email'], pending.get('phone'), code)
+    send_signup_verification(pending['email'], pending.get('phone'), code, resume_token=resume_token)
     flash('A new verification code has been sent.', 'info')
     return render_template('register.html', pending_registration=pending)
+
+
+@app.route('/register/resume/<token>')
+@limiter.limit("20 per hour")
+def resume_registration(token):
+    """Resume OTP verification after session loss (e.g. switching to email app on mobile)."""
+    verification = SignupVerification.query.filter_by(resume_token=token).first()
+    if not verification or verification.consumed_at or verification.expires_at < utcnow():
+        flash('This verification link has expired. Please start registration again.', 'danger')
+        return redirect(url_for('register'))
+    if verification.attempts and verification.attempts > 5:
+        flash('Too many incorrect attempts. Please start registration again.', 'danger')
+        return redirect(url_for('register'))
+    session['pending_registration'] = {
+        'verification_id': verification.id,
+        'username': verification.username,
+        'email': verification.email,
+        'phone': verification.phone,
+        'password_hash': verification.password_hash,
+        'resume_token': verification.resume_token,
+    }
+    flash('Enter the 6-digit code to complete registration.', 'info')
+    return redirect(url_for('register'))
 
 
 @app.route('/logout')
@@ -9699,12 +9758,12 @@ def admin_print_documentation():
     return render_template('admin/print_documentation.html', settings=settings, stats=stats, events=events, analytics=analytics, now=datetime.utcnow)
 
 
-@app.route('/admin/print-documentation/mvp')
+@app.route('/admin/print-documentation/mvp', methods=['GET', 'POST'])
 @login_required
 @mvp_required
 def admin_print_documentation_mvp():
     """Full MVP documentation with all details - requires MVP password to access."""
-    mvp_password = request.args.get('auth', '')
+    mvp_password = request.form.get('auth', '') if request.method == 'POST' else ''
     if not mvp_password or not current_user.check_password(mvp_password):
         return render_template('admin/print_documentation_auth.html')
     settings = {}
@@ -9890,6 +9949,11 @@ def ensure_phase_two_schema():
         'shopping_cards': [
             ('pin_set_at', 'pin_set_at DATETIME'),
             ('pin_set_token', 'pin_set_token VARCHAR(64)'),
+        ],
+        'signup_verifications': [
+            ('resume_token', 'resume_token VARCHAR(64)'),
+            ('username', 'username VARCHAR(80)'),
+            ('password_hash', 'password_hash VARCHAR(256)'),
         ],
         'seller_verifications': [
             ('document_fingerprint', 'document_fingerprint VARCHAR(64)'),
@@ -10305,6 +10369,7 @@ def init_database():
     """Initialize database with default admin user and settings"""
     db.create_all()
     ensure_phase_two_schema()
+    invalidate_product_cache()
 
     # Create admin user if not exists
     admin_username = app.config.get('ADMIN_USERNAME', 'admin')
