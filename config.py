@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from logging.config import dictConfig
 
 
@@ -31,8 +32,7 @@ class Config:
             with open(_key_file, 'w') as f:
                 f.write(SECRET_KEY)
 
-    from datetime import timedelta as _td
-    PERMANENT_SESSION_LIFETIME = _td(days=30)
+    PERMANENT_SESSION_LIFETIME = timedelta(days=30)
 
     SQLALCHEMY_DATABASE_URI = _database_url(os.environ.get('FLASK_ENV') == 'production')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
@@ -51,12 +51,9 @@ class Config:
     RATELIMIT_STRATEGY = 'fixed-window'
     RATELIMIT_HEADERS_ENABLED = True
 
-    if os.environ.get('REDIS_URL'):
-        CACHE_TYPE = os.environ.get('CACHE_TYPE', 'RedisCache')
-        CACHE_REDIS_URL = os.environ.get('REDIS_URL')
-    else:
-        CACHE_TYPE = os.environ.get('CACHE_TYPE', 'FileSystemCache')
-        CACHE_DIR = os.path.join(BASE_DIR, '.cache')
+    CACHE_TYPE = os.environ.get('CACHE_TYPE', 'RedisCache' if os.environ.get('REDIS_URL') else 'FileSystemCache')
+    CACHE_REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+    CACHE_DIR = os.path.join(BASE_DIR, '.cache')
     CACHE_DEFAULT_TIMEOUT = int(os.environ.get('CACHE_DEFAULT_TIMEOUT', '300'))
 
     LOG_DIR = os.environ.get('LOG_DIR', os.path.join(BASE_DIR, 'logs'))
@@ -128,7 +125,7 @@ class ProductionConfig(Config):
     SESSION_COOKIE_SAMESITE = 'Lax'
     REMEMBER_COOKIE_SECURE = True
     REMEMBER_COOKIE_HTTPONLY = True
-    REMEMBER_COOKIE_DURATION = Config._td(days=30)
+    REMEMBER_COOKIE_DURATION = timedelta(days=30)
     PREFERRED_URL_SCHEME = 'https'
 
 

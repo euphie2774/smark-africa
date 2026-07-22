@@ -132,9 +132,6 @@ try:
         strict_transport_security_include_subdomains=True,
         strict_transport_security_preload=True,
         content_security_policy=csp,
-        session_cookie_secure=force_https,
-        session_cookie_http_only=True,
-        session_cookie_samesite='Lax',
     )
 except Exception as e:
     logger.warning(f'Flask-Talisman initialization warning: {e}. Continuing without some security headers.')
