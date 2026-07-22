@@ -3243,6 +3243,12 @@ def build_product_search_query(search='', category_slug='', product_type='', sor
     return query, current_category
 
 
+def invalidate_product_cache():
+    """Clear all product search caches so new/edited products appear immediately."""
+    if cache:
+        cache.clear()
+
+
 def cached_product_search_ids(search='', category_slug='', product_type='', sort='newest'):
     key = product_search_cache_key(search, category_slug, product_type, sort)
     if cache:
@@ -7891,6 +7897,7 @@ def admin_add_product():
         if alert_count:
             flash(f'{alert_count} buyer price alert email(s) were triggered by this listing.', 'info')
 
+        invalidate_product_cache()
         flash(f'Product "{name}" created successfully!', 'success')
         return redirect(url_for('admin_products'))
 
@@ -7984,6 +7991,7 @@ def admin_edit_product(pid):
                                              os.path.basename(product.file_path))) else 0
 
         db.session.commit()
+        invalidate_product_cache()
         flash('Product updated successfully!', 'success')
         return redirect(url_for('admin_products'))
 
@@ -9638,7 +9646,7 @@ def _build_analytics_data():
     daily_orders = db.session.query(
         func.date(Order.created_at).label('day'),
         func.count(Order.id).label('count'),
-        func.sum(Order.total_amount).label('revenue')
+        func.sum(Order.amount_paid).label('revenue')
     ).filter(Order.created_at >= thirty_days_ago).group_by(func.date(Order.created_at)).all()
 
     daily_users = db.session.query(
@@ -9649,7 +9657,7 @@ def _build_analytics_data():
     monthly_revenue = db.session.query(
         extract('month', Order.created_at).label('month'),
         extract('year', Order.created_at).label('year'),
-        func.sum(Order.total_amount).label('revenue'),
+        func.sum(Order.amount_paid).label('revenue'),
         func.count(Order.id).label('orders')
     ).group_by(extract('year', Order.created_at), extract('month', Order.created_at)).order_by(
         extract('year', Order.created_at), extract('month', Order.created_at)
@@ -9669,7 +9677,7 @@ def _build_analytics_data():
         'category_sales': [{'name': r[0], 'items_sold': r[1]} for r in category_sales],
         'users_7d': User.query.filter(User.created_at >= seven_days_ago).count(),
         'orders_7d': Order.query.filter(Order.created_at >= seven_days_ago).count(),
-        'revenue_30d': float(db.session.query(func.sum(Order.total_amount)).filter(Order.created_at >= thirty_days_ago).scalar() or 0),
+        'revenue_30d': float(db.session.query(func.sum(Order.amount_paid)).filter(Order.created_at >= thirty_days_ago).scalar() or 0),
     }
 
 
@@ -10301,7 +10309,7 @@ def init_database():
     # Create admin user if not exists
     admin_username = app.config.get('ADMIN_USERNAME', 'admin')
     admin_email = app.config.get('ADMIN_EMAIL', 'admin@smarkafrica.com')
-    admin_password = app.config.get('ADMIN_PASSWORD', 'ChangeMeAdmin123!')
+    admin_password = app.config.get('ADMIN_PASSWORD', 'DevAdmin123!@#')
 
     if not User.query.filter_by(username=admin_username).first():
         admin = User(
@@ -10318,6 +10326,13 @@ def init_database():
         admin = User.query.filter_by(username=admin_username).first()
         if admin.is_admin and admin.admin_level != 'mvp':
             admin.admin_level = 'mvp'
+        # Allow forced password reset via env var (set ADMIN_RESET_PASSWORD=1 to reset to default)
+        if os.environ.get('ADMIN_RESET_PASSWORD') == '1':
+            admin.set_password(admin_password)
+            db.session.commit()
+            app.logger.info('Admin password reset to default via ADMIN_RESET_PASSWORD env var')
+
+    db.session.commit()
 
     # Default settings
     defaults = {
