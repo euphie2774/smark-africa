@@ -230,6 +230,22 @@ def normalize_mpesa_phone(phone_number):
     return phone
 
 
+def normalize_login_identifier(value):
+    value = (value or '').strip()
+    value = value.replace('\u200b', '').replace('\ufeff', '')
+    return re.sub(r'\s+', '', value) if '@' not in value else value.lower()
+
+
+def password_matches(user, password):
+    if not user:
+        return False
+    candidates = [password or '']
+    trimmed = (password or '').strip()
+    if trimmed != candidates[0]:
+        candidates.append(trimmed)
+    return any(user.check_password(candidate) for candidate in candidates)
+
+
 def valid_mpesa_msisdn(phone_number):
     phone = normalize_mpesa_phone(phone_number)
     return phone if re.fullmatch(r'254(7|1)\d{8}', phone or '') else ''
@@ -2725,6 +2741,10 @@ def disbursement_snapshot():
         Transaction.amount < 0
     ).scalar() or 0.0)
     pending_withdrawals = WithdrawalRequest.query.filter_by(status='pending_review').all()
+    releasable_seller_earnings = Transaction.query.filter(
+        Transaction.type == 'seller_earning',
+        Transaction.status == 'pending_review'
+    ).count()
     pending_salaries = AdminSalary.query.filter(AdminSalary.status.in_(['pending', 'queued'])).all()
     manufacturer_reserve = round(max(0.0, incoming_total * 0.35), 2)
     available_balance = round(incoming_total - outgoing_total, 2)
@@ -2733,9 +2753,64 @@ def disbursement_snapshot():
         'outgoing_total': outgoing_total,
         'available_balance': available_balance,
         'pending_withdrawals': pending_withdrawals,
+        'releasable_seller_earnings': releasable_seller_earnings,
         'pending_salaries': pending_salaries,
         'manufacturer_reserve': manufacturer_reserve,
     }
+
+
+def seller_available_balance(user_id):
+    earned = db.session.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
+        Transaction.user_id == user_id,
+        Transaction.type == 'seller_earning',
+        Transaction.status == 'released'
+    ).scalar() or 0.0
+    outgoing = db.session.query(func.coalesce(func.sum(WithdrawalRequest.amount), 0)).filter(
+        WithdrawalRequest.user_id == user_id,
+        WithdrawalRequest.status.in_(['pending_review', 'queued_for_payment', 'paid'])
+    ).scalar() or 0.0
+    return round(max(0.0, earned - outgoing), 2)
+
+
+def release_eligible_seller_earnings():
+    released = 0
+    txns = Transaction.query.filter(
+        Transaction.type == 'seller_earning',
+        Transaction.status == 'pending_review'
+    ).all()
+    for txn in txns:
+        order = txn.order
+        if not order:
+            continue
+        buyer_received = (
+            order.payment_status == 'completed' and
+            (
+                order.shipping_status == 'delivered' or
+                order.status == 'completed' or
+                order.protection_status == 'released'
+            )
+        )
+        if not buyer_received:
+            continue
+        txn.status = 'released'
+        txn.available_on = utcnow()
+        txn.description = (txn.description or '') + '\nReleased after buyer receipt confirmation.'
+        order.protection_status = 'released'
+        released += 1
+    return released
+
+
+def auto_disbursement_due():
+    cadence = Setting.get('auto_disbursement_cadence', 'weekly')
+    if cadence == 'off':
+        return False
+    last_raw = Setting.get('auto_disbursement_last_run_at', '')
+    try:
+        last_run = datetime.fromisoformat(last_raw) if last_raw else None
+    except ValueError:
+        last_run = None
+    wait = timedelta(days=1 if cadence == 'daily' else 7)
+    return not last_run or last_run <= utcnow() - wait
 
 
 def generate_market_news_if_due(force=False):
@@ -2744,6 +2819,11 @@ def generate_market_news_if_due(force=False):
     if force:
         Setting.set('market_news_generation_lock', '1')
         db.session.remove()
+        MarketNews.query.filter(
+            MarketNews.is_cleared == False,
+            MarketNews.generated_by.in_(['marketplace_intelligence', 'product_price_signal'])
+        ).update({MarketNews.is_cleared: True}, synchronize_session=False)
+        db.session.commit()
     latest = MarketNews.query.order_by(MarketNews.created_at.desc()).first()
     if latest and not force and latest.created_at and latest.created_at > utcnow() - timedelta(hours=2):
         return 0
@@ -3180,6 +3260,12 @@ def create_bnpl_installments(plan):
             amount_due=monthly_amount,
             due_at=utcnow() + timedelta(days=30 * sequence),
         ))
+
+
+def generate_bnpl_lock_code(plan=None):
+    seed = f"{getattr(plan, 'id', '')}:{uuid.uuid4().hex}".encode()
+    digest = hashlib.sha256(seed).hexdigest().upper()
+    return f"BNPL-{digest[:4]}-{digest[4:8]}-{digest[8:12]}"
 
 
 def update_bnpl_lock_status(plan):
@@ -3893,7 +3979,20 @@ def send_category_follow_updates():
 
 def commission_for_product(product):
     percent = product.commission_percent or 15.0
-    return max(15.0, percent)
+    return max(10.0, min(15.0, percent))
+
+
+def user_can_sell(user):
+    return bool(user and (user.is_admin or user.seller_status == 'verified' or user.is_verified_seller))
+
+
+def user_has_storefront(user):
+    if not user or not user.is_authenticated:
+        return False
+    return BusinessStorefront.query.filter(
+        BusinessStorefront.owner_id == user.id,
+        BusinessStorefront.status.in_(['approved', 'active', 'verified'])
+    ).first() is not None
 
 
 def own_kyc_security_policy():
@@ -4510,7 +4609,7 @@ def login():
     if request.method == 'POST':
         # Validate input
         data = {
-            'username': request.form.get('username', '').strip(),
+            'username': normalize_login_identifier(request.form.get('username', '')),
             'password': request.form.get('password', '')
         }
 
@@ -4519,7 +4618,7 @@ def login():
             flash('Invalid login credentials.', 'danger')
             return render_template('login.html')
 
-        username = validated_data['username']
+        username = normalize_login_identifier(validated_data['username'])
         password = validated_data['password']
 
         # Check by username, email, or phone so returning users are not pushed toward duplicate signup.
@@ -4533,7 +4632,7 @@ def login():
             user = User.query.filter_by(phone=normalized_phone).first()
 
         # Constant-time password check
-        if user and user.check_password(password):
+        if user and password_matches(user, password):
             if not user.is_active:
                 log_admin_action('login_failed', 'user', user.id, {'reason': 'account_deactivated'})
                 flash('Account is deactivated.', 'danger')
@@ -5697,6 +5796,9 @@ def support_chatbot():
 @app.route('/storefront/apply', methods=['GET', 'POST'])
 @login_required
 def storefront_apply():
+    if not user_can_sell(current_user):
+        flash('Complete seller verification first. Storefronts are for verified businesses that want wider product visibility.', 'warning')
+        return redirect(url_for('seller_apply'))
     if request.method == 'POST':
         business_name = request.form.get('business_name', '').strip()
         categories = request.form.get('categories', '').strip()
@@ -5749,7 +5851,7 @@ def bnpl_apply(product_id):
             term_months=term_months,
             risk_score=risk,
             approval_status=status,
-            device_lock_code=request.form.get('device_lock_code', '').strip(),
+            device_lock_code=request.form.get('device_lock_code', '').strip() or generate_bnpl_lock_code(),
             next_due_at=utcnow() + timedelta(days=30),
             approved_at=utcnow() if status == 'approved' else None,
         )
@@ -5766,11 +5868,16 @@ def handle_bnpl_admin_action():
     action = request.form.get('action', '')
     if action == 'bnpl_lock':
         plan = BNPLPlan.query.get_or_404(request.form.get('plan_id', type=int))
-        plan.device_lock_code = request.form.get('device_lock_code', plan.device_lock_code or '').strip()
+        plan.device_lock_code = request.form.get('device_lock_code', plan.device_lock_code or '').strip() or generate_bnpl_lock_code(plan)
         plan.lock_status = request.form.get('lock_status', plan.lock_status or 'unlocked')
         if plan.lock_status == 'unlocked':
             plan.last_reminder_at = utcnow()
         flash('BNPL device lock status updated.', 'success')
+        return True
+    if action == 'bnpl_generate_code':
+        plan = BNPLPlan.query.get_or_404(request.form.get('plan_id', type=int))
+        plan.device_lock_code = generate_bnpl_lock_code(plan)
+        flash('BNPL device lock code generated.', 'success')
         return True
     if action == 'create_bnpl':
         user = User.query.get_or_404(request.form.get('user_id', type=int))
@@ -5788,7 +5895,7 @@ def handle_bnpl_admin_action():
             term_months=max(1, min(6, term_months)),
             risk_score=risk,
             approval_status=status,
-            device_lock_code=request.form.get('device_lock_code', '').strip(),
+            device_lock_code=request.form.get('device_lock_code', '').strip() or generate_bnpl_lock_code(),
             next_due_at=utcnow() + timedelta(days=30),
             approved_at=utcnow() if status == 'approved' else None,
         )
@@ -6324,11 +6431,15 @@ def admin_intelligent_architecture():
                 flash(f'KES/{quote} exchange rate updated.', 'success')
         elif action == 'bnpl_lock':
             plan = BNPLPlan.query.get_or_404(request.form.get('plan_id', type=int))
-            plan.device_lock_code = request.form.get('device_lock_code', plan.device_lock_code or '').strip()
+            plan.device_lock_code = request.form.get('device_lock_code', plan.device_lock_code or '').strip() or generate_bnpl_lock_code(plan)
             plan.lock_status = request.form.get('lock_status', plan.lock_status or 'unlocked')
             if plan.lock_status == 'unlocked':
                 plan.last_reminder_at = utcnow()
             flash('BNPL device lock status updated.', 'success')
+        elif action == 'bnpl_generate_code':
+            plan = BNPLPlan.query.get_or_404(request.form.get('plan_id', type=int))
+            plan.device_lock_code = generate_bnpl_lock_code(plan)
+            flash('BNPL device lock code generated.', 'success')
         elif action == 'create_bnpl':
             user = User.query.get_or_404(request.form.get('user_id', type=int))
             product = Product.query.get_or_404(request.form.get('product_id', type=int))
@@ -6345,7 +6456,7 @@ def admin_intelligent_architecture():
                 term_months=max(1, min(6, term_months)),
                 risk_score=risk,
                 approval_status=status,
-                device_lock_code=request.form.get('device_lock_code', '').strip(),
+                device_lock_code=request.form.get('device_lock_code', '').strip() or generate_bnpl_lock_code(),
                 next_due_at=utcnow() + timedelta(days=30),
                 approved_at=utcnow() if status == 'approved' else None,
             )
@@ -6710,7 +6821,12 @@ def admin_disbursements():
             return redirect(url_for('admin_disbursements'))
 
         if action == 'run_cycle':
+            released = release_eligible_seller_earnings()
             for withdrawal in snapshot['pending_withdrawals']:
+                if seller_available_balance(withdrawal.user_id) < float(withdrawal.amount or 0):
+                    withdrawal.status = 'insufficient_released_balance'
+                    withdrawal.reviewed_at = utcnow()
+                    continue
                 db.session.add(Transaction(
                     user_id=withdrawal.user_id,
                     type='withdrawal',
@@ -6746,8 +6862,15 @@ def admin_disbursements():
                 created += 1
 
             db.session.commit()
-            flash(f'Disbursement automation queued {created} payment ledger item(s).', 'success')
+            Setting.set('auto_disbursement_last_run_at', utcnow().isoformat())
+            flash(f'Disbursement automation released {released} seller earning(s) and queued {created} payment ledger item(s).', 'success')
         return redirect(url_for('admin_disbursements'))
+
+    if auto_disbursement_due():
+        released = release_eligible_seller_earnings()
+        if released:
+            Setting.set('auto_disbursement_last_run_at', utcnow().isoformat())
+            db.session.commit()
 
     snapshot = disbursement_snapshot()
     transactions = Transaction.query.order_by(Transaction.created_at.desc()).limit(100).all()
@@ -8026,7 +8149,7 @@ def admin_add_product():
         product_condition = request.form.get('product_condition', 'new')
         sale_mode = request.form.get('sale_mode', 'direct')
         bid_price = float(request.form.get('bid_price', 0) or 0)
-        commission_percent = max(15.0, float(request.form.get('commission_percent', 15) or 15))
+        commission_percent = max(10.0, min(15.0, float(request.form.get('commission_percent', 15) or 15)))
         admin_priority = request.form.get('admin_priority') in ['1', 'on', 'true']
         is_hot_sale = request.form.get('is_hot_sale') in ['1', 'on', 'true']
         is_original_source = request.form.get('is_original_source') in ['1', 'on', 'true']
@@ -8148,7 +8271,7 @@ def admin_edit_product(pid):
         product.product_condition = request.form.get('product_condition', product.product_condition or 'new')
         product.sale_mode = request.form.get('sale_mode', product.sale_mode or 'direct')
         product.bid_price = float(request.form.get('bid_price', product.bid_price or 0) or 0)
-        product.commission_percent = max(15.0, float(request.form.get('commission_percent', product.commission_percent or 15) or 15))
+        product.commission_percent = max(10.0, min(15.0, float(request.form.get('commission_percent', product.commission_percent or 15) or 15)))
         product.admin_priority = request.form.get('admin_priority') == 'on'
         was_hot_sale = bool(product.is_hot_sale)
         product.is_hot_sale = request.form.get('is_hot_sale') == 'on'
@@ -8978,9 +9101,9 @@ def file_claim(order_id):
 @app.route('/seller/withdrawals', methods=['GET', 'POST'])
 @login_required
 def seller_withdrawals():
-    flash(SELLER_SOON_MESSAGE, 'info')
-    return redirect(url_for('home'))
-
+    if not user_can_sell(current_user):
+        flash('Complete seller verification before requesting withdrawals.', 'warning')
+        return redirect(url_for('seller_apply'))
     if request.method == 'POST':
         amount = float(request.form.get('amount', 0) or 0)
         method = request.form.get('method', 'mpesa')
@@ -8989,6 +9112,8 @@ def seller_withdrawals():
             flash('Withdrawals are blocked while your account is frozen. Submit an appeal to admin.', 'danger')
         elif amount <= 0:
             flash('Enter a valid withdrawal amount.', 'danger')
+        elif amount > seller_available_balance(current_user.id):
+            flash('That amount is not available yet. Seller payments are released only after buyers receive their products.', 'warning')
         else:
             db.session.add(WithdrawalRequest(
                 user_id=current_user.id,
@@ -9002,7 +9127,8 @@ def seller_withdrawals():
         return redirect(url_for('seller_withdrawals'))
     earnings = Transaction.query.filter_by(user_id=current_user.id).order_by(Transaction.created_at.desc()).all()
     withdrawals = WithdrawalRequest.query.filter_by(user_id=current_user.id).order_by(WithdrawalRequest.created_at.desc()).all()
-    return render_template('seller_withdrawals.html', earnings=earnings, withdrawals=withdrawals)
+    return render_template('seller_withdrawals.html', earnings=earnings, withdrawals=withdrawals,
+                           available_balance=seller_available_balance(current_user.id))
 
 
 @app.route('/seller/ads', methods=['GET', 'POST'])
@@ -9010,31 +9136,47 @@ def seller_withdrawals():
 def seller_ads():
     if current_user.is_admin:
         return redirect(url_for('admin_ads'))
-    flash(SELLER_SOON_MESSAGE, 'info')
-    return redirect(url_for('home'))
+    if Setting.get('seller_ads_enabled', '0') != '1':
+        flash('Seller ads are currently disabled by admin.', 'info')
+        return redirect(url_for('home'))
+    if not user_can_sell(current_user) and not user_has_storefront(current_user):
+        flash('Complete seller verification before creating ads.', 'warning')
+        return redirect(url_for('seller_apply'))
 
     products = Product.query.filter_by(seller_id=current_user.id).all()
     if request.method == 'POST':
         budget = float(request.form.get('budget', 0) or 0)
         platform = request.form.get('platform', 'SMARKAFRICA')
         product_id = request.form.get('product_id', type=int)
+        product = Product.query.filter_by(id=product_id, seller_id=current_user.id).first() if product_id else None
         if budget <= 0:
             flash('Ad budget must be greater than zero.', 'danger')
+        elif product_id and not product:
+            flash('Choose one of your own products for this ad.', 'danger')
         else:
-            commission = round(budget * 0.02, 2)
+            fee_percent = float(Setting.get('seller_ad_service_fee_percent', '2') or 2)
+            commission = round(budget * fee_percent / 100, 2)
             db.session.add(AdCampaign(
                 seller_id=current_user.id,
                 product_id=product_id,
                 platform=platform,
                 budget=budget,
                 admin_commission=commission,
-                total_charged=budget + commission
+                objective=request.form.get('objective', 'Sales'),
+                audience=request.form.get('audience', '').strip(),
+                ad_copy=request.form.get('ad_copy', '').strip(),
+                creative_url=request.form.get('creative_url', '').strip(),
+                destination_url=request.form.get('destination_url', '').strip(),
+                placement=request.form.get('placement', 'social'),
+                total_charged=budget + commission,
+                status='pending_payment'
             ))
             db.session.commit()
-            flash(f'Ad request created. Total payable includes 2% commission: KSh {budget + commission:,.2f}.', 'success')
+            flash(f'Ad request created. Pay KSh {budget + commission:,.2f}; admin approval is required before it goes live.', 'success')
         return redirect(url_for('seller_ads'))
     campaigns = AdCampaign.query.filter_by(seller_id=current_user.id).order_by(AdCampaign.created_at.desc()).all()
-    return render_template('seller_ads.html', products=products, campaigns=campaigns)
+    return render_template('seller_ads.html', products=products, campaigns=campaigns,
+                           payment_instructions=Setting.get('seller_ad_payment_instructions', ''))
 
 
 @app.route('/admin/ads', methods=['GET', 'POST'])
@@ -9074,7 +9216,40 @@ def admin_ads():
         flash(f'{platform} campaign created. Admin/MVP platform charge: KSh {total_charged:,.2f}.', 'success')
         return redirect(url_for('admin_ads'))
     campaigns = AdCampaign.query.order_by(AdCampaign.created_at.desc()).limit(100).all()
-    return render_template('admin/ads.html', products=products, campaigns=campaigns)
+    return render_template('admin/ads.html', products=products, campaigns=campaigns,
+                           seller_ads_enabled=Setting.get('seller_ads_enabled', '0') == '1',
+                           social_ads_manager_url=Setting.get('social_ads_manager_url', ''))
+
+
+@app.route('/admin/ads/<int:ad_id>/mark-paid', methods=['POST'])
+@login_required
+@admin_required
+def admin_mark_ad_paid(ad_id):
+    ad = AdCampaign.query.get_or_404(ad_id)
+    if ad.status == 'pending_payment':
+        ad.status = 'pending_approval'
+        db.session.commit()
+        flash('Ad marked paid. Review and approve it when ready.', 'success')
+    else:
+        flash('Only pending-payment ads can be marked paid.', 'warning')
+    return redirect(url_for('admin_ads'))
+
+
+@app.route('/admin/ads/<int:ad_id>/approve', methods=['POST'])
+@login_required
+@admin_required
+def admin_approve_ad(ad_id):
+    ad = AdCampaign.query.get_or_404(ad_id)
+    if ad.status not in ['pending_approval', 'pending_payment']:
+        flash('This ad is not waiting for approval.', 'warning')
+        return redirect(url_for('admin_ads'))
+    if ad.seller_id != current_user.id and ad.status == 'pending_payment':
+        flash('Mark seller ads as paid before approval.', 'warning')
+        return redirect(url_for('admin_ads'))
+    ad.status = 'active'
+    db.session.commit()
+    flash('Ad approved and activated.', 'success')
+    return redirect(url_for('admin_ads'))
 
 
 @app.route('/admin/ads/<int:ad_id>/stop', methods=['POST'])
@@ -9532,7 +9707,7 @@ def admin_settings():
             credentials_touched = any([username_changed, email_changed, new_password, confirm_password])
 
             if credentials_touched:
-                if not current_password or not current_user.check_password(current_password):
+                if not current_password or not password_matches(current_user, current_password):
                     flash('Enter the current MVP password before changing admin login credentials.', 'danger')
                     return redirect(url_for('admin_settings'))
                 if new_username and new_username != current_user.username:
@@ -9589,13 +9764,25 @@ def admin_settings():
             'smtp_password': '',
             'resend_api_key': os.environ.get('RESEND_API_KEY', ''),
             'from_email': 'noreply@smark-africa.com',
+            'flutterwave_public_key': app.config.get('FLUTTERWAVE_PUBLIC_KEY', ''),
+            'flutterwave_secret_key': app.config.get('FLUTTERWAVE_SECRET_KEY', ''),
+            'flutterwave_encryption_key': app.config.get('FLUTTERWAVE_ENCRYPTION_KEY', ''),
+            'paystack_secret_key': '',
+            'pesapal_consumer_key': '',
+            'pesapal_consumer_secret': '',
+            'dpo_company_token': '',
+            'auto_disbursement_cadence': 'weekly',
+            'seller_ads_enabled': '0',
+            'seller_ad_service_fee_percent': '2',
+            'seller_ad_payment_instructions': 'Pay the campaign total to SMARKAFRICA, then wait for admin approval before the ad goes live.',
+            'social_ads_manager_url': '',
             'google_analytics_id': '',
             'google_search_console_token': '',
             'google_maps_api_key': '',
             'site_keywords': 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products',
             'checkout_allowed_countries': 'Kenya',
             'show_country_launch_popup': '1',
-            'seller_signup_enabled': '1',
+            'seller_signup_enabled': '0',
             'product_search_cache_seconds': '300',
             'shopping_card_min_purchase_kes': '10000',
             'shopping_card_credits_per_100_kes': '1',
@@ -9614,7 +9801,10 @@ def admin_settings():
         }
 
         mvp_content_keys = {'about_content', 'terms_content', 'user_agreement_content'}
-        mvp_only_keys = {'about_content', 'terms_content', 'user_agreement_content', 'seller_signup_enabled'}
+        mvp_only_keys = {
+            'about_content', 'terms_content', 'user_agreement_content',
+            'seller_signup_enabled', 'seller_ads_enabled', 'auto_disbursement_cadence'
+        }
         for key, default in settings_map.items():
             if key in mvp_only_keys and not current_user_is_mvp():
                 continue
@@ -10998,10 +11188,22 @@ def init_database():
         'smtp_use_tls': '1',
         'resend_api_key': os.environ.get('RESEND_API_KEY', ''),
         'from_email': 'noreply@smark-africa.com',
+        'flutterwave_public_key': app.config.get('FLUTTERWAVE_PUBLIC_KEY', ''),
+        'flutterwave_secret_key': app.config.get('FLUTTERWAVE_SECRET_KEY', ''),
+        'flutterwave_encryption_key': app.config.get('FLUTTERWAVE_ENCRYPTION_KEY', ''),
+        'paystack_secret_key': '',
+        'pesapal_consumer_key': '',
+        'pesapal_consumer_secret': '',
+        'dpo_company_token': '',
         'site_keywords': 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products',
         'checkout_allowed_countries': 'Kenya',
         'show_country_launch_popup': '1',
-        'seller_signup_enabled': '1',
+        'seller_signup_enabled': '0',
+        'seller_ads_enabled': '0',
+        'seller_ad_service_fee_percent': '2',
+        'seller_ad_payment_instructions': 'Pay the campaign total to SMARKAFRICA, then wait for admin approval before the ad goes live.',
+        'social_ads_manager_url': '',
+        'auto_disbursement_cadence': 'weekly',
         'product_search_cache_seconds': '300',
         'shopping_card_min_purchase_kes': '10000',
         'shopping_card_credits_per_100_kes': '1',

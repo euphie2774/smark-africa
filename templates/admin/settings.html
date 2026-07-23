@@ -73,6 +73,14 @@
                         </select>
                         <div class="form-text">When everything is ready, switch this on to show Become a Seller.</div>
                     </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Seller Ads</label>
+                        <select name="seller_ads_enabled" class="form-select">
+                            <option value="0" {{ 'selected' if settings.seller_ads_enabled != '1' else '' }}>Disabled for sellers</option>
+                            <option value="1" {{ 'selected' if settings.seller_ads_enabled == '1' else '' }}>Enabled for verified sellers</option>
+                        </select>
+                        <div class="form-text">Seller ads still require payment and admin approval before going live.</div>
+                    </div>
                     {% endif %}
                 </div>
             </div>
@@ -110,6 +118,64 @@
                             <option value="sandbox" {{ 'selected' if settings.daraja_env != 'production' else '' }}>Sandbox Mode (testing)</option>
                             <option value="production" {{ 'selected' if settings.daraja_env == 'production' else '' }}>Production</option>
                         </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white">
+                <h5 class="mb-0">Payments, Ads, and Disbursement</h5>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label">Flutterwave Public Key</label>
+                        <input name="flutterwave_public_key" class="form-control" value="{{ settings.flutterwave_public_key or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Flutterwave Secret Key</label>
+                        <input name="flutterwave_secret_key" class="form-control" value="{{ settings.flutterwave_secret_key or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Flutterwave Encryption Key</label>
+                        <input name="flutterwave_encryption_key" class="form-control" value="{{ settings.flutterwave_encryption_key or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Paystack Secret Key</label>
+                        <input name="paystack_secret_key" class="form-control" value="{{ settings.paystack_secret_key or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Pesapal Consumer Key</label>
+                        <input name="pesapal_consumer_key" class="form-control" value="{{ settings.pesapal_consumer_key or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Pesapal Consumer Secret</label>
+                        <input name="pesapal_consumer_secret" class="form-control" value="{{ settings.pesapal_consumer_secret or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">DPO Company Token</label>
+                        <input name="dpo_company_token" class="form-control" value="{{ settings.dpo_company_token or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Auto Disbursement</label>
+                        <select name="auto_disbursement_cadence" class="form-select">
+                            <option value="off" {{ 'selected' if settings.auto_disbursement_cadence == 'off' }}>Off</option>
+                            <option value="daily" {{ 'selected' if settings.auto_disbursement_cadence == 'daily' }}>Daily</option>
+                            <option value="weekly" {{ 'selected' if settings.auto_disbursement_cadence not in ['off', 'daily'] }}>Weekly</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Seller Ad Service Fee %</label>
+                        <input name="seller_ad_service_fee_percent" type="number" step="0.01" min="0" class="form-control" value="{{ settings.seller_ad_service_fee_percent or '2' }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Social Ads Manager URL</label>
+                        <input name="social_ads_manager_url" class="form-control" value="{{ settings.social_ads_manager_url or '' }}" placeholder="Meta, TikTok, Google Ads, or agency dashboard URL">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Seller Ad Payment Instructions</label>
+                        <input name="seller_ad_payment_instructions" class="form-control" value="{{ settings.seller_ad_payment_instructions or '' }}">
                     </div>
                 </div>
             </div>

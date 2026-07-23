@@ -91,7 +91,8 @@
                     </div>
                     <div class="col-md-3">
                         <label class="form-label">Commission (%)</label>
-                        <input type="number" name="commission_percent" class="form-control" step="0.01" min="15" value="{{ product.commission_percent if product else '15' }}">
+                        <input type="number" name="commission_percent" class="form-control" step="0.01" min="10" max="15" value="{{ product.commission_percent if product else '15' }}">
+                        <div class="form-text">Seller and storefront commission range is 10-15% after successful sales.</div>
                     </div>
 
                     <div class="col-md-3">

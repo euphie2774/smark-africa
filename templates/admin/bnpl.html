@@ -85,9 +85,14 @@
                         <td>KSh {{ "%.2f"|format(plan.principal_amount) }}<div class="small text-muted">{{ plan.deposit_percent }}% deposit / {{ plan.term_months }} mo</div></td>
                         <td>{{ plan.risk_score }}</td>
                         <td><span class="badge bg-{{ 'success' if plan.approval_status == 'approved' else 'warning text-dark' }}">{{ plan.approval_status|replace('_', ' ') }}</span></td>
-                        <td><select name="lock_status" class="form-select form-select-sm"><option value="unlocked" {{ 'selected' if plan.lock_status == 'unlocked' else '' }}>Unlocked</option><option value="locked" {{ 'selected' if plan.lock_status == 'locked' else '' }}>Calls/SMS Only</option></select><input name="device_lock_code" class="form-control form-control-sm mt-1" value="{{ plan.device_lock_code or '' }}" placeholder="Lock code"></td>
+                        <td><select name="lock_status" class="form-select form-select-sm"><option value="unlocked" {{ 'selected' if plan.lock_status == 'unlocked' else '' }}>Unlocked</option><option value="locked" {{ 'selected' if plan.lock_status == 'locked' else '' }}>Calls/SMS Only</option></select><input name="device_lock_code" class="form-control form-control-sm mt-1" value="{{ plan.device_lock_code or '' }}" placeholder="Lock code auto-generates if blank"></td>
                         <td>{{ plan.next_due_at.strftime('%d %b %Y') if plan.next_due_at else 'N/A' }}</td>
-                        <td><button class="btn btn-sm btn-outline-warning">Save</button></td>
+                        <td>
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm btn-outline-warning">Save</button>
+                                <button class="btn btn-sm btn-outline-secondary" type="submit" onclick="this.form.querySelector('[name=action]').value='bnpl_generate_code'">Generate</button>
+                            </div>
+                        </td>
                     </form>
                 </tr>
                 {% else %}<tr><td colspan="8" class="text-center text-muted py-4">No BNPL plans yet.</td></tr>{% endfor %}

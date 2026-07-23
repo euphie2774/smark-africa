@@ -7,6 +7,10 @@
         <div>
             <h2 class="mb-1"><i class="fas fa-bullhorn me-2"></i>Admin/MVP Ads Console</h2>
             <div class="small text-muted">Run SMARKAFRICA campaigns. Public ads stay branded to SMARKAFRICA while external channel handling remains internal.</div>
+            <div class="small mt-1">
+                Seller ads: <span class="badge bg-{{ 'success' if seller_ads_enabled else 'secondary' }}">{{ 'Enabled' if seller_ads_enabled else 'Disabled' }}</span>
+                {% if social_ads_manager_url %}<a href="{{ social_ads_manager_url }}" target="_blank" rel="noopener" class="ms-2">Open Ads Manager</a>{% endif %}
+            </div>
         </div>
     </div>
 
@@ -74,6 +78,18 @@
                                         <form method="POST" action="{{ url_for('admin_stop_ad', ad_id=ad.id) }}">
                                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                                             <button class="btn btn-sm btn-outline-danger">Stop</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if ad.status == 'pending_payment' %}
+                                        <form method="POST" action="{{ url_for('admin_mark_ad_paid', ad_id=ad.id) }}">
+                                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                            <button class="btn btn-sm btn-outline-success">Mark Paid</button>
+                                        </form>
+                                        {% endif %}
+                                        {% if ad.status == 'pending_approval' %}
+                                        <form method="POST" action="{{ url_for('admin_approve_ad', ad_id=ad.id) }}">
+                                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                            <button class="btn btn-sm btn-gold">Approve</button>
                                         </form>
                                         {% endif %}
                                     </div>
