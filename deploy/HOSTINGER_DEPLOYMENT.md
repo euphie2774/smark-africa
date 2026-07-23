@@ -56,6 +56,31 @@ MAIL_DEFAULT_SENDER=noreply@smark-africa.com
 8. Restart the Python app from hPanel.
 9. Enable SSL for `smark-africa.com` and `www.smark-africa.com`.
 
+### Recover Admin Access
+
+If the deployed login says the default credentials are invalid, reset the stored
+admin password on the deployed server. Changing `ADMIN_PASSWORD` in hPanel only
+affects new admin creation; it does not automatically change an existing
+database user's password hash.
+
+From the Python app terminal, run one of these:
+
+```bash
+python reset_admin_password.py --password "NewStrongPassword123!"
+```
+
+Or set `ADMIN_PASSWORD` in hPanel, then run:
+
+```bash
+python reset_admin_password.py
+```
+
+Restart the Python app after the script reports `Password reset complete`, then
+log in with the configured `ADMIN_USERNAME` and the new password.
+
+One-shot alternative: set `ADMIN_RESET_PASSWORD=1` in hPanel, restart the app
+once, confirm login works, then remove `ADMIN_RESET_PASSWORD` and restart again.
+
 ## VPS / Nginx
 
 Use this option if you have a Hostinger VPS.
