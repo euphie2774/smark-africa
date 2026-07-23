@@ -444,6 +444,10 @@
             </tr>
         `).join('');
     }
+    function csrfHeaders() {
+        const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+        return token ? {'Content-Type': 'application/json', 'X-CSRFToken': token} : {'Content-Type': 'application/json'};
+    }
     async function pollPhoneScanner() {
         try {
             const response = await fetch('{{ url_for("admin_pos_latest_scan") }}', {cache: 'no-store'});
@@ -452,7 +456,7 @@
             if (!data.success) return;
             if (data.cart) renderCart(data.cart);
             if (data.product_name) {
-                if (status) status.textContent = `received ${data.product_name}`;
+                if (status) status.textContent = `${data.action === 'remove' ? 'removed' : 'received'} ${data.product_name}`;
             } else if (data.barcode) {
                 if (status) status.textContent = `scanned ${data.barcode} - product not found`;
                 const regBarcodeField = document.querySelector('input[name="barcode"]');
@@ -481,7 +485,7 @@
             if (!barcode) return;
             const response = await fetch('{{ url_for("admin_pos_cart_add") }}', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: csrfHeaders(),
                 body: JSON.stringify({barcode})
             });
             const data = await response.json();
@@ -500,7 +504,7 @@
         if (!clean) return;
         const response = await fetch('{{ url_for("admin_pos_cart_add") }}', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: csrfHeaders(),
             body: JSON.stringify({barcode: clean})
         });
         const data = await response.json();

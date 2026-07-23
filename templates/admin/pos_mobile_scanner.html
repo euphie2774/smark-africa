@@ -25,6 +25,14 @@
             <video id="scanner-video" class="scanner-video" playsinline muted></video>
             <div class="scanner-frame" aria-hidden="true"></div>
             <div id="scanner-status" class="alert alert-info mt-3 mb-0">Tap Start Camera to scan with your phone.</div>
+            {% if not pair_mode and not pairing_error %}
+            <div class="btn-group w-100 mt-3" role="group" aria-label="Scanner mode">
+                <input type="radio" class="btn-check" name="scan-mode" id="scan-mode-add" value="add" checked>
+                <label class="btn btn-outline-success" for="scan-mode-add"><i class="fas fa-plus me-1"></i>Add</label>
+                <input type="radio" class="btn-check" name="scan-mode" id="scan-mode-remove" value="remove">
+                <label class="btn btn-outline-danger" for="scan-mode-remove"><i class="fas fa-minus me-1"></i>Remove</label>
+            </div>
+            {% endif %}
             <div class="d-flex flex-wrap gap-2 mt-3">
                 <button id="start-scanner" class="btn btn-gold" type="button" {{ 'disabled' if pairing_error }}><i class="fas fa-camera me-1"></i> Start Camera</button>
                 <button id="stop-scanner" class="btn btn-outline-secondary" type="button"><i class="fas fa-stop me-1"></i> Stop</button>
@@ -62,6 +70,10 @@
     const pairRedirectBase = {{ (pair_redirect_base or '')|tojson }};
     const scanUrl = {{ (scan_url or '')|tojson }};
 
+    function currentScanAction() {
+        return document.querySelector('input[name="scan-mode"]:checked')?.value || 'add';
+    }
+
     function setStatus(message, type = 'info') {
         statusBox.className = `alert alert-${type} mt-3 mb-0`;
         statusBox.textContent = message;
@@ -91,11 +103,12 @@
             const response = await fetch(scanUrl, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({barcode})
+                body: JSON.stringify({barcode, action: currentScanAction()})
             });
             const data = await response.json();
             if (data.success) {
-                setStatus(data.product ? `Added: ${data.product}` : `Sent barcode: ${barcode}`, 'success');
+                const verb = data.action === 'remove' ? 'Removed' : 'Added';
+                setStatus(data.product ? `${verb}: ${data.product}` : `Sent barcode: ${barcode}`, 'success');
                 if (navigator.vibrate) navigator.vibrate(90);
             } else {
                 setStatus(data.error || 'Product not found for this barcode.', 'warning');
@@ -114,19 +127,21 @@
 
         html5Scanner = new Html5Qrcode('html5-scanner-region');
         const config = {
-            fps: 10,
-            qrbox: {width: 280, height: 150},
+            fps: 15,
+            qrbox: {width: Math.max(220, Math.min(320, window.innerWidth - 48)), height: 180},
+            aspectRatio: 1.777,
             formatsToSupport: [
                 Html5QrcodeSupportedFormats.EAN_13,
                 Html5QrcodeSupportedFormats.EAN_8,
                 Html5QrcodeSupportedFormats.CODE_128,
                 Html5QrcodeSupportedFormats.CODE_39,
+                Html5QrcodeSupportedFormats.CODE_93,
                 Html5QrcodeSupportedFormats.UPC_A,
                 Html5QrcodeSupportedFormats.UPC_E,
                 Html5QrcodeSupportedFormats.QR_CODE,
                 Html5QrcodeSupportedFormats.ITF,
                 Html5QrcodeSupportedFormats.CODABAR,
-            ]
+            ].filter(Boolean)
         };
         html5Scanner.start(
             {facingMode: 'environment'},
@@ -143,8 +158,15 @@
 
     async function useNativeBarcodeDetector() {
         try {
-            nativeDetector = new BarcodeDetector({formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code', 'upc_a', 'upc_e']});
-            nativeStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment'}, audio: false});
+            nativeDetector = new BarcodeDetector({formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'code_93', 'qr_code', 'upc_a', 'upc_e']});
+            nativeStream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: {ideal: 'environment'},
+                    width: {ideal: 1280},
+                    height: {ideal: 720}
+                },
+                audio: false
+            });
             video.srcObject = nativeStream;
             await video.play();
             scanning = true;

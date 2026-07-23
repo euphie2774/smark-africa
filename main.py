@@ -2988,6 +2988,11 @@ def product_by_barcode(value):
     return None
 
 
+def normalize_scan_action(value):
+    action = (value or 'add').strip().lower()
+    return action if action in {'add', 'remove'} else 'add'
+
+
 def pos_terminal_key(user_id=None):
     uid = user_id or (current_user.id if current_user.is_authenticated else 0)
     return f'pos_terminal_cart_{uid}'
@@ -3022,6 +3027,22 @@ def add_product_to_pos_terminal(product, quantity=1, user_id=None):
     lines.append({'product_id': product.id, 'quantity': max(1, int(quantity or 1))})
     save_pos_terminal_cart(lines, user_id)
     return lines
+
+
+def remove_product_from_pos_terminal(product, quantity=1, user_id=None):
+    lines = pos_terminal_cart(user_id)
+    remove_quantity = max(1, int(quantity or 1))
+    updated = []
+    for line in lines:
+        if int(line['product_id']) != product.id:
+            updated.append(line)
+            continue
+        remaining = int(line.get('quantity') or 1) - remove_quantity
+        if remaining > 0:
+            line['quantity'] = remaining
+            updated.append(line)
+    save_pos_terminal_cart(updated, user_id)
+    return updated
 
 
 def pos_terminal_payload(user_id=None):
@@ -4501,12 +4522,15 @@ def login():
         username = validated_data['username']
         password = validated_data['password']
 
-        # Check by username (case-insensitive) or email
+        # Check by username, email, or phone so returning users are not pushed toward duplicate signup.
+        normalized_phone = normalize_mpesa_phone(username)
         user = User.query.filter(func.lower(User.username) == username.lower()).first()
         if not user and '@' in username:
             user = User.query.filter(func.lower(User.email) == username.lower()).first()
         if not user:
             user = User.query.filter(func.lower(User.email) == username.lower()).first()
+        if not user and normalized_phone:
+            user = User.query.filter_by(phone=normalized_phone).first()
 
         # Constant-time password check
         if user and user.check_password(password):
@@ -4548,6 +4572,7 @@ def register():
     if request.args.get('new') == '1':
         session.pop('pending_registration', None)
         return redirect(url_for('register'))
+    session.permanent = True
 
     # Clear expired pending registrations automatically
     pending = session.get('pending_registration')
@@ -4583,14 +4608,17 @@ def register():
             email = pending['email']
             phone = pending.get('phone')
             if User.query.filter_by(username=username).first():
-                flash('Username already taken.', 'danger')
-                return render_template('register.html')
+                session.pop('pending_registration', None)
+                flash('That username already has an account. Please sign in instead.', 'warning')
+                return redirect(url_for('login'))
             if User.query.filter_by(email=email).first():
-                flash('Email already registered.', 'danger')
-                return render_template('register.html')
+                session.pop('pending_registration', None)
+                flash('That email already has an account. Please sign in instead.', 'warning')
+                return redirect(url_for('login'))
             if phone and User.query.filter_by(phone=phone).first():
-                flash('Phone number already registered.', 'danger')
-                return render_template('register.html')
+                session.pop('pending_registration', None)
+                flash('That phone number already has an account. Please sign in instead.', 'warning')
+                return redirect(url_for('login'))
 
             user = User(username=username, email=email, phone=phone, password_hash=pending['password_hash'])
             verification.consumed_at = utcnow()
@@ -4599,8 +4627,10 @@ def register():
             session.pop('pending_registration', None)
             log_admin_action('user_registered', 'user', user.id, {'email': email})
             send_welcome_email(user)
-            flash('Registration verified successfully. Please log in.', 'success')
-            return redirect(url_for('login'))
+            login_user(user, remember=True)
+            session.permanent = True
+            flash('Registration verified successfully. You are now signed in.', 'success')
+            return redirect(url_for('home'))
 
         # Collect form data
         data = {
@@ -4627,16 +4657,16 @@ def register():
 
         # Check for existing user
         if User.query.filter_by(username=username).first():
-            flash('Username already taken.', 'danger')
-            return render_template('register.html')
+            flash('That username already has an account. Please sign in instead.', 'warning')
+            return redirect(url_for('login'))
 
         if User.query.filter_by(email=email).first():
-            flash('Email already registered.', 'danger')
-            return render_template('register.html')
+            flash('That email already has an account. Please sign in instead.', 'warning')
+            return redirect(url_for('login'))
 
         if phone and User.query.filter_by(phone=phone).first():
-            flash('Phone number already registered.', 'danger')
-            return render_template('register.html')
+            flash('That phone number already has an account. Please sign in instead.', 'warning')
+            return redirect(url_for('login'))
 
         import secrets as _secrets
         code = generate_signup_code()
@@ -4671,6 +4701,7 @@ def register():
 @app.route('/register/resend', methods=['POST'])
 @limiter.limit("10 per hour")
 def resend_verification_code():
+    session.permanent = True
     pending = session.get('pending_registration')
     if not pending:
         flash('No pending registration found. Please start again.', 'danger')
@@ -4724,6 +4755,7 @@ def resume_registration(token):
         'password_hash': verification.password_hash,
         'resume_token': verification.resume_token,
     }
+    session.permanent = True
     flash('Enter the 6-digit code to complete registration.', 'info')
     return redirect(url_for('register'))
 
@@ -7847,20 +7879,26 @@ def pos_scanner_connect():
 
 
 @app.route('/pos/scanner/<token>/scan', methods=['POST'])
+@csrf.exempt
 def pos_pair_scan_push(token):
     pairing = scanner_pairing_payload(token)
     if not pairing:
         return jsonify({'success': False, 'error': 'Scanner pairing expired'}), 410
     data = request.get_json(silent=True) or {}
     barcode = re.sub(r'[^A-Za-z0-9_.-]', '', data.get('barcode', '')[:120])
+    action = normalize_scan_action(data.get('action'))
     if not barcode:
         return jsonify({'success': False, 'error': 'No barcode received'}), 400
     product = product_by_barcode(barcode)
     user_id = int(pairing['user_id'])
     if product:
-        add_product_to_pos_terminal(product, 1, user_id=user_id)
+        if action == 'remove':
+            remove_product_from_pos_terminal(product, 1, user_id=user_id)
+        else:
+            add_product_to_pos_terminal(product, 1, user_id=user_id)
     Setting.set(f'pos_latest_scan_{user_id}', json.dumps({
         'barcode': barcode,
+        'action': action,
         'product_id': product.id if product else None,
         'product_name': product.name if product else '',
         'cart': pos_terminal_payload(user_id=user_id),
@@ -7869,22 +7907,28 @@ def pos_pair_scan_push(token):
     db.session.commit()
     if not product:
         return jsonify({'success': False, 'error': f'No product found for barcode: {barcode}', 'barcode': barcode})
-    return jsonify({'success': True, 'barcode': barcode, 'product': product.name})
+    return jsonify({'success': True, 'barcode': barcode, 'product': product.name, 'action': action})
 
 
 @app.route('/admin/pos/scan', methods=['POST'])
 @login_required
 @admin_required
+@csrf.exempt
 def admin_pos_scan_push():
     data = request.get_json(silent=True) or {}
     barcode = re.sub(r'[^A-Za-z0-9_.-]', '', data.get('barcode', '')[:120])
+    action = normalize_scan_action(data.get('action'))
     if not barcode:
         return jsonify({'success': False, 'error': 'No barcode received'}), 400
     product = product_by_barcode(barcode)
     if product:
-        add_product_to_pos_terminal(product, 1)
+        if action == 'remove':
+            remove_product_from_pos_terminal(product, 1)
+        else:
+            add_product_to_pos_terminal(product, 1)
     Setting.set(f'pos_latest_scan_{current_user.id}', json.dumps({
         'barcode': barcode,
+        'action': action,
         'product_id': product.id if product else None,
         'product_name': product.name if product else '',
         'cart': pos_terminal_payload(),
@@ -7893,7 +7937,7 @@ def admin_pos_scan_push():
     db.session.commit()
     if not product:
         return jsonify({'success': False, 'error': f'No product found for barcode: {barcode}', 'barcode': barcode})
-    return jsonify({'success': True, 'barcode': barcode, 'product': product.name})
+    return jsonify({'success': True, 'barcode': barcode, 'product': product.name, 'action': action})
 
 
 @app.route('/admin/pos/latest-scan')
@@ -7928,6 +7972,7 @@ def admin_pos_cart():
 def admin_pos_cart_add():
     data = request.get_json(silent=True) or request.form
     barcode = (data.get('barcode') or '').strip()
+    action = normalize_scan_action(data.get('action'))
     try:
         product_id = int(data.get('product_id') or 0)
     except (TypeError, ValueError):
@@ -7935,7 +7980,10 @@ def admin_pos_cart_add():
     product = product_by_barcode(barcode) if barcode else Product.query.get(product_id) if product_id else None
     if not product:
         return jsonify({'success': False, 'error': 'Product not found'}), 404
-    add_product_to_pos_terminal(product, int(data.get('quantity') or 1))
+    if action == 'remove':
+        remove_product_from_pos_terminal(product, int(data.get('quantity') or 1))
+    else:
+        add_product_to_pos_terminal(product, int(data.get('quantity') or 1))
     db.session.commit()
     return jsonify({'success': True, 'cart': pos_terminal_payload()})
 
@@ -9512,7 +9560,7 @@ def admin_settings():
         # Update all settings
         settings_map = {
             'site_name': 'SMARKAFRICA',
-            'site_description': 'Your Premium Digital & Physical Marketplace',
+            'site_description': 'shop smarter, live better',
             'terms_and_conditions': '',
             'vision': '',
             'mission': '',
@@ -9521,7 +9569,7 @@ def admin_settings():
             'terms_content': '',
             'user_agreement_content': '',
             'contact_email': '',
-            'contact_phone': '',
+            'contact_phone': '+254708615309',
             'daraja_consumer_key': app.config['DARAJA_CONSUMER_KEY'],
             'daraja_consumer_secret': app.config['DARAJA_CONSUMER_SECRET'],
             'daraja_passkey': '',
@@ -9547,7 +9595,7 @@ def admin_settings():
             'site_keywords': 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products',
             'checkout_allowed_countries': 'Kenya',
             'show_country_launch_popup': '1',
-            'seller_signup_enabled': '0',
+            'seller_signup_enabled': '1',
             'product_search_cache_seconds': '300',
             'shopping_card_min_purchase_kes': '10000',
             'shopping_card_credits_per_100_kes': '1',
@@ -9591,6 +9639,8 @@ def admin_settings():
 def admin_toggle_seller_signup():
     enabled = '1' if request.form.get('enabled') == '1' else '0'
     Setting.set('seller_signup_enabled', enabled)
+    if cache:
+        cache.delete('global_settings_dict')
     flash('Become a Seller is now available to users.' if enabled == '1' else 'Become a Seller is now hidden from users.', 'success')
     return redirect(url_for('admin_settings'))
 
@@ -10917,7 +10967,7 @@ def init_database():
     # Default settings
     defaults = {
         'site_name': 'SMARKAFRICA',
-        'site_description': 'Your Premium Digital & Physical Marketplace',
+        'site_description': 'shop smarter, live better',
         'terms_and_conditions': '''
         <h4>Terms and Conditions</h4>
         <p><strong>Last Updated:</strong> January 2026</p>
@@ -10942,7 +10992,7 @@ def init_database():
         <p>Seller onboarding, KYC, withdrawals, and ads will launch after the platform is financially ready to protect buyers and sellers properly.</p>
         ''',
         'contact_email': 'admin@smarkafrica.com',
-        'contact_phone': '+254700000000',
+        'contact_phone': '+254708615309',
         'smtp_server': 'smtp.gmail.com',
         'smtp_port': '587',
         'smtp_use_tls': '1',
@@ -10951,7 +11001,7 @@ def init_database():
         'site_keywords': 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products',
         'checkout_allowed_countries': 'Kenya',
         'show_country_launch_popup': '1',
-        'seller_signup_enabled': '0',
+        'seller_signup_enabled': '1',
         'product_search_cache_seconds': '300',
         'shopping_card_min_purchase_kes': '10000',
         'shopping_card_credits_per_100_kes': '1',
@@ -10980,6 +11030,20 @@ def init_database():
     for key, value in defaults.items():
         if not Setting.query.filter_by(key=key).first():
             Setting.set(key, value)
+
+    legacy_setting_updates = {
+        'site_description': {
+            'Your Premium Digital & Physical Marketplace',
+            'Gold marketplace',
+            'smark-africa - Gold marketplace',
+            'Smark-Africa - Gold marketplace',
+        },
+        'contact_phone': {'', '+254700000000', '+254 700 000 000', '254700000000'},
+    }
+    for key, old_values in legacy_setting_updates.items():
+        row = Setting.query.filter_by(key=key).first()
+        if row and (row.value or '').strip() in old_values:
+            Setting.set(key, defaults[key])
 
     # Default categories
     default_categories = [
