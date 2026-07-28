@@ -49,12 +49,12 @@
                     <li class="nav-item">
                         <a class="nav-link" href="{{ url_for('support') }}"><i class="fas fa-headset me-1"></i>Support</a>
                     </li>
-                    {% if current_user.is_authenticated and not current_user.is_admin and seller_signup_enabled %}
+                    {% if auth_user.is_authenticated and not auth_user.is_admin and seller_signup_enabled %}
                     <li class="nav-item">
                         <a class="nav-link" href="{{ url_for('seller_apply') }}"><i class="fas fa-id-card me-1"></i>Become a Seller</a>
                     </li>
                     {% endif %}
-                    {% if current_user.is_authenticated %}
+                    {% if auth_user.is_authenticated %}
                     <li class="nav-item">
                         <a class="nav-link" href="{{ url_for('storefront_apply') }}"><i class="fas fa-store me-1"></i>Storefront</a>
                     </li>
@@ -65,7 +65,7 @@
                     <li class="nav-item">
                         <a class="nav-link" href="{{ url_for('orders') }}"><i class="fas fa-truck me-1"></i>My Orders</a>
                     </li>
-                    {% if current_user.is_authenticated %}
+                    {% if auth_user.is_authenticated %}
                     <li class="nav-item">
                         <a class="nav-link" href="{{ url_for('notifications') }}"><i class="fas fa-bell me-1"></i>Notifications</a>
                     </li>
@@ -82,10 +82,10 @@
                         </a>
                     </li>
                     <!-- User Dropdown -->
-                    {% if current_user.is_authenticated %}
+                    {% if auth_user.is_authenticated %}
                     <li class="nav-item dropdown">
                         <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown">
-                            <i class="fas fa-user me-1"></i>{{ current_user.username }}
+                            <i class="fas fa-user me-1"></i>{{ auth_user.username }}
                         </a>
                         <ul class="dropdown-menu dropdown-menu-end admin-scroll-dropdown">
                             <li><a class="dropdown-item" href="{{ url_for('orders') }}"><i class="fas fa-box me-2"></i>My Orders</a></li>
@@ -94,7 +94,7 @@
                             <li><a class="dropdown-item" href="{{ url_for('seller_withdrawals') }}"><i class="fas fa-wallet me-2"></i>Earnings</a></li>
                             <li><a class="dropdown-item" href="{{ url_for('seller_ads') }}"><i class="fas fa-bullhorn me-2"></i>Ads</a></li>
                             <li><hr class="dropdown-divider"></li>
-                            {% if current_user.is_admin %}
+                            {% if auth_user.is_admin %}
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_dashboard') }}"><i class="fas fa-shield-alt me-2"></i>Admin Panel</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_market_intelligence') }}"><i class="fas fa-chart-line me-2"></i>Interactive Analysis</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_market_news') }}"><i class="fas fa-newspaper me-2"></i>Price News</a></li>
@@ -104,7 +104,7 @@
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_coins') }}"><i class="fas fa-coins me-2"></i>Coins</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_pos') }}"><i class="fas fa-cash-register me-2"></i>Point of Sale</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_shopping_cards') }}"><i class="fas fa-id-card me-2"></i>Shopping Cards</a></li>
-                            {% if current_user.admin_level == 'mvp' %}
+                            {% if auth_user.admin_level == 'mvp' %}
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_bnpl') }}"><i class="fas fa-calendar-check me-2"></i>BNPL Console</a></li>
                             {% endif %}
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_inventory') }}"><i class="fas fa-boxes-stacked me-2"></i>Inventory</a></li>
@@ -114,7 +114,7 @@
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_automation_productivity') }}"><i class="fas fa-gears me-2"></i>Automation</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_carriers') }}"><i class="fas fa-truck-plane me-2"></i>Carrier Partners</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_phase_two') }}"><i class="fas fa-scale-balanced me-2"></i>Protection Desk</a></li>
-                            {% if current_user.admin_level == 'mvp' %}
+                            {% if auth_user.admin_level == 'mvp' %}
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_intelligent_architecture') }}"><i class="fas fa-network-wired me-2"></i>Intelligent Architecture</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_disbursements') }}"><i class="fas fa-money-bill-transfer me-2"></i>Payment Disbursements</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_print_documentation') }}"><i class="fas fa-book me-2"></i>Print Documentation</a></li>
@@ -160,7 +160,7 @@
         {% block content %}{% endblock %}
     </main>
 
-    {% if platform_ads and current_user.is_authenticated and not current_user.is_admin %}
+    {% if platform_ads and auth_user.is_authenticated and not auth_user.is_admin %}
     <div class="platform-ad-queue" id="platform-ad-queue" aria-live="polite">
         {% for ad in platform_ads %}
         <section class="platform-ad-pop" data-ad-card hidden>
@@ -180,7 +180,7 @@
     </div>
     {% endif %}
 
-    {% if hot_sale_pop and current_user.is_authenticated and not current_user.is_admin %}
+    {% if hot_sale_pop and auth_user.is_authenticated and not auth_user.is_admin %}
     <div class="hot-sale-pop" id="hot-sale-pop">
         <button type="button" class="platform-ad-close" aria-label="Close hot sale">&times;</button>
         {% if hot_sale_pop.image_url %}<img src="{{ hot_sale_pop.image_url }}" alt="{{ hot_sale_pop.name }}">{% endif %}

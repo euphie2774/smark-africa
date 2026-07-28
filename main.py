@@ -10,7 +10,7 @@ from io import BytesIO, StringIO
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, send_from_directory, abort, make_response
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, send_from_directory, abort, make_response, g
 from flask_login import (LoginManager, login_user, logout_user,
                          login_required, current_user)
 from flask_wtf.csrf import CSRFProtect, CSRFError
@@ -4501,8 +4501,15 @@ def inject_globals():
         s = _get_cached_settings()
         platform_ad, platform_ads = _get_cached_platform_ads()
         hot_sale_pop = _get_cached_hot_sale()
+        auth_user = getattr(g, 'auth_user', {
+            'is_authenticated': False,
+            'is_admin': False,
+            'admin_level': '',
+            'username': '',
+        })
         return dict(
             settings=s,
+            auth_user=auth_user,
             now=datetime.utcnow(),
             platform_ad=platform_ad,
             platform_ads=platform_ads,
@@ -4511,7 +4518,7 @@ def inject_globals():
             country_phone_codes=COUNTRY_PHONE_CODES
         )
     except Exception:
-        return dict(settings={}, now=datetime.utcnow(), platform_ad=None, platform_ads=[],
+        return dict(settings={}, auth_user={'is_authenticated': False, 'is_admin': False, 'admin_level': '', 'username': ''}, now=datetime.utcnow(), platform_ad=None, platform_ads=[],
                     hot_sale_pop=None, seller_signup_enabled=False, country_phone_codes=COUNTRY_PHONE_CODES)
 # ---------- Error Handlers ----------
 @app.errorhandler(404)
@@ -12180,6 +12187,20 @@ background_scheduler = start_background_jobs()
 @app.before_request
 def before_request():
     """Security headers"""
+    try:
+        g.auth_user = {
+            'is_authenticated': bool(current_user.is_authenticated),
+            'is_admin': bool(getattr(current_user, 'is_admin', False)),
+            'admin_level': getattr(current_user, 'admin_level', '') or '',
+            'username': getattr(current_user, 'username', '') or '',
+        }
+    except Exception:
+        g.auth_user = {
+            'is_authenticated': False,
+            'is_admin': False,
+            'admin_level': '',
+            'username': '',
+        }
     if request.is_secure or request.headers.get('X-Forwarded-Proto', 'http') == 'https':
         pass
 
