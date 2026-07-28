@@ -34,14 +34,31 @@
                         <label class="form-label">Audience</label>
                         <input name="audience" class="form-control mb-3" placeholder="Kenya, Uganda, students, fashion buyers...">
                         <label class="form-label">Ad Budget</label>
-                        <input type="number" step="0.01" name="budget" class="form-control mb-3" required>
+                        <input type="number" step="0.01" name="budget" class="form-control mb-3" value="{{ ad_plan_prices.daily }}" min="0">
+                        <label class="form-label">Platform Ad Payment</label>
+                        <div class="row g-2 mb-3">
+                            <div class="col-4">
+                                <input class="btn-check" type="radio" name="plan" value="daily" id="ad_daily" checked>
+                                <label class="btn btn-outline-success w-100" for="ad_daily">Daily<br>KSh {{ "%.0f"|format(ad_plan_prices.daily) }}</label>
+                            </div>
+                            <div class="col-4">
+                                <input class="btn-check" type="radio" name="plan" value="weekly" id="ad_weekly">
+                                <label class="btn btn-outline-success w-100" for="ad_weekly">Weekly<br>KSh {{ "%.0f"|format(ad_plan_prices.weekly) }}</label>
+                            </div>
+                            <div class="col-4">
+                                <input class="btn-check" type="radio" name="plan" value="monthly" id="ad_monthly">
+                                <label class="btn btn-outline-success w-100" for="ad_monthly">Monthly<br>KSh {{ "%.0f"|format(ad_plan_prices.monthly) }}</label>
+                            </div>
+                        </div>
+                        <label class="form-label">M-Pesa Phone</label>
+                        <input name="mpesa_phone" class="form-control mb-3" placeholder="2547XXXXXXXX" required>
                         <label class="form-label">Creative URL</label>
                         <input type="url" name="creative_url" class="form-control mb-3" placeholder="Image or video link">
                         <label class="form-label">Destination URL</label>
                         <input type="url" name="destination_url" class="form-control mb-3" placeholder="Product or storefront link">
                         <label class="form-label">Ad Copy</label>
                         <textarea name="ad_copy" class="form-control mb-3" rows="3" placeholder="Caption, offer, CTA, hashtags"></textarea>
-                        <button class="btn btn-gold w-100">Create Ad Request</button>
+                        <button class="btn btn-gold w-100">Save Details & Pay by M-Pesa</button>
                     </form>
                 </div>
             </div>

@@ -1830,6 +1830,60 @@ def slugify(value, max_length=100):
     return (cleaned or uuid.uuid4().hex[:8])[:max_length]
 
 
+def form_bool(name):
+    return (request.form.get(name) or '').strip().lower() in {'1', 'on', 'true', 'yes'}
+
+
+def form_float(name, default=0.0, minimum=None, maximum=None):
+    try:
+        value = float(request.form.get(name, default) or default)
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def form_int(name, default=0, minimum=None, maximum=None):
+    try:
+        value = int(request.form.get(name, default) or default)
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def unique_product_slug(name, current_id=None):
+    base_slug = slugify(name, 180)
+    slug = base_slug
+    counter = 1
+    while True:
+        query = Product.query.filter_by(slug=slug)
+        if current_id:
+            query = query.filter(Product.id != current_id)
+        if not query.first():
+            return slug
+        counter += 1
+        slug = f'{base_slug[:170]}-{counter}'
+
+
+def pos_unit_sale_price(product):
+    return product.selling_price or 0
+
+
+def seller_ad_plan_prices():
+    return {
+        'daily': max(0.0, float(Setting.get('seller_ad_daily_price', '15') or 15)),
+        'weekly': max(0.0, float(Setting.get('seller_ad_weekly_price', '100') or 100)),
+        'monthly': max(0.0, float(Setting.get('seller_ad_monthly_price', '400') or 400)),
+    }
+
+
 def unique_category_slug(name, current_id=None):
     base_slug = slugify(name, 100)
     slug = base_slug
@@ -3133,7 +3187,7 @@ def pos_terminal_payload(user_id=None):
         if not product or not product.is_active:
             continue
         quantity = max(1, int(line.get('quantity') or 1))
-        unit_price = product.discounted_price or product.selling_price or 0
+        unit_price = pos_unit_sale_price(product)
         line_total = unit_price * quantity
         subtotal += line_total
         rows.append({
@@ -3978,6 +4032,9 @@ def send_category_follow_updates():
 
 
 def commission_for_product(product):
+    sale_price = product.selling_price or 0
+    if sale_price < 200:
+        return 10.0
     percent = product.commission_percent or 15.0
     return max(10.0, min(15.0, percent))
 
@@ -5358,6 +5415,27 @@ def mpesa_callback():
                     db.session.delete(pos_setting)
                     db.session.commit()
 
+        ad_setting = Setting.query.filter_by(key=f'ad_stk_{checkout_id}').first()
+        if ad_setting:
+            ad = AdCampaign.query.get(int(ad_setting.value))
+            if ad and ad.status == 'pending_payment':
+                if result_code == 0:
+                    ad.status = 'pending_approval'
+                    record_platform_revenue(
+                        'seller_ad',
+                        float(amount or ad.total_charged or 0),
+                        f'Paid ad campaign #{ad.id}',
+                        str(ad.id),
+                        'ad_campaign',
+                        ad.seller_id
+                    )
+                    db.session.delete(ad_setting)
+                    db.session.commit()
+                else:
+                    ad.status = 'payment_failed'
+                    db.session.delete(ad_setting)
+                    db.session.commit()
+
         return jsonify({'ResultCode': 0, 'ResultDesc': 'Success'})
     except Exception as e:
         print(f"M-Pesa callback error: {e}")
@@ -6680,6 +6758,8 @@ def admin_market_news():
 @admin_required
 def admin_product_trends():
     manual_refresh = request.args.get('refresh') == '1'
+    if manual_refresh:
+        Setting.set('market_news_generation_lock', '0')
     try:
         generate_market_news_if_due(force=manual_refresh)
     except OperationalError:
@@ -7363,16 +7443,19 @@ def admin_pos_request_mobile_auth():
 
 def pos_document_html(sale, title='Invoice'):
     rows = ''.join(
-        f'<tr><td>{item.product_name}</td><td>{item.quantity}</td><td>KSh {item.unit_price:,.2f}</td><td>KSh {item.line_total:,.2f}</td></tr>'
+        f'<tr><td>{html.escape(item.product_name or "")}</td><td style="text-align:right">{item.quantity}</td><td style="text-align:right">KSh {item.unit_price:,.2f}</td><td style="text-align:right">KSh {item.line_total:,.2f}</td></tr>'
         for item in sale.items
     )
+    document_no = sale.invoice_number if title == 'Invoice' else sale.receipt_number
+    pre_vat = (sale.total_amount or 0) - (sale.tax_amount or 0)
+    tax_code = 'G - 16.0%' if sale.tax_amount and sale.tax_amount > 0 else 'Z - 0.0%'
     return f"""
-    <h2>SMARKAFRICA {title}</h2>
-    <p><strong>{title} No:</strong> {sale.invoice_number if title == 'Invoice' else sale.receipt_number}</p>
+    <h2>SMARK-AFRICA {title}</h2>
+    <p><strong>{title} No:</strong> {document_no}</p>
     <p><strong>Customer:</strong> {sale.customer_name or 'Walk-in customer'}</p>
     <p><strong>Date:</strong> {sale.created_at.strftime('%d %b %Y %H:%M')}</p>
-    <table border="1" cellpadding="8" cellspacing="0" width="100%">
-        <thead><tr><th>Product</th><th>Qty</th><th>Unit</th><th>Total</th></tr></thead>
+    <table border="1" cellpadding="6" cellspacing="0" width="100%" style="border-collapse:collapse">
+        <thead><tr><th align="left">Item</th><th align="right">Qty</th><th align="right">Each</th><th align="right">Total</th></tr></thead>
         <tbody>{rows}</tbody>
     </table>
     <p><strong>Subtotal:</strong> KSh {sale.subtotal:,.2f}</p>
@@ -7380,6 +7463,11 @@ def pos_document_html(sale, title='Invoice'):
     <p><strong>Tax:</strong> KSh {sale.tax_amount:,.2f}</p>
     <h3>Total: KSh {sale.total_amount:,.2f}</h3>
     <p>Payment: {sale.payment_method.title()} / {sale.payment_status.title()}</p>
+    <table border="1" cellpadding="6" cellspacing="0" width="100%" style="border-collapse:collapse">
+        <thead><tr><th align="left">Code</th><th align="right">Pre-VAT</th><th align="right">VAT</th><th align="right">Total</th></tr></thead>
+        <tbody><tr><td>{tax_code}</td><td align="right">KSh {pre_vat:,.2f}</td><td align="right">KSh {(sale.tax_amount or 0):,.2f}</td><td align="right">KSh {sale.total_amount:,.2f}</td></tr></tbody>
+    </table>
+    <p>Thank you for shopping with SMARK-Africa. Keep this receipt for support and warranty checks.</p>
     """
 
 
@@ -7580,7 +7668,7 @@ def admin_pos():
             if not product.is_digital and (product.stock or 0) < qty:
                 flash(f'Insufficient inventory for {product.name}.', 'danger')
                 return redirect(url_for('admin_pos'))
-            unit_price = product.discounted_price or product.selling_price or 0
+            unit_price = pos_unit_sale_price(product)
             selected_lines.append((product, qty, unit_price, unit_price * qty))
         if not selected_lines:
             flash('Select at least one product for POS checkout.', 'warning')
@@ -7775,6 +7863,40 @@ def admin_pos():
 def admin_pos_sale(sale_id):
     sale = PointOfSaleSale.query.get_or_404(sale_id)
     return render_template('admin/pos_sale.html', sale=sale)
+
+
+@app.route('/admin/pos/sale/<int:sale_id>/qr.svg')
+@login_required
+@admin_required
+def admin_pos_sale_qr(sale_id):
+    sale = PointOfSaleSale.query.get_or_404(sale_id)
+    payload = (
+        f"SMARK-AFRICA RECEIPT\n"
+        f"Receipt: {sale.receipt_number}\n"
+        f"Invoice: {sale.invoice_number}\n"
+        f"Date: {sale.created_at:%Y-%m-%d %H:%M:%S}\n"
+        f"Total: KSh {sale.total_amount:,.2f}\n"
+        f"Payment: {sale.payment_method}/{sale.payment_status}"
+    )
+    if qrcode is None:
+        fallback = f'''
+        <svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120">
+            <rect width="120" height="120" fill="#fff"/>
+            <rect x="8" y="8" width="28" height="28" fill="#111"/>
+            <rect x="84" y="8" width="28" height="28" fill="#111"/>
+            <rect x="8" y="84" width="28" height="28" fill="#111"/>
+            <text x="12" y="64" font-size="9" font-family="monospace" fill="#111">{html.escape(sale.receipt_number or str(sale.id))}</text>
+        </svg>
+        '''
+        response = make_response(fallback)
+    else:
+        image = qrcode.make(payload, image_factory=qrcode.image.svg.SvgPathImage, box_size=4)
+        buffer = BytesIO()
+        image.save(buffer)
+        response = make_response(buffer.getvalue())
+    response.headers['Content-Type'] = 'image/svg+xml'
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route('/admin/pos/labels')
@@ -8152,7 +8274,7 @@ def admin_add_product():
         commission_percent = max(10.0, min(15.0, float(request.form.get('commission_percent', 15) or 15)))
         admin_priority = request.form.get('admin_priority') in ['1', 'on', 'true']
         is_hot_sale = request.form.get('is_hot_sale') in ['1', 'on', 'true']
-        is_original_source = request.form.get('is_original_source') in ['1', 'on', 'true']
+        is_original_source = current_user.is_admin and request.form.get('is_original_source') in ['1', 'on', 'true']
 
 
         if not name or buying_price < 0 or selling_price <= 0:
@@ -8256,28 +8378,39 @@ def admin_edit_product(pid):
     categories = Category.query.all()
 
     if request.method == 'POST':
-        product.name = request.form.get('name', product.name).strip()
+        name = request.form.get('name', product.name).strip()
+        buying_price = form_float('buying_price', product.buying_price or 0, minimum=0)
+        selling_price = form_float('selling_price', product.selling_price or 0, minimum=0)
+        if not name or selling_price <= 0:
+            flash('Product name and valid selling price are required.', 'danger')
+            return render_template('admin/add_product.html', categories=categories, product=product)
+
+        product.name = name
+        requested_slug = request.form.get('slug', '').strip()
+        product.slug = unique_product_slug(requested_slug or product.name, current_id=product.id)
         product.description = request.form.get('description', product.description)
         product.short_description = request.form.get('short_description', product.short_description)[:300]
         product.category_id = request.form.get('category_id', type=int) or product.category_id
-        product.buying_price = float(request.form.get('buying_price', product.buying_price))
-        product.selling_price = float(request.form.get('selling_price', product.selling_price))
-        product.is_digital = request.form.get('is_digital') == 'on'
-        product.stock = int(request.form.get('stock', product.stock))
-        product.weight_kg = float(request.form.get('weight_kg', product.weight_kg))
-        product.is_featured = request.form.get('is_featured') == 'on'
-        product.is_active = request.form.get('is_active') == 'on'
-        product.discount_percent = float(request.form.get('discount_percent', product.discount_percent or 0))
+        product.buying_price = buying_price
+        product.selling_price = selling_price
+        product.is_digital = form_bool('is_digital')
+        product.stock = form_int('stock', product.stock or 0, minimum=0)
+        product.weight_kg = form_float('weight_kg', product.weight_kg or 0, minimum=0)
+        product.is_featured = form_bool('is_featured')
+        product.is_active = form_bool('is_active')
+        product.discount_percent = form_float('discount_percent', product.discount_percent or 0, minimum=0, maximum=99)
         product.product_condition = request.form.get('product_condition', product.product_condition or 'new')
         product.sale_mode = request.form.get('sale_mode', product.sale_mode or 'direct')
-        product.bid_price = float(request.form.get('bid_price', product.bid_price or 0) or 0)
-        product.commission_percent = max(10.0, min(15.0, float(request.form.get('commission_percent', product.commission_percent or 15) or 15)))
-        product.admin_priority = request.form.get('admin_priority') == 'on'
+        product.bid_price = form_float('bid_price', product.bid_price or 0, minimum=0)
+        product.commission_percent = form_float('commission_percent', product.commission_percent or 15, minimum=10.0, maximum=15.0)
+        product.admin_priority = form_bool('admin_priority')
         was_hot_sale = bool(product.is_hot_sale)
-        product.is_hot_sale = request.form.get('is_hot_sale') == 'on'
+        product.is_hot_sale = form_bool('is_hot_sale')
         if product.is_hot_sale and not was_hot_sale:
             product.hot_sale_started_at = utcnow()
-        product.is_original_source = request.form.get('is_original_source') == 'on'
+        elif not product.is_hot_sale:
+            product.hot_sale_started_at = None
+        product.is_original_source = current_user.is_admin and form_bool('is_original_source')
         price_reference = market_price_reference(
             product.name,
             product.category_id,
@@ -8318,6 +8451,8 @@ def admin_edit_product(pid):
         if product_images:
             product.image_url = product_images[0]
             extra_images.extend(product_images[1:])
+        elif request.form.get('image_url', '').strip():
+            product.image_url = request.form.get('image_url', '').strip()
         if extra_images:
             product.additional_images = json.dumps(extra_images)
 
@@ -9144,19 +9279,25 @@ def seller_ads():
         return redirect(url_for('seller_apply'))
 
     products = Product.query.filter_by(seller_id=current_user.id).all()
+    ad_plan_prices = seller_ad_plan_prices()
     if request.method == 'POST':
-        budget = float(request.form.get('budget', 0) or 0)
+        plan_key = request.form.get('plan', 'daily')
+        ad_charge = ad_plan_prices.get(plan_key, ad_plan_prices['daily'])
+        budget = form_float('budget', ad_charge, minimum=0)
         platform = request.form.get('platform', 'SMARKAFRICA')
         product_id = request.form.get('product_id', type=int)
         product = Product.query.filter_by(id=product_id, seller_id=current_user.id).first() if product_id else None
-        if budget <= 0:
-            flash('Ad budget must be greater than zero.', 'danger')
+        mpesa_phone = request.form.get('mpesa_phone', '').strip() or current_user.phone or ''
+        if ad_charge <= 0:
+            flash('Ad payment amount must be greater than zero.', 'danger')
         elif product_id and not product:
             flash('Choose one of your own products for this ad.', 'danger')
+        elif not normalize_mpesa_phone(mpesa_phone):
+            flash('Enter the M-Pesa phone number that should receive the STK push.', 'danger')
         else:
             fee_percent = float(Setting.get('seller_ad_service_fee_percent', '2') or 2)
-            commission = round(budget * fee_percent / 100, 2)
-            db.session.add(AdCampaign(
+            commission = round(ad_charge * fee_percent / 100, 2)
+            campaign = AdCampaign(
                 seller_id=current_user.id,
                 product_id=product_id,
                 platform=platform,
@@ -9168,15 +9309,25 @@ def seller_ads():
                 creative_url=request.form.get('creative_url', '').strip(),
                 destination_url=request.form.get('destination_url', '').strip(),
                 placement=request.form.get('placement', 'social'),
-                total_charged=budget + commission,
+                total_charged=ad_charge,
                 status='pending_payment'
-            ))
+            )
+            db.session.add(campaign)
+            db.session.flush()
+            order_ref = f'AD-{campaign.id}-{utcnow().strftime("%Y%m%d%H%M")}'
+            stk_result = stk_push(mpesa_phone, ad_charge, order_ref)
+            if stk_result.get('success') and stk_result.get('checkout_request_id'):
+                Setting.query.filter_by(key=f'ad_stk_{stk_result["checkout_request_id"]}').delete()
+                db.session.add(Setting(key=f'ad_stk_{stk_result["checkout_request_id"]}', value=str(campaign.id)))
+                flash(f'Ad details saved. STK Push sent to {mpesa_phone} for KSh {ad_charge:,.2f}. The ad will wait for payment confirmation and admin approval.', 'success')
+            else:
+                flash(stk_result.get('error') or f'Ad details saved, but the STK Push could not be sent. Try payment again from your ad list.', 'warning')
             db.session.commit()
-            flash(f'Ad request created. Pay KSh {budget + commission:,.2f}; admin approval is required before it goes live.', 'success')
         return redirect(url_for('seller_ads'))
     campaigns = AdCampaign.query.filter_by(seller_id=current_user.id).order_by(AdCampaign.created_at.desc()).all()
     return render_template('seller_ads.html', products=products, campaigns=campaigns,
-                           payment_instructions=Setting.get('seller_ad_payment_instructions', ''))
+                           payment_instructions=Setting.get('seller_ad_payment_instructions', ''),
+                           ad_plan_prices=ad_plan_prices)
 
 
 @app.route('/admin/ads', methods=['GET', 'POST'])
@@ -9774,6 +9925,9 @@ def admin_settings():
             'auto_disbursement_cadence': 'weekly',
             'seller_ads_enabled': '0',
             'seller_ad_service_fee_percent': '2',
+            'seller_ad_daily_price': '15',
+            'seller_ad_weekly_price': '100',
+            'seller_ad_monthly_price': '400',
             'seller_ad_payment_instructions': 'Pay the campaign total to SMARKAFRICA, then wait for admin approval before the ad goes live.',
             'social_ads_manager_url': '',
             'google_analytics_id': '',
@@ -9803,7 +9957,8 @@ def admin_settings():
         mvp_content_keys = {'about_content', 'terms_content', 'user_agreement_content'}
         mvp_only_keys = {
             'about_content', 'terms_content', 'user_agreement_content',
-            'seller_signup_enabled', 'seller_ads_enabled', 'auto_disbursement_cadence'
+            'seller_signup_enabled', 'seller_ads_enabled', 'auto_disbursement_cadence',
+            'seller_ad_daily_price', 'seller_ad_weekly_price', 'seller_ad_monthly_price'
         }
         for key, default in settings_map.items():
             if key in mvp_only_keys and not current_user_is_mvp():
@@ -11201,6 +11356,9 @@ def init_database():
         'seller_signup_enabled': '0',
         'seller_ads_enabled': '0',
         'seller_ad_service_fee_percent': '2',
+        'seller_ad_daily_price': '15',
+        'seller_ad_weekly_price': '100',
+        'seller_ad_monthly_price': '400',
         'seller_ad_payment_instructions': 'Pay the campaign total to SMARKAFRICA, then wait for admin approval before the ad goes live.',
         'social_ads_manager_url': '',
         'auto_disbursement_cadence': 'weekly',

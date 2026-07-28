@@ -2,51 +2,246 @@
 {% block title %}{{ sale.receipt_number }} - {{ super() }}{% endblock %}
 
 {% block content %}
-<div class="container py-4">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <div>
-            <h2 class="mb-1"><i class="fas fa-receipt me-2"></i>{{ sale.receipt_number }}</h2>
-            <div class="small text-muted">Invoice {{ sale.invoice_number }} - {{ sale.created_at.strftime('%d %b %Y %H:%M') }}</div>
-        </div>
-        <div class="d-flex gap-2 no-print">
-            <button class="btn btn-gold" onclick="window.print()"><i class="fas fa-print me-1"></i>Print Receipt</button>
-            <a href="{{ url_for('admin_pos') }}" class="btn btn-outline-secondary">Back to POS</a>
-        </div>
-    </div>
+{% set receipt_no = sale.receipt_number or ('RCT-' ~ sale.id) %}
+{% set invoice_no = sale.invoice_number or ('INV-' ~ sale.id) %}
+{% set item_count = sale.items|sum(attribute='quantity') %}
+{% set vat_rate = 16 if sale.tax_amount and sale.tax_amount > 0 else 0 %}
+{% set pre_vat = sale.total_amount - (sale.tax_amount or 0) %}
+<style>
+.receipt-workbench {
+    max-width: 820px;
+    margin: 0 auto;
+}
+.thermal-sheet {
+    width: 80mm;
+    max-width: 100%;
+    margin: 0 auto 24px;
+    background: #fff;
+    color: #111;
+    border: 1px solid #ddd;
+    box-shadow: 0 12px 35px rgba(0, 0, 0, 0.12);
+    padding: 10px 12px;
+    font-family: "Courier New", Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.22;
+}
+.thermal-center { text-align: center; }
+.thermal-brand {
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: 1px;
+}
+.thermal-muted { color: #444; }
+.thermal-rule {
+    border: 0;
+    border-top: 1px dashed #111;
+    margin: 8px 0;
+}
+.receipt-barcode {
+    width: 62mm;
+    height: 34px;
+    margin: 8px auto 4px;
+    background: repeating-linear-gradient(90deg, #111 0 2px, transparent 2px 4px, #111 4px 5px, transparent 5px 8px);
+}
+.receipt-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.receipt-table th,
+.receipt-table td {
+    padding: 2px 0;
+    vertical-align: top;
+}
+.receipt-table th {
+    border-bottom: 1px dashed #111;
+    font-weight: 700;
+}
+.receipt-table .qty,
+.receipt-table .money {
+    text-align: right;
+    white-space: nowrap;
+}
+.receipt-product-code {
+    display: block;
+    color: #444;
+    font-size: 10px;
+}
+.receipt-totals td {
+    padding: 2px 0;
+}
+.receipt-total-line td {
+    border-top: 1px dashed #111;
+    font-size: 14px;
+    font-weight: 800;
+    padding-top: 5px;
+}
+.receipt-qr {
+    width: 30mm;
+    height: 30mm;
+    object-fit: contain;
+}
+.receipt-back {
+    min-height: 148mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    text-align: center;
+}
+.receipt-back h3 {
+    font-size: 18px;
+    font-weight: 800;
+    margin-bottom: 10px;
+}
+.receipt-back p {
+    margin-bottom: 8px;
+}
+@media print {
+    @page {
+        size: 80mm auto;
+        margin: 3mm;
+    }
+    body,
+    main,
+    .container,
+    .receipt-workbench {
+        margin: 0 !important;
+        padding: 0 !important;
+        background: #fff !important;
+        max-width: none !important;
+    }
+    .no-print,
+    .navbar,
+    footer {
+        display: none !important;
+    }
+    .thermal-sheet {
+        width: 74mm;
+        border: 0;
+        box-shadow: none;
+        margin: 0;
+        padding: 0;
+        page-break-after: always;
+    }
+    .thermal-sheet:last-child {
+        page-break-after: auto;
+    }
+}
+</style>
 
-    <div class="card border-0 shadow-sm">
-        <div class="card-body">
-            <div class="row mb-4">
-                <div class="col-md-6">
-                    <h5>Customer</h5>
-                    <div>{{ sale.customer_name or 'Walk-in customer' }}</div>
-                    <div class="text-muted">{{ sale.customer_email or '' }}</div>
-                    <div class="text-muted">{{ sale.customer_phone or '' }}</div>
-                </div>
-                <div class="col-md-6 text-md-end">
-                    <h5>Payment</h5>
-                    <div>{{ sale.payment_method|title }} / {{ sale.payment_status|title }}</div>
-                    <div class="fw-bold fs-4 text-success">KSh {{ "%.2f"|format(sale.total_amount) }}</div>
-                </div>
+<div class="container py-4">
+    <div class="receipt-workbench">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4 no-print">
+            <div>
+                <h2 class="mb-1"><i class="fas fa-receipt me-2"></i>{{ receipt_no }}</h2>
+                <div class="small text-muted">Invoice {{ invoice_no }} - {{ sale.created_at.strftime('%d %b %Y %H:%M') }}</div>
             </div>
-            <div class="table-responsive">
-                <table class="table">
-                    <thead class="table-light"><tr><th>Product</th><th>Quantity</th><th>Unit</th><th>Total</th></tr></thead>
-                    <tbody>
-                    {% for item in sale.items %}
-                    <tr><td>{{ item.product_name }}</td><td>{{ item.quantity }}</td><td>KSh {{ "%.2f"|format(item.unit_price) }}</td><td>KSh {{ "%.2f"|format(item.line_total) }}</td></tr>
-                    {% endfor %}
-                    </tbody>
-                    <tfoot>
-                    <tr><td colspan="3" class="text-end">Subtotal</td><td>KSh {{ "%.2f"|format(sale.subtotal) }}</td></tr>
-                    <tr><td colspan="3" class="text-end">Discount</td><td>KSh {{ "%.2f"|format(sale.discount_amount) }}</td></tr>
-                    <tr><td colspan="3" class="text-end">Tax</td><td>KSh {{ "%.2f"|format(sale.tax_amount) }}</td></tr>
-                    <tr class="table-secondary"><td colspan="3" class="text-end fw-bold">Total</td><td class="fw-bold">KSh {{ "%.2f"|format(sale.total_amount) }}</td></tr>
-                    </tfoot>
-                </table>
+            <div class="d-flex gap-2">
+                <button class="btn btn-gold" onclick="window.print()"><i class="fas fa-print me-1"></i>Print Receipt</button>
+                <a href="{{ url_for('admin_pos') }}" class="btn btn-outline-secondary">Back to POS</a>
             </div>
-            {% if sale.notes %}<div class="alert alert-info">{{ sale.notes }}</div>{% endif %}
         </div>
+
+        <section class="thermal-sheet">
+            <div class="thermal-center">
+                <div class="thermal-brand">SMARK-AFRICA</div>
+                <div>SHOP SMARTER, LIVE BETTER</div>
+                <div>P.O. Box 930, Kirinyaga, Kenya</div>
+                <div>0708615309 | admin@smark-africa.com</div>
+                <div>VAT/PIN: {{ settings.kra_pin if settings is defined and settings.kra_pin else 'PENDING' }}</div>
+                <strong>CASH SALE</strong>
+            </div>
+
+            <hr class="thermal-rule">
+            <div>Date: {{ sale.created_at.strftime('%I:%M%p %a %d %b %Y') }}</div>
+            <div>Branch: SMARK-AFRICA POS</div>
+            <div>Till: {{ sale.cashier.username if sale.cashier else 'Cashier' }} &nbsp; Rct: {{ receipt_no }}</div>
+            <div>Invoice: {{ invoice_no }}</div>
+            <div>Customer: {{ sale.customer_name or 'Walk-in customer' }}</div>
+            {% if sale.customer_phone %}<div>Phone: {{ sale.customer_phone }}</div>{% endif %}
+
+            <div class="receipt-barcode" aria-hidden="true"></div>
+            <div class="thermal-center">{{ receipt_no }}</div>
+            <hr class="thermal-rule">
+
+            <table class="receipt-table">
+                <thead>
+                    <tr>
+                        <th>Item</th>
+                        <th class="qty">Qty</th>
+                        <th class="money">Each</th>
+                        <th class="money">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in sale.items %}
+                    <tr>
+                        <td>
+                            {{ item.product_name[:28] }}
+                            <span class="receipt-product-code">{{ item.product_id }}</span>
+                        </td>
+                        <td class="qty">{{ "%.3f"|format(item.quantity) }}</td>
+                        <td class="money">{{ "%.2f"|format(item.unit_price) }}</td>
+                        <td class="money">{{ "%.2f"|format(item.line_total) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <hr class="thermal-rule">
+            <table class="receipt-table receipt-totals">
+                <tr><td>TOTAL</td><td class="money">{{ "%.2f"|format(sale.subtotal) }}</td></tr>
+                <tr><td>DISCOUNT</td><td class="money">{{ "%.2f"|format(sale.discount_amount or 0) }}</td></tr>
+                <tr><td>TAX</td><td class="money">{{ "%.2f"|format(sale.tax_amount or 0) }}</td></tr>
+                <tr class="receipt-total-line"><td>AMT PAID</td><td class="money">{{ "%.2f"|format(sale.total_amount) }}</td></tr>
+                <tr><td>CHANGE</td><td class="money">0.00</td></tr>
+            </table>
+
+            <hr class="thermal-rule">
+            <div>Total Qty: {{ "%.3f"|format(item_count or 0) }} units</div>
+            <div>Cashier: {{ sale.cashier.username if sale.cashier else 'SMARK-AFRICA' }}</div>
+            <div>Payment: {{ sale.payment_method|replace('_', ' ')|title }} / {{ sale.payment_status|title }}</div>
+
+            <hr class="thermal-rule">
+            <table class="receipt-table">
+                <thead>
+                    <tr><th>CODE</th><th class="money">PRE-VAT</th><th class="money">VAT</th><th class="money">TOTAL</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>{{ 'G - 16.0%' if vat_rate else 'Z - 0.0%' }}</td>
+                        <td class="money">{{ "%.2f"|format(pre_vat) }}</td>
+                        <td class="money">{{ "%.2f"|format(sale.tax_amount or 0) }}</td>
+                        <td class="money">{{ "%.2f"|format(sale.total_amount) }}</td>
+                    </tr>
+                    <tr>
+                        <td>TOTALS</td>
+                        <td class="money">{{ "%.2f"|format(pre_vat) }}</td>
+                        <td class="money">{{ "%.2f"|format(sale.tax_amount or 0) }}</td>
+                        <td class="money">{{ "%.2f"|format(sale.total_amount) }}</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <hr class="thermal-rule">
+            <div class="thermal-center">CONTROL UNIT INFO</div>
+            <div>CU No: SMARK{{ "%08d"|format(sale.id) }}</div>
+            <div>Ref No: {{ receipt_no }} Date: {{ sale.created_at.strftime('%d/%m/%Y %H:%M:%S') }}</div>
+            <div class="thermal-center mt-2">
+                <img class="receipt-qr" src="{{ url_for('admin_pos_sale_qr', sale_id=sale.id) }}" alt="Receipt verification QR">
+                <div class="thermal-muted">Scan to verify receipt details</div>
+            </div>
+        </section>
+
+        <section class="thermal-sheet receipt-back">
+            <div class="thermal-brand">SMARK-AFRICA</div>
+            <h3>Thank You</h3>
+            <p>We appreciate your purchase and your trust in SMARK-Africa.</p>
+            <p>Keep this receipt for support, exchange checks, warranty handling, and payment confirmation.</p>
+            <p>Need help? Call or WhatsApp 0708615309.</p>
+            <hr class="thermal-rule">
+            <p class="mb-0">Shop smarter, live better.</p>
+            <p class="thermal-muted">{{ receipt_no }}</p>
+        </section>
     </div>
 </div>
 {% endblock %}

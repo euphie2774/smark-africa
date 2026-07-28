@@ -95,7 +95,7 @@
                             <select name="product_id" class="form-select">
                                 <option value="">Select product or scan barcode below</option>
                                 {% for product in products %}
-                                <option value="{{ product.id }}">{{ product.name }} - KSh {{ "%.2f"|format(product.discounted_price or product.selling_price) }} / Barcode {{ product.pos_barcode }}{% if not product.is_digital %} / Stock {{ product.stock or 0 }}{% endif %}</option>
+                                <option value="{{ product.id }}">{{ product.name }} - KSh {{ "%.2f"|format(product.selling_price) }} / Barcode {{ product.pos_barcode }}{% if not product.is_digital %} / Stock {{ product.stock or 0 }}{% endif %}</option>
                                 {% endfor %}
                             </select>
                             <input name="product_id" class="form-control mt-1 pos-barcode-input" placeholder="Barcode scanner input">
