@@ -2967,7 +2967,6 @@ def generate_market_news_if_due(force=False):
         raise OperationalError('market_news', {}, 'Generation is already running')
     if force:
         Setting.set('market_news_generation_lock', '1')
-        db.session.remove()
         MarketNews.query.filter(
             MarketNews.is_cleared == False,
             MarketNews.generated_by.in_(['marketplace_intelligence', 'product_price_signal'])
@@ -8757,7 +8756,7 @@ def admin_add_product():
                                              os.path.basename(product.file_path))) else 0
 
         db.session.add(product)
-        db.session.commit()
+        db.session.flush()
 
         if product.admin_priority and not Review.query.filter_by(product_id=product.id, is_admin_review=True).first():
             db.session.add(Review(
@@ -8768,7 +8767,6 @@ def admin_add_product():
                 is_visible=True,
                 is_admin_review=True
             ))
-            db.session.commit()
 
         # Auto-apply discount check
         apply_auto_discount(product)
