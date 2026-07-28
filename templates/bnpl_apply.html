@@ -6,7 +6,7 @@
     <div class="row g-4">
         <div class="col-lg-5">
             <h2 class="mb-2"><i class="fas fa-calendar-check me-2"></i>Buy Now, Pay Later</h2>
-            <p class="text-muted">Apply for short-term instalments on MVP-approved products. Device controls use a transparent functional lock code, not location tracking.</p>
+            <p class="text-muted">Apply for short-term instalments on MVP-approved products. Device controls use a transparent remote functional code, not location tracking.</p>
             <div class="card border-0 shadow-sm">
                 <div class="card-body">
                     <h5>{{ product.name }}</h5>
@@ -33,9 +33,24 @@
                             <label class="form-label">Device Lock Code</label>
                             <input name="device_lock_code" class="form-control" placeholder="Code installed on device">
                         </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Install Method</label>
+                            <select name="device_install_method" class="form-select">
+                                <option value="imei">IMEI entry</option>
+                                <option value="usb">USB cable</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Device IMEI</label>
+                            <input name="device_imei" class="form-control" inputmode="numeric" placeholder="15-digit IMEI">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Serial / Asset Tag</label>
+                            <input name="device_serial" class="form-control" placeholder="Optional">
+                        </div>
                     </div>
                     <div class="alert alert-warning small mt-3 mb-0">
-                        If instalments become overdue, the financed device may be restricted to calls/SMS and a payment reminder screen until payment clears.
+                        If instalments become overdue, the financed device may be restricted to calls/SMS, M-Pesa payment, and a payment reminder screen until payment clears.
                     </div>
                 </div>
                 <div class="card-footer bg-white"><button class="btn btn-gold">Submit BNPL Application</button></div>

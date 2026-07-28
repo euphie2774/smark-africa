@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Admin Activity Report - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-clipboard-list me-2"></i>Admin Activity Report</h2>
+            <div class="small text-muted">MVP-only accountability trail for admin actions, changes, exports, and task execution.</div>
+        </div>
+        <div class="d-flex gap-2">
+            <a class="btn btn-outline-secondary" href="{{ url_for('admin_activity_report', admin_id=filters.admin_id or '', action=filters.action, start=filters.start, end=filters.end, print=1) }}" target="_blank"><i class="fas fa-print me-1"></i>Print</a>
+            <a class="btn btn-outline-success" href="{{ url_for('admin_activity_report', admin_id=filters.admin_id or '', action=filters.action, start=filters.start, end=filters.end, export='csv') }}"><i class="fas fa-file-csv me-1"></i>CSV</a>
+        </div>
+    </div>
+
+    <form method="GET" class="card border-0 shadow-sm mb-4 {% if filters.print %}d-print-none{% endif %}">
+        <div class="card-body row g-3 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label">Admin</label>
+                <select name="admin_id" class="form-select">
+                    <option value="">All admins</option>
+                    {% for admin in admins %}
+                    <option value="{{ admin.id }}" {{ 'selected' if filters.admin_id == admin.id else '' }}>{{ admin.username }} - {{ admin.admin_level or 'admin' }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Action / Route</label>
+                <input name="action" class="form-control" value="{{ filters.action }}" placeholder="settings, product, bnpl">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Start</label>
+                <input name="start" type="date" class="form-control" value="{{ filters.start }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">End</label>
+                <input name="end" type="date" class="form-control" value="{{ filters.end }}">
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-gold w-100"><i class="fas fa-filter me-1"></i>Filter</button>
+            </div>
+        </div>
+    </form>
+
+    <div class="card border-0 shadow-sm">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr><th>Date</th><th>Admin</th><th>Action</th><th>Resource</th><th>IP</th><th>Details</th></tr>
+                </thead>
+                <tbody>
+                    {% for log in logs %}
+                    <tr>
+                        <td>{{ log.created_at.strftime('%d %b %Y %H:%M') if log.created_at else '' }}</td>
+                        <td>{{ log.username or (log.user.username if log.user else 'system') }}</td>
+                        <td><span class="badge bg-dark">{{ log.action }}</span></td>
+                        <td>{{ log.resource_type or '-' }}{% if log.resource_id %} #{{ log.resource_id }}{% endif %}</td>
+                        <td>{{ log.ip_address or '-' }}</td>
+                        <td class="small text-muted" style="max-width:520px; white-space:normal;">{{ log.details or '' }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="6" class="text-center text-muted py-4">No activity found for these filters.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -48,7 +48,7 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     ShoppingCardTransaction, KYCIdentityVerification, CardAuthorizationRequest, Raffle, RaffleTicket, \
     CoinTransaction, CoinDailyCheckIn, Event, \
     PromotedListing, AffiliateLink, AffiliateConversion, SellerSubscription, SponsoredBanner, \
-    EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue
+    EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue, AuditLog
 
 # Import security utilities
 from validators import (RegisterSchema, LoginSchema, ProductSchema, ReviewSchema,
@@ -209,8 +209,83 @@ def mvp_required(f):
     return decorated
 
 
+def elevated_admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not current_user.is_authenticated or not current_user.is_admin:
+            flash('Admin access required.', 'danger')
+            return redirect(url_for('login'))
+        if current_user.admin_level not in ['mvp', 'super_admin']:
+            flash('MVP or super admin access required.', 'danger')
+            return redirect(url_for('admin_dashboard'))
+        return f(*args, **kwargs)
+
+    return decorated
+
+
 def utcnow():
     return datetime.utcnow()
+
+
+SENSITIVE_AUDIT_FIELDS = {
+    'password', 'admin_password', 'admin_current_password', 'admin_confirm_password',
+    'daraja_consumer_secret', 'daraja_passkey', 'smtp_password', 'mail_password',
+    'flutterwave_secret_key', 'flutterwave_encryption_key', 'paystack_secret_key',
+    'pesapal_consumer_secret', 'dpo_company_token', 'resend_api_key', 'csrf_token'
+}
+
+
+def audit_safe_form_snapshot():
+    data = {}
+    for key in request.form.keys():
+        if key in SENSITIVE_AUDIT_FIELDS or 'secret' in key.lower() or 'password' in key.lower() or 'passkey' in key.lower():
+            data[key] = '[redacted]'
+        else:
+            value = request.form.get(key, '')
+            data[key] = value[:180] if isinstance(value, str) else value
+    return data
+
+
+def admin_request_should_audit():
+    if not current_user.is_authenticated or not current_user.is_admin:
+        return False
+    if not request.endpoint or not request.endpoint.startswith('admin'):
+        return False
+    if request.endpoint in {'admin_activity_report'}:
+        return request.args.get('print') == '1' or request.args.get('export') == 'csv'
+    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        return True
+    return request.args.get('refresh') == '1'
+
+
+@app.after_request
+def record_admin_request_audit(response):
+    try:
+        if response.status_code < 400 and admin_request_should_audit():
+            view_args = request.view_args or {}
+            resource_id = view_args.get('pid') or view_args.get('uid') or view_args.get('plan_id') or view_args.get('id')
+            details = {
+                'endpoint': request.endpoint,
+                'method': request.method,
+                'path': request.path,
+                'args': {k: request.args.get(k) for k in request.args.keys()},
+                'form': audit_safe_form_snapshot() if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'} else {},
+            }
+            db.session.add(AuditLog(
+                action=f'admin_{request.method.lower()}',
+                resource_type=request.endpoint,
+                resource_id=resource_id,
+                user_id=current_user.id,
+                username=current_user.username,
+                ip_address=request.remote_addr,
+                user_agent=request.headers.get('User-Agent'),
+                details=json.dumps(details),
+            ))
+            db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.warning('Admin audit logging skipped: %s', exc)
+    return response
 
 
 def generate_order_number():
@@ -1375,6 +1450,18 @@ def uploaded_static_url_to_path(file_url):
     return ''
 
 
+def remove_uploaded_file_url(file_url):
+    path = uploaded_static_url_to_path(file_url)
+    if not path:
+        return False
+    uploads_root = os.path.abspath(app.config['UPLOAD_FOLDER'])
+    target = os.path.abspath(path)
+    if not target.startswith(uploads_root) or not os.path.isfile(target):
+        return False
+    os.remove(target)
+    return True
+
+
 def file_content_fingerprint(file_url):
     path = uploaded_static_url_to_path(file_url)
     if not path or not os.path.exists(path):
@@ -2439,7 +2526,11 @@ def refresh_market_price_cache(limit=30):
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(fetch_reference, ref) for ref in references]
         for future in as_completed(futures):
-            ref, payload = future.result()
+            try:
+                ref, payload = future.result()
+            except Exception as exc:
+                app.logger.warning('Market reference refresh skipped: %s', exc)
+                continue
             if payload:
                 upsert_market_price_cache(ref['label'], ref.get('category_hint', ''), payload)
                 refreshed += 1
@@ -2455,7 +2546,11 @@ def refresh_market_price_cache(limit=30):
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = [executor.submit(fetch_product_price, p) for p in products]
         for future in as_completed(futures):
-            product, category_name, payload = future.result()
+            try:
+                product, category_name, payload = future.result()
+            except Exception as exc:
+                app.logger.warning('Product market refresh skipped: %s', exc)
+                continue
             if payload:
                 upsert_market_price_cache(product.name, category_name, payload)
                 refreshed += 1
@@ -3122,6 +3217,30 @@ def product_by_barcode(value):
     return None
 
 
+def product_from_pos_choice(id_value=None, typed_value=''):
+    if id_value:
+        try:
+            product = Product.query.get(int(id_value))
+            if product:
+                return product
+        except (TypeError, ValueError):
+            pass
+    typed = (typed_value or '').strip()
+    if not typed:
+        return None
+    product = product_by_barcode(typed)
+    if product:
+        return product
+    if typed.isdigit():
+        product = Product.query.get(int(typed))
+        if product:
+            return product
+    return (
+        Product.query.filter(Product.name.ilike(typed)).first()
+        or Product.query.filter(Product.name.ilike(f'%{typed}%')).first()
+    )
+
+
 def normalize_scan_action(value):
     action = (value or 'add').strip().lower()
     return action if action in {'add', 'remove'} else 'add'
@@ -3264,6 +3383,9 @@ def pos_role_permissions(user=None):
     if level == 'mvp':
         role = 'Administrator'
         allowed = {'sell', 'inventory', 'products', 'suppliers', 'reports', 'settings'}
+    elif level == 'super_admin':
+        role = 'Super Admin'
+        allowed = {'sell', 'inventory', 'products', 'suppliers', 'reports'}
     elif level == 'manager':
         role = 'Manager'
         allowed = {'sell', 'inventory', 'products', 'suppliers', 'reports'}
@@ -3320,6 +3442,58 @@ def generate_bnpl_lock_code(plan=None):
     seed = f"{getattr(plan, 'id', '')}:{uuid.uuid4().hex}".encode()
     digest = hashlib.sha256(seed).hexdigest().upper()
     return f"BNPL-{digest[:4]}-{digest[4:8]}-{digest[8:12]}"
+
+
+def normalize_imei(value):
+    return re.sub(r'\D', '', (value or '').strip())[:20]
+
+
+def bnpl_remote_functional_code(plan):
+    seed = f'{plan.id}:{plan.user_id}:{plan.product_id}:{plan.device_imei or ""}:{plan.device_lock_code or ""}'
+    digest = hmac.new(app.config['SECRET_KEY'].encode(), seed.encode(), hashlib.sha256).hexdigest().upper()
+    return f'SMARK-{digest[:6]}-{digest[6:12]}'
+
+
+def build_bnpl_device_payload(plan):
+    if not plan.device_lock_code:
+        plan.device_lock_code = generate_bnpl_lock_code(plan)
+    remote_code = bnpl_remote_functional_code(plan)
+    payload = {
+        'platform': 'SMARK-Africa BNPL',
+        'plan_id': plan.id,
+        'customer_id': plan.user_id,
+        'product_id': plan.product_id,
+        'imei': plan.device_imei or '',
+        'serial': plan.device_serial or '',
+        'install_method': plan.device_install_method or 'imei',
+        'remote_functional_code': remote_code,
+        'lock_code': plan.device_lock_code,
+        'lock_status': plan.lock_status or 'unlocked',
+        'allowed_when_locked': ['emergency_calls', 'sms', 'mpesa_payment', 'smark_africa_bnpl_portal'],
+        'callback_url': (Setting.get('app_base_url', '') or request.host_url.rstrip('/')).rstrip() + url_for('admin_bnpl_device_callback'),
+        'generated_at': utcnow().isoformat(),
+    }
+    plan.device_remote_payload = json.dumps(payload, indent=2)
+    return payload
+
+
+def update_bnpl_device_fields(plan):
+    imei = normalize_imei(request.form.get('device_imei', plan.device_imei or ''))
+    serial = request.form.get('device_serial', plan.device_serial or '').strip()[:80]
+    method = request.form.get('device_install_method', plan.device_install_method or 'imei')
+    if method not in {'imei', 'usb'}:
+        method = 'imei'
+    if imei:
+        plan.device_imei = imei
+    plan.device_serial = serial
+    plan.device_install_method = method
+    plan.device_status_note = request.form.get('device_status_note', plan.device_status_note or '').strip()
+    if request.form.get('mark_installed') == '1':
+        plan.device_install_status = 'installed'
+        plan.device_installed_at = utcnow()
+    elif plan.device_imei or plan.device_lock_code:
+        plan.device_install_status = plan.device_install_status or 'ready'
+    build_bnpl_device_payload(plan)
 
 
 def update_bnpl_lock_status(plan):
@@ -3452,8 +3626,8 @@ def homepage_featured_products(limit=12):
     seen = set()
     queries = [
         Product.query.filter_by(is_active=True, is_hot_sale=True).order_by(Product.hot_sale_started_at.desc(), Product.updated_at.desc()),
-        Product.query.filter_by(is_active=True, is_featured=True).order_by(Product.admin_priority.desc(), Product.created_at.desc()),
-        Product.query.filter_by(is_active=True).order_by(Product.admin_priority.desc(), Product.created_at.desc()),
+        Product.query.filter_by(is_active=True, is_featured=True).outerjoin(User, Product.seller_id == User.id).order_by(Product.admin_priority.desc(), User.seller_rating.desc(), Product.created_at.desc()),
+        Product.query.filter_by(is_active=True).outerjoin(User, Product.seller_id == User.id).order_by(Product.admin_priority.desc(), User.seller_rating.desc(), Product.created_at.desc()),
     ]
     for query in queries:
         for product in query.limit(limit).all():
@@ -3494,13 +3668,13 @@ def build_product_search_query(search='', category_slug='', product_type='', sor
             Product.short_description.ilike(f'%{search}%')
         ))
     if sort == 'price_low':
-        query = query.order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), Product.selling_price.asc())
+        query = query.outerjoin(User, Product.seller_id == User.id).order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), User.seller_rating.desc(), Product.selling_price.asc())
     elif sort == 'price_high':
-        query = query.order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), Product.selling_price.desc())
+        query = query.outerjoin(User, Product.seller_id == User.id).order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), User.seller_rating.desc(), Product.selling_price.desc())
     elif sort in ['rating', 'popular']:
-        query = query.order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), Product.sales_count.desc())
+        query = query.outerjoin(User, Product.seller_id == User.id).order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), User.seller_rating.desc(), Product.sales_count.desc())
     else:
-        query = query.order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), Product.created_at.desc())
+        query = query.outerjoin(User, Product.seller_id == User.id).order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), User.seller_rating.desc(), Product.created_at.desc())
     return query, current_category
 
 
@@ -3594,6 +3768,38 @@ def backup_seller_verification(verification):
     )
     db.session.add(backup)
     return backup
+
+
+def kyc_system_only_enabled():
+    return Setting.get('kyc_system_only_enabled', '0') == '1'
+
+
+def seller_critical_mismatch_key(user_id):
+    return f'seller_critical_mismatch_count_{user_id}'
+
+
+def increment_seller_critical_mismatch(user, reason='Manual KYC mismatch'):
+    count = int(Setting.get(seller_critical_mismatch_key(user.id), '0') or 0) + 1
+    Setting.set(seller_critical_mismatch_key(user.id), str(count))
+    if count >= 3:
+        db.session.add(SellerBlacklist(
+            legal_name=f'{user.first_name or ""} {user.last_name or ""}'.strip() or user.username,
+            country=user.country,
+            phone=normalize_mpesa_phone(user.phone),
+            bank_card_last4=user.bank_card_last4,
+            reason=f'{reason}. Critical mismatch count reached {count}.',
+            status='active'
+        ))
+        user.seller_status = 'rejected'
+        user.verification_status = 'blacklisted'
+        user.is_verified_seller = False
+        if user.email:
+            send_email(
+                user.email,
+                'SMARK-Africa seller verification blocked',
+                '<p>Your seller application has failed critical verification checks three times. The seller option is blocked unless an appeal is approved by the MVP.</p>'
+            )
+    return count
 
 
 def product_search_score(product, query):
@@ -4057,7 +4263,8 @@ def own_kyc_security_policy():
         'Local document and face capture with no paid third-party KYC dependency.',
         'Document, selfie, phone, country, and payment-account checks are scored before seller approval.',
         'Captured KYC files are size-limited, stored under controlled upload folders, and reviewed by admins.',
-        'Manual review remains required for low scores, unclear documents, mismatched names, or suspicious repeats.',
+        'Manual admin review is required after system verification unless the MVP enables system-only KYC.',
+        'Critical manual mismatches are counted; three critical mismatches block seller applications until appeal approval.',
     ]
 
 
@@ -5697,6 +5904,8 @@ def submit_review(order_id, product_id):
 
     if order.payment_status != 'completed':
         return jsonify({'error': 'Payment not completed'}), 400
+    if not any(item.product_id == product_id for item in order.items):
+        return jsonify({'error': 'You can only review products from this completed order'}), 403
 
     existing = Review.query.filter_by(user_id=current_user.id, product_id=product_id).first()
     if existing:
@@ -5879,9 +6088,14 @@ def storefront_apply():
         return redirect(url_for('seller_apply'))
     if request.method == 'POST':
         business_name = request.form.get('business_name', '').strip()
-        categories = request.form.get('categories', '').strip()
-        if not business_name:
-            flash('Enter the business name for storefront review.', 'danger')
+        category_id = request.form.get('category_id', type=int)
+        category = Category.query.get(category_id) if category_id else None
+        physical_address = request.form.get('physical_address', '').strip()
+        landmark = request.form.get('landmark', '').strip()
+        contact_phone = normalize_mpesa_phone(request.form.get('contact_phone', current_user.phone or ''))
+        contact_email = normalize_email(request.form.get('contact_email', current_user.email or ''))
+        if not business_name or not category or not physical_address or not landmark or not contact_phone or not contact_email:
+            flash('Business name, exact address, landmark, contact details, and category are required for storefront review.', 'danger')
             return redirect(url_for('storefront_apply'))
         base_slug = re.sub(r'[^a-z0-9]+', '-', business_name.lower()).strip('-')[:160] or f'business-{current_user.id}'
         slug = base_slug
@@ -5893,7 +6107,12 @@ def storefront_apply():
             owner_id=current_user.id,
             business_name=business_name,
             slug=slug,
-            categories=categories,
+            categories=category.name,
+            category_id=category.id,
+            physical_address=physical_address,
+            landmark=landmark,
+            contact_phone=contact_phone,
+            contact_email=contact_email,
             commission_percent=10.0,
             status='pending_review',
         )
@@ -5902,7 +6121,8 @@ def storefront_apply():
         flash('Storefront application submitted for MVP approval.', 'success')
         return redirect(url_for('storefront_apply'))
     storefronts = BusinessStorefront.query.filter_by(owner_id=current_user.id).order_by(BusinessStorefront.created_at.desc()).all()
-    return render_template('storefront_apply.html', storefronts=storefronts)
+    categories = Category.query.filter_by(is_active=True).order_by(Category.name.asc()).all()
+    return render_template('storefront_apply.html', storefronts=storefronts, categories=categories)
 
 
 @app.route('/bnpl/apply/<int:product_id>', methods=['GET', 'POST'])
@@ -5930,11 +6150,15 @@ def bnpl_apply(product_id):
             risk_score=risk,
             approval_status=status,
             device_lock_code=request.form.get('device_lock_code', '').strip() or generate_bnpl_lock_code(),
+            device_imei=normalize_imei(request.form.get('device_imei', '')),
+            device_serial=request.form.get('device_serial', '').strip()[:80],
+            device_install_method=request.form.get('device_install_method', 'imei') if request.form.get('device_install_method') in {'imei', 'usb'} else 'imei',
             next_due_at=utcnow() + timedelta(days=30),
             approved_at=utcnow() if status == 'approved' else None,
         )
         db.session.add(plan)
         db.session.flush()
+        update_bnpl_device_fields(plan)
         create_bnpl_installments(plan)
         db.session.commit()
         flash(f'BNPL application submitted. Risk score {risk}; status {status}.', 'success')
@@ -5948,6 +6172,7 @@ def handle_bnpl_admin_action():
         plan = BNPLPlan.query.get_or_404(request.form.get('plan_id', type=int))
         plan.device_lock_code = request.form.get('device_lock_code', plan.device_lock_code or '').strip() or generate_bnpl_lock_code(plan)
         plan.lock_status = request.form.get('lock_status', plan.lock_status or 'unlocked')
+        update_bnpl_device_fields(plan)
         if plan.lock_status == 'unlocked':
             plan.last_reminder_at = utcnow()
         flash('BNPL device lock status updated.', 'success')
@@ -5955,6 +6180,7 @@ def handle_bnpl_admin_action():
     if action == 'bnpl_generate_code':
         plan = BNPLPlan.query.get_or_404(request.form.get('plan_id', type=int))
         plan.device_lock_code = generate_bnpl_lock_code(plan)
+        update_bnpl_device_fields(plan)
         flash('BNPL device lock code generated.', 'success')
         return True
     if action == 'create_bnpl':
@@ -5974,11 +6200,15 @@ def handle_bnpl_admin_action():
             risk_score=risk,
             approval_status=status,
             device_lock_code=request.form.get('device_lock_code', '').strip() or generate_bnpl_lock_code(),
+            device_imei=normalize_imei(request.form.get('device_imei', '')),
+            device_serial=request.form.get('device_serial', '').strip()[:80],
+            device_install_method=request.form.get('device_install_method', 'imei') if request.form.get('device_install_method') in {'imei', 'usb'} else 'imei',
             next_due_at=utcnow() + timedelta(days=30),
             approved_at=utcnow() if status == 'approved' else None,
         )
         db.session.add(plan)
         db.session.flush()
+        update_bnpl_device_fields(plan)
         create_bnpl_installments(plan)
         flash(f'BNPL plan created with risk score {risk} and status {status}.', 'success')
         return True
@@ -6017,14 +6247,122 @@ def admin_bnpl():
         if handle_bnpl_admin_action():
             db.session.commit()
         return redirect(url_for('admin_bnpl'))
+    plans = BNPLPlan.query.order_by(BNPLPlan.created_at.desc()).limit(80).all()
+    changed = False
+    for plan in plans:
+        if not plan.device_remote_payload:
+            build_bnpl_device_payload(plan)
+            changed = True
+        plan.remote_functional_code = bnpl_remote_functional_code(plan)
+    if changed:
+        db.session.commit()
     return render_template(
         'admin/bnpl.html',
-        bnpl_plans=BNPLPlan.query.order_by(BNPLPlan.created_at.desc()).limit(80).all(),
+        bnpl_plans=plans,
         bnpl_policies=BNPLProductPolicy.query.order_by(BNPLProductPolicy.updated_at.desc()).limit(80).all(),
         bnpl_installments=BNPLInstallment.query.order_by(BNPLInstallment.due_at.asc()).limit(120).all(),
         users=User.query.order_by(User.created_at.desc()).limit(120).all(),
         products=Product.query.filter_by(is_active=True, is_digital=False).order_by(Product.created_at.desc()).limit(120).all(),
     )
+
+
+@app.route('/admin/bnpl/mobile-scanner')
+@login_required
+@mvp_required
+def admin_bnpl_mobile_scanner():
+    return render_template(
+        'admin/pos_mobile_scanner.html',
+        scan_url=url_for('admin_bnpl_scan_push'),
+        paired_terminal=f'{current_user.username} BNPL IMEI capture',
+        scanner_title='BNPL IMEI Scanner',
+        scanner_help='Scan a phone IMEI barcode/QR code. The IMEI will be sent to your open BNPL console.',
+        scanner_back_url=url_for('admin_bnpl'),
+        scanner_back_label='BNPL Console',
+        scanner_back_icon='fas fa-calendar-check',
+        show_scan_mode=False,
+    )
+
+
+@app.route('/admin/bnpl/scan', methods=['POST'])
+@login_required
+@mvp_required
+@csrf.exempt
+def admin_bnpl_scan_push():
+    data = request.get_json(silent=True) or {}
+    raw = (data.get('barcode') or data.get('imei') or '').strip()
+    imei = normalize_imei(raw)
+    if len(imei) < 14:
+        return jsonify({'success': False, 'error': 'Scan did not contain a valid IMEI number.'}), 400
+    payload = {
+        'imei': imei[:15] if len(imei) >= 15 else imei,
+        'raw': raw[:120],
+        'received_at': utcnow().isoformat(),
+    }
+    Setting.set(f'bnpl_latest_imei_scan_{current_user.id}', json.dumps(payload))
+    db.session.commit()
+    return jsonify({'success': True, 'imei': payload['imei'], 'product': f'IMEI {payload["imei"]}', 'action': 'captured'})
+
+
+@app.route('/admin/bnpl/latest-scan')
+@login_required
+@mvp_required
+def admin_bnpl_latest_scan():
+    key = f'bnpl_latest_imei_scan_{current_user.id}'
+    raw = Setting.get(key, '')
+    if not raw:
+        return jsonify({'success': False})
+    Setting.set(key, '')
+    db.session.commit()
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = {'imei': normalize_imei(raw)}
+    payload['success'] = bool(payload.get('imei'))
+    return jsonify(payload)
+
+
+@app.route('/admin/bnpl/<int:plan_id>/installer.json')
+@login_required
+@mvp_required
+def admin_bnpl_installer_payload(plan_id):
+    plan = BNPLPlan.query.get_or_404(plan_id)
+    payload = build_bnpl_device_payload(plan)
+    plan.device_install_status = 'ready'
+    db.session.commit()
+    response = make_response(json.dumps(payload, indent=2))
+    response.headers['Content-Type'] = 'application/json'
+    response.headers['Content-Disposition'] = f'attachment; filename=smark-bnpl-plan-{plan.id}-installer.json'
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/bnpl/device/callback', methods=['POST'])
+@csrf.exempt
+def admin_bnpl_device_callback():
+    data = request.get_json(silent=True) or {}
+    try:
+        plan_id = int(data.get('plan_id') or 0)
+    except (TypeError, ValueError):
+        plan_id = 0
+    plan = BNPLPlan.query.get(plan_id)
+    if not plan:
+        return jsonify({'success': False, 'error': 'Unknown BNPL plan'}), 404
+    expected = bnpl_remote_functional_code(plan)
+    if data.get('remote_functional_code') != expected:
+        return jsonify({'success': False, 'error': 'Invalid remote functional code'}), 403
+    status = (data.get('install_status') or data.get('lock_status') or '').strip()[:30]
+    if status in {'installed', 'pending_install', 'ready', 'failed'}:
+        plan.device_install_status = status
+        if status == 'installed' and not plan.device_installed_at:
+            plan.device_installed_at = utcnow()
+    elif status in {'locked', 'unlocked'}:
+        plan.lock_status = status
+    if data.get('imei'):
+        plan.device_imei = normalize_imei(data.get('imei'))
+    plan.device_status_note = (data.get('note') or plan.device_status_note or '')[:500]
+    build_bnpl_device_payload(plan)
+    db.session.commit()
+    return jsonify({'success': True, 'lock_status': plan.lock_status, 'install_status': plan.device_install_status})
 
 
 # ========================================================================
@@ -6196,17 +6534,22 @@ def coins_check_in():
 import secrets
 import time as _time
 
-def _raffle_weighted_draw(raffle):
-    """
-    Provably fair weighted random draw.
-    Uses a seed derived from raffle ID + sold ticket count + server entropy
-    to produce a deterministic-yet-unpredictable winner ticket number.
-    """
-    seed_material = f"{raffle.id}-{raffle.tickets_sold}-{secrets.token_hex(16)}-{_time.time_ns()}"
-    seed_hash = hashlib.sha256(seed_material.encode()).hexdigest()
-    winning_index = int(seed_hash, 16) % raffle.tickets_sold
-    tickets = RaffleTicket.query.filter_by(raffle_id=raffle.id).order_by(RaffleTicket.ticket_number).all()
-    return tickets[winning_index] if tickets else None
+def raffle_unique_buyer_count(raffle):
+    return db.session.query(func.count(func.distinct(RaffleTicket.user_id))).filter_by(raffle_id=raffle.id).scalar() or 0
+
+
+def _raffle_top_holder_ticket(raffle):
+    leader = db.session.query(
+        RaffleTicket.user_id,
+        func.count(RaffleTicket.id).label('ticket_count'),
+        func.min(RaffleTicket.ticket_number).label('first_ticket')
+    ).filter_by(raffle_id=raffle.id).group_by(RaffleTicket.user_id).order_by(
+        func.count(RaffleTicket.id).desc(),
+        func.min(RaffleTicket.ticket_number).asc()
+    ).first()
+    if not leader:
+        return None
+    return RaffleTicket.query.filter_by(raffle_id=raffle.id, user_id=leader.user_id).order_by(RaffleTicket.ticket_number.asc()).first()
 
 
 @app.route('/raffles')
@@ -6228,8 +6571,10 @@ def raffle_detail(raffle_id):
     user_tickets = []
     if current_user.is_authenticated:
         user_tickets = RaffleTicket.query.filter_by(raffle_id=raffle_id, user_id=current_user.id).all()
-    progress_pct = (raffle.tickets_sold / raffle.total_tickets * 100) if raffle.total_tickets else 0
-    return render_template('raffle_detail.html', raffle=raffle, user_tickets=user_tickets, progress_pct=progress_pct)
+    participants = raffle_unique_buyer_count(raffle)
+    minimum = raffle.min_participants or raffle.total_tickets or 100
+    progress_pct = (participants / minimum * 100) if minimum else 0
+    return render_template('raffle_detail.html', raffle=raffle, user_tickets=user_tickets, progress_pct=progress_pct, participants=participants)
 
 
 @app.route('/raffle/<int:raffle_id>/buy', methods=['POST'])
@@ -6246,11 +6591,6 @@ def raffle_buy_ticket(raffle_id):
         flash('You can buy between 1 and 50 tickets at a time.', 'warning')
         return redirect(url_for('raffle_detail', raffle_id=raffle_id))
 
-    remaining = raffle.total_tickets - raffle.tickets_sold
-    if qty > remaining:
-        flash(f'Only {remaining} tickets remain.', 'warning')
-        return redirect(url_for('raffle_detail', raffle_id=raffle_id))
-
     for i in range(qty):
         raffle.tickets_sold += 1
         ticket = RaffleTicket(
@@ -6263,8 +6603,7 @@ def raffle_buy_ticket(raffle_id):
     db.session.commit()
     flash(f'Successfully purchased {qty} ticket(s) for "{raffle.title}"!', 'success')
 
-    # Auto-draw if all tickets sold
-    if raffle.tickets_sold >= raffle.total_tickets:
+    if raffle_unique_buyer_count(raffle) >= (raffle.min_participants or raffle.total_tickets or 100) or utcnow() >= raffle.ends_at:
         raffle.status = 'drawing'
         db.session.commit()
         _execute_raffle_draw(raffle)
@@ -6273,7 +6612,7 @@ def raffle_buy_ticket(raffle_id):
 
 
 def _execute_raffle_draw(raffle):
-    winning_ticket = _raffle_weighted_draw(raffle)
+    winning_ticket = _raffle_top_holder_ticket(raffle)
     if winning_ticket:
         raffle.winner_id = winning_ticket.user_id
         raffle.winner_ticket_number = winning_ticket.ticket_number
@@ -6281,10 +6620,10 @@ def _execute_raffle_draw(raffle):
         raffle.status = 'completed'
         db.session.commit()
 
-        # Record financials: seller gets product price, platform keeps the margin
         total_revenue = raffle.tickets_sold * raffle.ticket_price
-        seller_payout = raffle.product_value
-        platform_profit = total_revenue - seller_payout
+        fee_pct = raffle.client_product_fee_pct or 25.0
+        platform_profit = round(total_revenue * fee_pct / 100, 2)
+        seller_payout = max(0, total_revenue - platform_profit)
 
         # Record seller payout transaction (platform buys product at full price)
         db.session.add(Transaction(
@@ -6304,14 +6643,14 @@ def _execute_raffle_draw(raffle):
                 type='raffle_platform_commission',
                 amount=platform_profit,
                 commission_amount=platform_profit,
-                description=f'Platform profit from raffle: {raffle.title} ({raffle.tickets_sold} tickets x KSh {raffle.ticket_price})',
+                description=f'Platform raffle fee from {raffle.title} ({fee_pct:.0f}% of ticket revenue)',
                 status='completed',
             ))
 
         notif = CustomerNotification(
             user_id=winning_ticket.user_id,
             title='You Won a Raffle!',
-            body=f'Congratulations! Your ticket #{winning_ticket.ticket_number} won "{raffle.title}". '
+            body=f'Congratulations! You held the most tickets; ticket #{winning_ticket.ticket_number} won "{raffle.title}". '
                  f'The product worth KSh {raffle.product_value:,.0f} is yours!',
             notification_type='raffle_win',
         )
@@ -6330,10 +6669,8 @@ def admin_raffles():
             product = Product.query.get(product_id) if product_id else None
             product_value = request.form.get('product_value', type=float) or (product.selling_price if product else 0)
             ticket_price = request.form.get('ticket_price', type=float, default=10.0)
-            # Platform margin: sell more tickets than the product costs so platform profits
-            platform_margin_pct = float(Setting.get('raffle_platform_margin_pct', '20') or 20)
             base_tickets = int(product_value / ticket_price) if ticket_price > 0 else 100
-            total_tickets = request.form.get('total_tickets', type=int) or int(base_tickets * (1 + platform_margin_pct / 100))
+            min_participants = request.form.get('min_participants', type=int) or max(100, base_tickets)
             ends_days = request.form.get('duration_days', 7, type=int)
 
             raffle = Raffle(
@@ -6343,12 +6680,14 @@ def admin_raffles():
                 description=request.form.get('description', ''),
                 product_value=product_value,
                 ticket_price=ticket_price,
-                total_tickets=total_tickets,
+                total_tickets=min_participants,
+                min_participants=min_participants,
+                client_product_fee_pct=25.0,
                 ends_at=datetime.utcnow() + timedelta(days=ends_days),
             )
             db.session.add(raffle)
             db.session.commit()
-            flash(f'Raffle "{raffle.title}" created with {total_tickets} tickets at KSh {ticket_price} each.', 'success')
+            flash(f'Raffle "{raffle.title}" created with minimum {min_participants} unique participants at KSh {ticket_price} per ticket.', 'success')
 
         elif action == 'draw':
             raffle_id = request.form.get('raffle_id', type=int)
@@ -6366,6 +6705,14 @@ def admin_raffles():
                 raffle.status = 'cancelled'
                 db.session.commit()
                 flash('Raffle cancelled.', 'info')
+        elif action == 'extend':
+            raffle_id = request.form.get('raffle_id', type=int)
+            raffle = Raffle.query.get(raffle_id)
+            extra_days = max(1, request.form.get('extra_days', type=int) or 1)
+            if raffle and raffle.status == 'active':
+                raffle.ends_at = max(raffle.ends_at, utcnow()) + timedelta(days=extra_days)
+                db.session.commit()
+                flash(f'Raffle extended by {extra_days} day(s).', 'success')
 
         return redirect(url_for('admin_raffles'))
 
@@ -6583,6 +6930,19 @@ def admin_intelligent_architecture():
             storefront.verification_notes = request.form.get('verification_notes', storefront.verification_notes or '').strip()
             if storefront.status == 'approved' and not storefront.approved_at:
                 storefront.approved_at = utcnow()
+            if storefront.owner:
+                create_customer_notification(
+                    storefront.owner.id,
+                    f'Storefront review: {storefront.status.replace("_", " ").title()}',
+                    storefront.verification_notes or f'Your storefront application for {storefront.business_name} was updated.',
+                    'storefront'
+                )
+                if storefront.owner.email:
+                    send_email(
+                        storefront.owner.email,
+                        'SMARK-Africa storefront application update',
+                        f'<p>Your storefront application for <strong>{html.escape(storefront.business_name)}</strong> is now <strong>{html.escape(storefront.status)}</strong>.</p><p>{html.escape(storefront.verification_notes or "")}</p>'
+                    )
             flash('Storefront review updated.', 'success')
         elif action == 'loyalty_points':
             user = User.query.get_or_404(request.form.get('user_id', type=int))
@@ -6601,6 +6961,26 @@ def admin_intelligent_architecture():
             if ticket.status == 'resolved':
                 ticket.resolved_at = utcnow()
             flash('Support ticket updated.', 'success')
+        elif action == 'assign_task':
+            if current_user.admin_level not in ['mvp', 'super_admin']:
+                flash('Only MVP and super admins can assign critical tasks.', 'danger')
+                return redirect(url_for('admin_intelligent_architecture'))
+            task = AutomationTask.query.get(request.form.get('task_id', type=int))
+            if not task:
+                task = AutomationTask(name=request.form.get('task_name', 'Admin task').strip()[:160] or 'Admin task')
+                db.session.add(task)
+            assignee = User.query.get(request.form.get('assigned_to_id', type=int))
+            if assignee and assignee.is_admin and (current_user.admin_level == 'mvp' or assignee.admin_level != 'mvp'):
+                task.assigned_to_id = assignee.id
+                task.assigned_by_id = current_user.id
+                task.priority = request.form.get('priority', 'normal')
+                task.task_type = request.form.get('task_type', task.task_type or 'admin_action')
+                task.cadence = request.form.get('cadence', task.cadence or 'once')
+                task.last_result = request.form.get('task_note', task.last_result or '').strip()
+                task.is_active = True
+                flash('Admin task assigned.', 'success')
+            else:
+                flash('Choose a valid admin. Super admins cannot assign tasks to the MVP.', 'danger')
         db.session.commit()
         return redirect(url_for('admin_intelligent_architecture'))
 
@@ -6619,6 +6999,7 @@ def admin_intelligent_architecture():
         trust_scores=TrustScore.query.order_by(TrustScore.updated_at.desc()).limit(20).all(),
         loyalty_rows=LoyaltyLedger.query.order_by(LoyaltyLedger.created_at.desc()).limit(20).all(),
         users=User.query.order_by(User.created_at.desc()).limit(80).all(),
+        admins=User.query.filter_by(is_admin=True, is_active=True).order_by(User.admin_level.desc(), User.username.asc()).all(),
         products=Product.query.filter_by(is_active=True).order_by(Product.created_at.desc()).limit(80).all(),
         tasks=AutomationTask.query.order_by(AutomationTask.efficiency_score.desc()).limit(20).all(),
     )
@@ -6730,6 +7111,11 @@ def admin_market_news():
                 Setting.set('market_news_generation_lock', '0')
                 app.logger.exception('Market news generation failed: %s', exc)
                 flash('Market news generation hit a database lock. Try again in a moment; production should use Postgres/MySQL for real traffic.', 'warning')
+            except Exception as exc:
+                db.session.rollback()
+                Setting.set('market_news_generation_lock', '0')
+                app.logger.exception('Market news generation failed: %s', exc)
+                flash('Market news refresh failed for one source, but the admin page remains available. Check server logs for details.', 'warning')
         elif action == 'send_followers':
             sent = send_category_follow_updates()
             alerts = notify_price_alerts()
@@ -6737,7 +7123,18 @@ def admin_market_news():
             flash(f'Sent {sent} category follower update email(s), {alerts} price alert email(s), and {stock_sent} stock warning email(s).', 'success')
         return redirect(url_for('admin_market_news'))
 
-    generate_market_news_if_due()
+    try:
+        generate_market_news_if_due()
+    except OperationalError as exc:
+        db.session.rollback()
+        Setting.set('market_news_generation_lock', '0')
+        app.logger.exception('Market news auto-generation failed: %s', exc)
+        flash('Market news auto-refresh hit a database lock. Existing news is still shown.', 'warning')
+    except Exception as exc:
+        db.session.rollback()
+        Setting.set('market_news_generation_lock', '0')
+        app.logger.exception('Market news auto-generation failed: %s', exc)
+        flash('Market news auto-refresh failed for one source. Existing news is still shown.', 'warning')
     news = MarketNews.query.filter_by(is_cleared=False).order_by(MarketNews.created_at.desc()).limit(100).all()
     news_cards = []
     news_seed = int(utcnow().timestamp() // 3600)
@@ -6767,6 +7164,12 @@ def admin_product_trends():
         Setting.set('market_news_generation_lock', '0')
         db.session.commit()
         flash('News generation hit a database lock. Try again in a moment.', 'warning')
+    except Exception as exc:
+        db.session.rollback()
+        Setting.set('market_news_generation_lock', '0')
+        db.session.commit()
+        app.logger.exception('News generation failed: %s', exc)
+        flash('News refresh could not complete, but the page is still available. Check server logs for the failed market source.', 'warning')
     trend_seed = int(utcnow().timestamp()) if manual_refresh else int(utcnow().timestamp() // 3600)
     news_items = MarketNews.query.filter(
         MarketNews.is_cleared == False
@@ -7571,7 +7974,10 @@ def admin_pos():
             product_id = request.form.get('po_product_id', type=int)
             quantity = max(1, request.form.get('po_quantity', type=int) or 1)
             unit_cost = max(0, request.form.get('po_unit_cost', type=float) or 0)
-            product = Product.query.get_or_404(product_id)
+            product = product_from_pos_choice(product_id, request.form.get('po_product_lookup', ''))
+            if not product:
+                flash('Choose or type a valid product for the purchase order.', 'danger')
+                return redirect(url_for('admin_pos'))
             po = PurchaseOrder(
                 supplier_id=supplier_id,
                 status='ordered',
@@ -7592,7 +7998,10 @@ def admin_pos():
             return redirect(url_for('admin_pos'))
         if action == 'receive_stock':
             product_id = request.form.get('receive_product_id', type=int)
-            product = Product.query.get_or_404(product_id)
+            product = product_from_pos_choice(product_id, request.form.get('receive_product_lookup', ''))
+            if not product:
+                flash('Choose or type a valid product to receive stock.', 'danger')
+                return redirect(url_for('admin_pos'))
             quantity = max(1, request.form.get('receive_quantity', type=int) or 1)
             record_stock_movement(product, 'goods_received', quantity, 'pos_receive', None, request.form.get('receive_note', '').strip())
             db.session.commit()
@@ -7602,16 +8011,17 @@ def admin_pos():
             supplier_id = request.form.get('bulk_supplier_id', type=int)
             received_at = request.form.get('received_at', '').strip()
             created = 0
-            for product_id, qty_raw, cost_raw in zip(
+            for product_id, typed_raw, qty_raw, cost_raw in zip(
                     request.form.getlist('bulk_product_id'),
+                    request.form.getlist('bulk_product_lookup'),
                     request.form.getlist('bulk_quantity'),
                     request.form.getlist('bulk_unit_cost')):
-                if not product_id:
+                if not product_id and not typed_raw:
                     continue
                 quantity = max(0, int(qty_raw or 0))
                 if quantity <= 0:
                     continue
-                product = Product.query.get(int(product_id))
+                product = product_from_pos_choice(product_id, typed_raw)
                 if not product:
                     continue
                 unit_cost = max(0, float(cost_raw or 0))
@@ -7627,7 +8037,10 @@ def admin_pos():
             return redirect(url_for('admin_pos'))
         if action == 'reconcile_stock':
             product_id = request.form.get('reconcile_product_id', type=int)
-            product = Product.query.get_or_404(product_id)
+            product = product_from_pos_choice(product_id, request.form.get('reconcile_product_lookup', ''))
+            if not product:
+                flash('Choose or type a valid product to reconcile.', 'danger')
+                return redirect(url_for('admin_pos'))
             counted = max(0, request.form.get('counted_stock', type=int) or 0)
             delta = counted - int(product.stock or 0)
             record_stock_movement(product, 'stock_reconciliation', delta, 'pos_reconcile', None, request.form.get('reconcile_note', '').strip())
@@ -7636,7 +8049,10 @@ def admin_pos():
             return redirect(url_for('admin_pos'))
         if action == 'dispatch_stock':
             product_id = request.form.get('dispatch_product_id', type=int)
-            product = Product.query.get_or_404(product_id)
+            product = product_from_pos_choice(product_id, request.form.get('dispatch_product_lookup', ''))
+            if not product:
+                flash('Choose or type a valid product to dispatch.', 'danger')
+                return redirect(url_for('admin_pos'))
             quantity = max(1, request.form.get('dispatch_quantity', type=int) or 1)
             if (product.stock or 0) < quantity:
                 flash(f'Insufficient stock to dispatch {product.name}.', 'danger')
@@ -8261,17 +8677,17 @@ def admin_add_product():
         description = request.form.get('description', '')
         short_description = request.form.get('short_description', '')[:300]
         category_id = request.form.get('category_id', type=int)
-        buying_price = float(request.form.get('buying_price', 0))
-        selling_price = float(request.form.get('selling_price', 0))
+        buying_price = form_float('buying_price', 0, minimum=0)
+        selling_price = form_float('selling_price', 0, minimum=0)
         is_digital = request.form.get('is_digital') in ['1', 'on', 'true']
-        stock = int(request.form.get('stock', 0))
-        weight_kg = float(request.form.get('weight_kg', 0))
+        stock = form_int('stock', 0, minimum=0)
+        weight_kg = form_float('weight_kg', 0, minimum=0)
         is_active = request.form.get('is_active') in ['1', 'on', 'true']
         is_featured = request.form.get('is_featured') in ['1', 'on', 'true']
         product_condition = request.form.get('product_condition', 'new')
         sale_mode = request.form.get('sale_mode', 'direct')
-        bid_price = float(request.form.get('bid_price', 0) or 0)
-        commission_percent = max(10.0, min(15.0, float(request.form.get('commission_percent', 15) or 15)))
+        bid_price = form_float('bid_price', 0, minimum=0)
+        commission_percent = form_float('commission_percent', 15, minimum=10.0, maximum=15.0)
         admin_priority = request.form.get('admin_priority') in ['1', 'on', 'true']
         is_hot_sale = request.form.get('is_hot_sale') in ['1', 'on', 'true']
         is_original_source = current_user.is_admin and request.form.get('is_original_source') in ['1', 'on', 'true']
@@ -8281,13 +8697,7 @@ def admin_add_product():
             flash('Product name and valid prices are required.', 'danger')
             return render_template('admin/add_product.html', categories=categories)
 
-        slug = name.lower().replace(' ', '-').replace('/', '-')[:200]
-        # Ensure unique slug
-        base_slug = slug
-        counter = 1
-        while Product.query.filter_by(slug=slug).first():
-            slug = f"{base_slug}-{counter}"
-            counter += 1
+        slug = unique_product_slug(name)
 
         product = Product(
             name=name, slug=slug, description=description,
@@ -8301,14 +8711,18 @@ def admin_add_product():
             is_hot_sale=is_hot_sale, hot_sale_started_at=utcnow() if is_hot_sale else None,
             is_original_source=is_original_source
         )
-        price_reference = market_price_reference(name, category_id, selling_price, buying_price, description=description)
-        if price_reference['status'] != 'ok':
-            flash(
-                f"Market price warning for {price_reference['label']}: {price_reference['message']} "
-                f"Kenya range KSh {price_reference['kenya_low']:,.2f} - KSh {price_reference['kenya_high']:,.2f}; "
-                f"manufacturer estimate KSh {price_reference['manufacturer_price']:,.2f}.",
-                'warning'
-            )
+        try:
+            price_reference = market_price_reference(name, category_id, selling_price, buying_price, description=description)
+            if price_reference['status'] != 'ok':
+                flash(
+                    f"Market price warning for {price_reference['label']}: {price_reference['message']} "
+                    f"Kenya range KSh {price_reference['kenya_low']:,.2f} - KSh {price_reference['kenya_high']:,.2f}; "
+                    f"manufacturer estimate KSh {price_reference['manufacturer_price']:,.2f}.",
+                    'warning'
+                )
+        except Exception as exc:
+            app.logger.warning('Product market price advisory skipped during create: %s', exc)
+            flash('Product details are valid. Market price advisory could not refresh for this item right now.', 'warning')
         if product.sale_mode == 'bid' and product.bid_price < (product.selling_price * 0.75):
             flash('Bid price cannot be below three quarters of the direct sale price.', 'danger')
             return render_template('admin/add_product.html', categories=categories, product=None)
@@ -8771,6 +9185,42 @@ def admin_make_admin(uid):
     return redirect(url_for('admin_users'))
 
 
+@app.route('/admin/users/super-admin/<int:uid>', methods=['POST'])
+@login_required
+@mvp_required
+@limiter.limit("10 per hour")
+def admin_toggle_super_admin(uid):
+    user = User.query.get_or_404(uid)
+    if user.id == current_user.id:
+        flash('The MVP account already has the highest role.', 'warning')
+        return redirect(url_for('admin_users'))
+    if user.admin_level == 'super_admin':
+        user.admin_level = 'admin'
+        user.is_admin = True
+        message = f'{user.username} is now a normal admin.'
+    else:
+        user.is_admin = True
+        user.admin_level = 'super_admin'
+        message = f'{user.username} is now a super admin.'
+    db.session.commit()
+    flash(message, 'success')
+    return redirect(url_for('admin_users'))
+
+
+@app.route('/admin/users/<int:uid>/seller-rating', methods=['POST'])
+@login_required
+@admin_required
+def admin_update_seller_rating(uid):
+    user = User.query.get_or_404(uid)
+    user.seller_rating = form_float('seller_rating', user.seller_rating or 0, minimum=0, maximum=5)
+    user.seller_rating_notes = request.form.get('seller_rating_notes', '').strip()
+    user.verified_seller_badge_enabled = form_bool('verified_seller_badge_enabled')
+    invalidate_product_cache()
+    db.session.commit()
+    flash('Seller rating and badge privilege updated.', 'success')
+    return redirect(url_for('admin_users'))
+
+
 @app.route('/admin/users/reset-password/<int:uid>', methods=['GET', 'POST'])
 @login_required
 @mvp_required
@@ -8817,6 +9267,8 @@ def admin_toggle_verified_seller(uid):
     user.is_verified_seller = not bool(user.is_verified_seller)
     user.seller_status = 'verified' if user.is_verified_seller else (user.seller_status or 'buyer')
     user.verified_seller_at = utcnow() if user.is_verified_seller else None
+    if user.is_verified_seller:
+        user.verified_seller_badge_enabled = True
     db.session.commit()
 
     log_admin_action('user_toggle_verified_seller', 'user', uid, {
@@ -9096,7 +9548,15 @@ def seller_apply():
         phone = request.form.get('phone', current_user.phone or '').strip()
         document_type = request.form.get('document_type', 'id')
         bank_card_last4 = request.form.get('bank_card_last4', '').strip()[-4:]
+        liveness_passed = request.form.get('liveness_passed') == '1'
         phone = normalize_mpesa_phone(phone)
+        account_name = f'{current_user.first_name or ""} {current_user.last_name or ""}'.strip()
+        if account_name and legal_name.lower() != account_name.lower():
+            flash('Legal names must match the registered account names exactly before KYC can proceed.', 'danger')
+            return redirect(url_for('seller_apply'))
+        if not liveness_passed:
+            flash('Complete the guided face liveness capture before submitting.', 'danger')
+            return redirect(url_for('seller_apply'))
 
         blacklist_match = matching_seller_blacklist(legal_name, country, phone, bank_card_last4)
         if blacklist_match:
@@ -9164,6 +9624,11 @@ def seller_apply():
         else:
             liveness_score = score
 
+        system_status = status
+        if system_status == 'approved' and not kyc_system_only_enabled():
+            status = 'manual_review'
+            notes += ' System checks passed, but manual admin review is required before seller approval.'
+
         verification = SellerVerification(
             user_id=current_user.id,
             document_type=document_type,
@@ -9199,6 +9664,9 @@ def seller_apply():
         current_user.verification_status = status
         current_user.verification_notes = notes
         current_user.seller_status = 'verified' if status == 'approved' else 'pending'
+        current_user.is_verified_seller = status == 'approved'
+        if current_user.is_verified_seller:
+            current_user.verified_seller_at = utcnow()
         db.session.add(verification)
         db.session.commit()
         flash('Seller application submitted. Approved applications can list products; manual reviews remain pending.', 'success')
@@ -9484,10 +9952,38 @@ def admin_resolve_claim(claim_id):
 def admin_update_verification(verification_id, status):
     verification = SellerVerification.query.get_or_404(verification_id)
     status = 'approved' if status == 'approve' else 'rejected'
+    review_note = request.form.get('review_note', '').strip()
+    critical = request.form.get('critical_mismatch') == '1'
+    backup_seller_verification(verification)
     verification.status = status
     verification.reviewed_at = utcnow()
     verification.user.seller_status = 'verified' if status == 'approved' else 'rejected'
     verification.user.verification_status = status
+    verification.user.is_verified_seller = status == 'approved'
+    verification.user.verified_seller_at = utcnow() if status == 'approved' else None
+    verification.notes = f"{verification.notes or ''}\nManual review: {review_note or status}.".strip()
+    kyc = KYCIdentityVerification.query.filter_by(document_fingerprint=verification.document_fingerprint).first() if verification.document_fingerprint else None
+    if kyc:
+        kyc.status = status
+        kyc.reviewed_by = current_user.id
+        kyc.reviewed_at = utcnow()
+        kyc.notes = f"{kyc.notes or ''}\nManual review: {review_note or status}.".strip()
+    if status == 'rejected':
+        if critical:
+            increment_seller_critical_mismatch(verification.user, review_note or 'Critical manual review mismatch')
+        if verification.user.email:
+            send_email(
+                verification.user.email,
+                'SMARK-Africa seller application manual review',
+                '<p>Your seller application did not pass manual review. You may submit a corrected application unless your account has been blocked after repeated critical mismatches.</p>'
+            )
+    remove_uploaded_file_url(verification.document_path)
+    remove_uploaded_file_url(verification.selfie_path)
+    verification.document_path = ''
+    verification.selfie_path = ''
+    if kyc:
+        kyc.document_path = ''
+        kyc.selfie_path = ''
     db.session.commit()
     flash('Seller verification updated.', 'success')
     return redirect(url_for('admin_phase_two'))
@@ -9546,6 +10042,12 @@ def admin_backup_verification(verification_id):
 def admin_clear_verification(verification_id):
     verification = SellerVerification.query.get_or_404(verification_id)
     backup_seller_verification(verification)
+    remove_uploaded_file_url(verification.document_path)
+    remove_uploaded_file_url(verification.selfie_path)
+    kyc = KYCIdentityVerification.query.filter_by(document_fingerprint=verification.document_fingerprint).first() if verification.document_fingerprint else None
+    if kyc:
+        kyc.document_path = ''
+        kyc.selfie_path = ''
     verification.document_path = ''
     verification.selfie_path = ''
     verification.bank_card_last4 = ''
@@ -9840,6 +10342,56 @@ def admin_messages():
     return render_template('admin/messages.html', messages=messages, admins=admins)
 
 
+@app.route('/admin/activity-report')
+@login_required
+@mvp_required
+def admin_activity_report():
+    query = AuditLog.query
+    admin_id = request.args.get('admin_id', type=int)
+    action = request.args.get('action', '').strip()
+    start = request.args.get('start', '').strip()
+    end = request.args.get('end', '').strip()
+    if admin_id:
+        query = query.filter(AuditLog.user_id == admin_id)
+    if action:
+        query = query.filter(AuditLog.action.ilike(f'%{action}%'))
+    try:
+        if start:
+            query = query.filter(AuditLog.created_at >= datetime.strptime(start, '%Y-%m-%d'))
+        if end:
+            query = query.filter(AuditLog.created_at < datetime.strptime(end, '%Y-%m-%d') + timedelta(days=1))
+    except ValueError:
+        flash('Use YYYY-MM-DD dates for the activity report filters.', 'warning')
+    logs = query.order_by(AuditLog.created_at.desc()).limit(1000).all()
+    admins = User.query.filter_by(is_admin=True).order_by(User.username.asc()).all()
+    if request.args.get('export') == 'csv':
+        rows = [['Date', 'Admin', 'Action', 'Resource', 'Resource ID', 'IP', 'Details']]
+        for row in logs:
+            rows.append([
+                row.created_at.isoformat() if row.created_at else '',
+                row.username or '',
+                row.action or '',
+                row.resource_type or '',
+                row.resource_id or '',
+                row.ip_address or '',
+                row.details or '',
+            ])
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerows(rows)
+        response = make_response(buffer.getvalue())
+        response.headers['Content-Type'] = 'text/csv'
+        response.headers['Content-Disposition'] = 'attachment; filename=smark-admin-activity-report.csv'
+        return response
+    return render_template('admin/activity_report.html', logs=logs, admins=admins, filters={
+        'admin_id': admin_id,
+        'action': action,
+        'start': start,
+        'end': end,
+        'print': request.args.get('print') == '1',
+    })
+
+
 # --- Settings ---
 
 @app.route('/admin/settings', methods=['GET', 'POST'])
@@ -9901,6 +10453,7 @@ def admin_settings():
             'daraja_passkey': '',
             'daraja_shortcode': '174379',
             'daraja_env': 'sandbox',
+            'daraja_callback_secret': '',
             'app_base_url': '',
             'business_name': 'SMARKAFRICA',
             'mail_server': 'smtp.gmail.com',
@@ -9951,6 +10504,7 @@ def admin_settings():
             'coins_streak_bonus_7day': '25',
             'coins_event_participation': '20',
             'kyc_provider': 'inbuilt',
+            'kyc_system_only_enabled': '0',
             'sms_otp_enabled': '0',
         }
 
@@ -9958,17 +10512,25 @@ def admin_settings():
         mvp_only_keys = {
             'about_content', 'terms_content', 'user_agreement_content',
             'seller_signup_enabled', 'seller_ads_enabled', 'auto_disbursement_cadence',
-            'seller_ad_daily_price', 'seller_ad_weekly_price', 'seller_ad_monthly_price'
+            'seller_ad_daily_price', 'seller_ad_weekly_price', 'seller_ad_monthly_price',
+            'kyc_system_only_enabled'
         }
         for key, default in settings_map.items():
             if key in mvp_only_keys and not current_user_is_mvp():
                 continue
-            value = request.form.get(key, '').strip() or default
+            submitted_value = request.form.get(key)
+            value = default if submitted_value is None else submitted_value.strip()
             Setting.set(key, value)
 
         if cache:
             cache.delete('global_settings_dict')
-        flash('Settings updated successfully!', 'success')
+            cache.delete('platform_ads_list')
+            cache.delete('hot_sale_pop_product')
+        daraja_message = daraja_config_error()
+        if daraja_message:
+            flash(f'Settings saved. {daraja_message}. Daraja will activate as soon as those values are completed.', 'warning')
+        else:
+            flash('Settings saved and active. Daraja credentials are complete for the selected environment.', 'success')
         return redirect(url_for('admin_settings'))
 
     settings = {}
@@ -10755,6 +11317,9 @@ def ensure_phase_two_schema():
             ('ai_training_coins', 'ai_training_coins INTEGER DEFAULT 0'),
             ('is_verified_seller', 'is_verified_seller BOOLEAN DEFAULT 0'),
             ('verified_seller_at', 'verified_seller_at DATETIME'),
+            ('seller_rating', 'seller_rating FLOAT DEFAULT 0'),
+            ('seller_rating_notes', 'seller_rating_notes TEXT'),
+            ('verified_seller_badge_enabled', 'verified_seller_badge_enabled BOOLEAN DEFAULT 1'),
         ],
         'products': [
             ('seller_id', 'seller_id INTEGER'),
@@ -10877,6 +11442,31 @@ def ensure_phase_two_schema():
             ('status', "status VARCHAR(30) DEFAULT 'active'"),
             ('appeal_message', 'appeal_message TEXT'),
             ('reviewed_at', 'reviewed_at DATETIME'),
+        ],
+        'business_storefronts': [
+            ('category_id', 'category_id INTEGER'),
+            ('physical_address', 'physical_address VARCHAR(300)'),
+            ('landmark', 'landmark VARCHAR(180)'),
+            ('contact_phone', 'contact_phone VARCHAR(40)'),
+            ('contact_email', 'contact_email VARCHAR(160)'),
+        ],
+        'automation_tasks': [
+            ('assigned_to_id', 'assigned_to_id INTEGER'),
+            ('assigned_by_id', 'assigned_by_id INTEGER'),
+            ('priority', "priority VARCHAR(20) DEFAULT 'normal'"),
+        ],
+        'raffles': [
+            ('min_participants', 'min_participants INTEGER DEFAULT 100'),
+            ('client_product_fee_pct', 'client_product_fee_pct FLOAT DEFAULT 25'),
+        ],
+        'bnpl_plans': [
+            ('device_imei', 'device_imei VARCHAR(32)'),
+            ('device_serial', 'device_serial VARCHAR(80)'),
+            ('device_install_method', "device_install_method VARCHAR(30) DEFAULT 'imei'"),
+            ('device_install_status', "device_install_status VARCHAR(30) DEFAULT 'pending_install'"),
+            ('device_installed_at', 'device_installed_at DATETIME'),
+            ('device_remote_payload', 'device_remote_payload TEXT'),
+            ('device_status_note', 'device_status_note TEXT'),
         ],
     }
     for table, table_columns in columns.items():
@@ -11350,6 +11940,8 @@ def init_database():
         'pesapal_consumer_key': '',
         'pesapal_consumer_secret': '',
         'dpo_company_token': '',
+        'daraja_callback_secret': '',
+        'app_base_url': '',
         'site_keywords': 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products',
         'checkout_allowed_countries': 'Kenya',
         'show_country_launch_popup': '1',
@@ -11376,6 +11968,7 @@ def init_database():
         'coins_streak_bonus_7day': '25',
         'coins_event_participation': '20',
         'kyc_provider': 'inbuilt',
+        'kyc_system_only_enabled': '0',
         'sms_otp_enabled': '0',
         'affiliate_commission_percent': '5',
         'service_commission_percent': '15',

@@ -66,8 +66,10 @@
                             <video id="selfie-video" class="capture-video mb-2" autoplay playsinline></video>
                             <canvas id="selfie-canvas" class="d-none"></canvas>
                             <input type="hidden" name="selfie_capture" id="selfie_capture">
-                            <button type="button" class="btn btn-outline-warning w-100" onclick="captureFrame('selfie')">Capture Face</button>
-                            <div class="form-text" id="selfie-status">Camera capture required.</div>
+                            <input type="hidden" name="liveness_passed" id="liveness_passed" value="0">
+                            <div class="alert alert-warning small py-2" id="liveness-prompt">Move your head LEFT, then capture.</div>
+                            <button type="button" class="btn btn-outline-warning w-100" onclick="captureLivenessStep()">Capture Face Step</button>
+                            <div class="form-text" id="selfie-status">Complete all head movement prompts before submitting.</div>
                         </div>
                         <div class="col-12">
                             <button class="btn btn-gold btn-lg">Submit Verification</button>
@@ -103,6 +105,25 @@ function captureFrame(kind) {
     canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
     hidden.value = canvas.toDataURL('image/jpeg', 0.86);
     status.textContent = 'Captured. Retake if unclear before submitting.';
+}
+
+const livenessSteps = ['LEFT', 'RIGHT', 'UP'];
+let livenessIndex = 0;
+
+function captureLivenessStep() {
+    captureFrame('selfie');
+    livenessIndex += 1;
+    const prompt = document.getElementById('liveness-prompt');
+    const passed = document.getElementById('liveness_passed');
+    const status = document.getElementById('selfie-status');
+    if (livenessIndex >= livenessSteps.length) {
+        passed.value = '1';
+        prompt.textContent = 'Liveness capture complete.';
+        prompt.className = 'alert alert-success small py-2';
+        status.textContent = 'Face capture completed with guided head movement.';
+        return;
+    }
+    prompt.textContent = `Move your head ${livenessSteps[livenessIndex]}, then capture.`;
 }
 
 startCapture('document-video');

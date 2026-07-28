@@ -3,6 +3,12 @@
 
 {% block content %}
 <div class="container-fluid py-4">
+    <datalist id="pos-product-options">
+        {% for product in products %}
+        <option value="{{ product.name }}">{{ product.pos_barcode }} | KSh {{ "%.2f"|format(product.selling_price) }}</option>
+        <option value="{{ product.pos_barcode }}">{{ product.name }}</option>
+        {% endfor %}
+    </datalist>
     <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
         <div>
             <h2 class="mb-1"><i class="fas fa-cash-register me-2"></i>All-in-One Point of Sale</h2>
@@ -272,7 +278,8 @@
                     <form method="POST" class="row g-2">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                         <input type="hidden" name="action" value="receive_stock">
-                        <div class="col-6"><select name="receive_product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:45] }}</option>{% endfor %}</select></div>
+                        <div class="col-6"><select name="receive_product_id" class="form-select"><option value="">Choose product</option>{% for product in products %}<option value="{{ product.id }}">{{ product.name[:45] }}</option>{% endfor %}</select></div>
+                        <div class="col-6"><input name="receive_product_lookup" class="form-control" list="pos-product-options" placeholder="Or type product/barcode"></div>
                         <div class="col-3"><input name="receive_quantity" type="number" min="1" class="form-control" placeholder="Qty"></div>
                         <div class="col-3"><button class="btn btn-outline-success w-100">Receive</button></div>
                         <div class="col-12"><input name="receive_note" class="form-control" placeholder="Supplier invoice, batch, condition notes"></div>
@@ -291,7 +298,8 @@
                         </div>
                         {% for i in range(5) %}
                         <div class="row g-2 mb-2">
-                            <div class="col-6"><select name="bulk_product_id" class="form-select"><option value="">Product</option>{% for product in products %}<option value="{{ product.id }}">{{ product.name[:35] }}</option>{% endfor %}</select></div>
+                            <div class="col-4"><select name="bulk_product_id" class="form-select"><option value="">Product</option>{% for product in products %}<option value="{{ product.id }}">{{ product.name[:35] }}</option>{% endfor %}</select></div>
+                            <div class="col-2"><input name="bulk_product_lookup" class="form-control" list="pos-product-options" placeholder="Type"></div>
                             <div class="col-3"><input name="bulk_quantity" type="number" min="0" class="form-control" placeholder="Qty"></div>
                             <div class="col-3"><input name="bulk_unit_cost" type="number" min="0" step="0.01" class="form-control" placeholder="Cost"></div>
                         </div>
@@ -309,7 +317,8 @@
                     <form method="POST" class="row g-2 mb-3">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                         <input type="hidden" name="action" value="dispatch_stock">
-                        <div class="col-6"><select name="dispatch_product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:45] }}</option>{% endfor %}</select></div>
+                        <div class="col-6"><select name="dispatch_product_id" class="form-select"><option value="">Choose product</option>{% for product in products %}<option value="{{ product.id }}">{{ product.name[:45] }}</option>{% endfor %}</select></div>
+                        <div class="col-6"><input name="dispatch_product_lookup" class="form-control" list="pos-product-options" placeholder="Or type product/barcode"></div>
                         <div class="col-3"><input name="dispatch_quantity" type="number" min="1" class="form-control" placeholder="Qty"></div>
                         <div class="col-3"><button class="btn btn-outline-warning w-100">Dispatch</button></div>
                         <div class="col-12"><input name="dispatch_note" class="form-control" placeholder="Transfer, damaged goods, delivery handoff"></div>
@@ -317,7 +326,8 @@
                     <form method="POST" class="row g-2">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                         <input type="hidden" name="action" value="reconcile_stock">
-                        <div class="col-6"><select name="reconcile_product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:45] }}</option>{% endfor %}</select></div>
+                        <div class="col-6"><select name="reconcile_product_id" class="form-select"><option value="">Choose product</option>{% for product in products %}<option value="{{ product.id }}">{{ product.name[:45] }}</option>{% endfor %}</select></div>
+                        <div class="col-6"><input name="reconcile_product_lookup" class="form-control" list="pos-product-options" placeholder="Or type product/barcode"></div>
                         <div class="col-3"><input name="counted_stock" type="number" min="0" class="form-control" placeholder="Count"></div>
                         <div class="col-3"><button class="btn btn-outline-dark w-100">Reconcile</button></div>
                         <div class="col-12"><input name="reconcile_note" class="form-control" placeholder="Physical stock count notes"></div>
@@ -390,7 +400,8 @@
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                         <input type="hidden" name="action" value="purchase_order">
                         <div class="col-6"><select name="supplier_id" class="form-select">{% for supplier in suppliers %}<option value="{{ supplier.id }}">{{ supplier.name }}</option>{% endfor %}</select></div>
-                        <div class="col-6"><select name="po_product_id" class="form-select">{% for product in products %}<option value="{{ product.id }}">{{ product.name[:35] }}</option>{% endfor %}</select></div>
+                        <div class="col-6"><select name="po_product_id" class="form-select"><option value="">Choose product</option>{% for product in products %}<option value="{{ product.id }}">{{ product.name[:35] }}</option>{% endfor %}</select></div>
+                        <div class="col-12"><input name="po_product_lookup" class="form-control" list="pos-product-options" placeholder="Or type product/barcode"></div>
                         <div class="col-4"><input name="po_quantity" type="number" min="1" class="form-control" placeholder="Qty"></div>
                         <div class="col-4"><input name="po_unit_cost" type="number" min="0" step="0.01" class="form-control" placeholder="Cost"></div>
                         <div class="col-4"><button class="btn btn-outline-success w-100">Create</button></div>

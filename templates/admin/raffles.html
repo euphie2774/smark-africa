@@ -17,7 +17,7 @@
                     <th>Title</th>
                     <th>Product Value</th>
                     <th>Ticket Price</th>
-                    <th>Sold / Total</th>
+                    <th>Tickets / Minimum Users</th>
                     <th>Status</th>
                     <th>Winner</th>
                     <th>Actions</th>
@@ -30,9 +30,10 @@
                     <td>KSh {{ "%.0f"|format(raffle.product_value) }}</td>
                     <td>KSh {{ "%.0f"|format(raffle.ticket_price) }}</td>
                     <td>
-                        {{ raffle.tickets_sold }} / {{ raffle.total_tickets }}
+                        {% set buyer_count = raffle.tickets|map(attribute='user_id')|unique|list|length %}
+                        {{ raffle.tickets_sold }} tickets / {{ buyer_count }} of {{ raffle.min_participants or raffle.total_tickets }} users
                         <div class="progress mt-1" style="height:4px;">
-                            <div class="progress-bar bg-warning" style="width:{{ (raffle.tickets_sold / raffle.total_tickets * 100)|int }}%"></div>
+                            <div class="progress-bar bg-warning" style="width:{{ (buyer_count / (raffle.min_participants or raffle.total_tickets) * 100)|int if (raffle.min_participants or raffle.total_tickets) else 0 }}%"></div>
                         </div>
                     </td>
                     <td>
@@ -66,6 +67,13 @@
                             <input type="hidden" name="action" value="cancel">
                             <input type="hidden" name="raffle_id" value="{{ raffle.id }}">
                             <button class="btn btn-sm btn-danger" title="Cancel"><i class="fas fa-ban"></i></button>
+                        </form>
+                        <form method="POST" class="d-inline-flex gap-1">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="action" value="extend">
+                            <input type="hidden" name="raffle_id" value="{{ raffle.id }}">
+                            <input name="extra_days" type="number" value="7" min="1" class="form-control form-control-sm" style="width:70px">
+                            <button class="btn btn-sm btn-outline-info" title="Extend"><i class="fas fa-calendar-plus"></i></button>
                         </form>
                         {% endif %}
                         <a href="{{ url_for('raffle_detail', raffle_id=raffle.id) }}" class="btn btn-sm btn-outline-warning" title="View"><i class="fas fa-eye"></i></a>
@@ -120,6 +128,11 @@
                             <label class="form-label">Ticket Price (KSh)</label>
                             <input type="number" name="ticket_price" class="form-control bg-dark text-light border-secondary" value="10" step="1" required>
                         </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Minimum Unique Buyers</label>
+                        <input type="number" name="min_participants" class="form-control bg-dark text-light border-secondary" value="100" min="1">
+                        <small class="text-muted">Raffle can end when this many different users have bought tickets.</small>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">Duration (days)</label>

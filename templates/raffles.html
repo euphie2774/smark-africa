@@ -26,12 +26,14 @@
                     </div>
                     <p class="text-muted small mb-2">Worth <strong class="text-warning">KSh {{ "%.0f"|format(raffle.product_value) }}</strong></p>
                     <div class="mb-3">
+                        {% set buyer_count = raffle.tickets|map(attribute='user_id')|unique|list|length %}
+                        {% set minimum_buyers = raffle.min_participants or raffle.total_tickets %}
                         <div class="d-flex justify-content-between small mb-1">
-                            <span>{{ raffle.tickets_sold }}/{{ raffle.total_tickets }} tickets sold</span>
+                            <span>{{ buyer_count }}/{{ minimum_buyers }} buyers joined</span>
                             <span class="fw-bold">KSh {{ "%.0f"|format(raffle.ticket_price) }}/ticket</span>
                         </div>
                         <div class="progress" style="height:8px;">
-                            <div class="progress-bar bg-warning" style="width:{{ (raffle.tickets_sold / raffle.total_tickets * 100)|int }}%"></div>
+                            <div class="progress-bar bg-warning" style="width:{{ (buyer_count / minimum_buyers * 100)|int if minimum_buyers else 0 }}%"></div>
                         </div>
                     </div>
                     <div class="d-flex justify-content-between align-items-center">
@@ -39,14 +41,14 @@
                         <a href="{{ url_for('raffle_detail', raffle_id=raffle.id) }}" class="btn btn-sm btn-warning fw-bold">Buy Tickets</a>
                     </div>
                 </div>
-                {% set pct = (raffle.tickets_sold / raffle.total_tickets * 100)|int %}
+                {% set pct = (buyer_count / minimum_buyers * 100)|int if minimum_buyers else 0 %}
                 {% if pct >= 80 %}
                 <div class="card-footer bg-danger text-white text-center small fw-bold py-1">
-                    <i class="fas fa-fire me-1"></i>Almost sold out! Only {{ raffle.total_tickets - raffle.tickets_sold }} tickets left!
+                    <i class="fas fa-fire me-1"></i>Almost ready to end! {{ buyer_count }} buyers have joined.
                 </div>
                 {% elif pct >= 50 %}
                 <div class="card-footer bg-warning text-dark text-center small fw-bold py-1">
-                    <i class="fas fa-bolt me-1"></i>Selling fast! {{ raffle.total_tickets - raffle.tickets_sold }} tickets remaining
+                    <i class="fas fa-bolt me-1"></i>Selling fast! The highest ticket-holder wins.
                 </div>
                 {% endif %}
             </div>
@@ -119,7 +121,7 @@
     <div class="card bg-dark border-warning mb-4">
         <div class="card-body text-center">
             <h4 class="text-warning"><i class="fas fa-shield-halved me-2"></i>Fair & Transparent</h4>
-            <p class="text-muted mb-0">Our raffle system uses a cryptographically secure random algorithm. Every ticket has an equal chance of winning. Winners are drawn automatically when all tickets sell out, or at the scheduled end date.</p>
+            <p class="text-muted mb-0">Buy as many tickets as you want. A raffle can end when the minimum number of different buyers join, when an authorized admin ends it, or on the due date. The buyer holding the most tickets wins.</p>
         </div>
     </div>
 </div>

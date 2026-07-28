@@ -16,6 +16,14 @@
         <i class="fas fa-clock me-2"></i>Data is real-time. Last refreshed: <strong id="last-refresh">{{ now().strftime('%d %B %Y, %H:%M:%S') }}</strong>
         <span class="ms-3 badge bg-success"><i class="fas fa-circle me-1" style="font-size: 8px;"></i>LIVE</span>
     </div>
+    <div class="card border-0 shadow-sm mb-4 d-print-none">
+        <div class="card-body row g-2 align-items-end">
+            <div class="col-md-3"><label class="form-label">Revenue Graph</label><select class="form-select chart-type" data-chart="revenue"><option value="bar">Bar</option><option value="line">Line</option><option value="area">Area</option></select></div>
+            <div class="col-md-3"><label class="form-label">Orders Graph</label><select class="form-select chart-type" data-chart="orders"><option value="line">Line</option><option value="bar">Bar</option><option value="area">Area</option></select></div>
+            <div class="col-md-3"><label class="form-label">Users Graph</label><select class="form-select chart-type" data-chart="users"><option value="line">Line</option><option value="bar">Bar</option><option value="area">Area</option></select></div>
+            <div class="col-md-3"><label class="form-label">Category Graph</label><select class="form-select chart-type" data-chart="category"><option value="doughnut">Doughnut</option><option value="pie">Pie</option><option value="polarArea">Polar</option><option value="bar">Bar</option></select></div>
+        </div>
+    </div>
 
     <!-- Summary Cards -->
     <div class="row g-3 mb-4">
@@ -113,21 +121,32 @@
 <script>
 var analyticsData = {{ analytics | tojson }};
 var charts = {};
+var chartTypes = { revenue: 'bar', orders: 'line', users: 'line', category: 'doughnut', monthly: 'bar' };
+
+function normalizedType(key) {
+    return chartTypes[key] === 'area' ? 'line' : chartTypes[key];
+}
+
+function fillFor(key) {
+    return chartTypes[key] === 'area';
+}
 
 function renderCharts(data) {
     var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
     if (charts.revenue) charts.revenue.destroy();
     charts.revenue = new Chart(document.getElementById('revenueChart'), {
-        type: 'bar',
+        type: normalizedType('revenue'),
         data: {
             labels: data.daily_orders.map(function(d) { return d.day.slice(5); }),
             datasets: [{
                 label: 'Revenue (KSh)',
                 data: data.daily_orders.map(function(d) { return d.revenue; }),
-                backgroundColor: 'rgba(25, 135, 84, 0.7)',
+                backgroundColor: fillFor('revenue') ? 'rgba(25, 135, 84, 0.16)' : 'rgba(25, 135, 84, 0.7)',
                 borderColor: '#198754',
-                borderWidth: 1
+                borderWidth: 1,
+                fill: fillFor('revenue'),
+                tension: 0.3
             }]
         },
         options: { responsive: true, plugins: { legend: { display: false } } }
@@ -135,7 +154,7 @@ function renderCharts(data) {
 
     if (charts.orders) charts.orders.destroy();
     charts.orders = new Chart(document.getElementById('ordersChart'), {
-        type: 'line',
+        type: normalizedType('orders'),
         data: {
             labels: data.daily_orders.map(function(d) { return d.day.slice(5); }),
             datasets: [{
@@ -143,7 +162,7 @@ function renderCharts(data) {
                 data: data.daily_orders.map(function(d) { return d.count; }),
                 borderColor: '#0d6efd',
                 backgroundColor: 'rgba(13, 110, 253, 0.1)',
-                fill: true,
+                fill: fillFor('orders'),
                 tension: 0.3
             }]
         },
@@ -152,7 +171,7 @@ function renderCharts(data) {
 
     if (charts.users) charts.users.destroy();
     charts.users = new Chart(document.getElementById('usersChart'), {
-        type: 'line',
+        type: normalizedType('users'),
         data: {
             labels: data.daily_users.map(function(d) { return d.day.slice(5); }),
             datasets: [{
@@ -160,7 +179,7 @@ function renderCharts(data) {
                 data: data.daily_users.map(function(d) { return d.count; }),
                 borderColor: '#ffc107',
                 backgroundColor: 'rgba(255, 193, 7, 0.1)',
-                fill: true,
+                fill: fillFor('users'),
                 tension: 0.3
             }]
         },
@@ -169,7 +188,7 @@ function renderCharts(data) {
 
     if (charts.category) charts.category.destroy();
     charts.category = new Chart(document.getElementById('categoryChart'), {
-        type: 'doughnut',
+        type: normalizedType('category'),
         data: {
             labels: data.category_sales.map(function(d) { return d.name; }),
             datasets: [{
@@ -198,6 +217,14 @@ function renderCharts(data) {
 }
 
 renderCharts(analyticsData);
+
+document.querySelectorAll('.chart-type').forEach(function(select) {
+    chartTypes[select.dataset.chart] = select.value;
+    select.addEventListener('change', function() {
+        chartTypes[this.dataset.chart] = this.value;
+        renderCharts(analyticsData);
+    });
+});
 
 function refreshData() {
     fetch('{{ url_for("admin_analytics_realtime_api") }}')

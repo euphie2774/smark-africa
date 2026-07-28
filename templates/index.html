@@ -36,6 +36,13 @@
 </section>
 
 <section class="container marketplace-shell mb-4">
+    <div class="market-promo">
+        <span class="promo-label">Gold Week</span>
+        <h2>Fresh finds, quick checkout, M-Pesa ready.</h2>
+        <p>Browse digital and physical products with clean prices, category filters, and fast cart actions.</p>
+        <a href="{{ url_for('shop') }}" class="btn btn-gold">Browse the store</a>
+    </div>
+
     <aside class="market-category-rail">
         <h2>Categories</h2>
         <a href="{{ url_for('shop') }}" class="market-category-link active"><i class="fas fa-border-all"></i> All Products</a>
@@ -43,13 +50,6 @@
         <a href="{{ url_for('shop', category=cat.slug) }}" class="market-category-link"><i class="fas fa-tag"></i> {{ cat.name }}</a>
         {% endfor %}
     </aside>
-
-    <div class="market-promo">
-        <span class="promo-label">Gold Week</span>
-        <h2>Fresh finds, quick checkout, M-Pesa ready.</h2>
-        <p>Browse digital and physical products with clean prices, category filters, and fast cart actions.</p>
-        <a href="{{ url_for('shop') }}" class="btn btn-gold">Browse the store</a>
-    </div>
 </section>
 
 {% if featured_products %}
@@ -74,10 +74,10 @@
                     {% if product.is_hot_sale %}
                     <strong class="hot-sale-tag">Hot Sale</strong>
                     {% elif product.discount_percent and product.discount_percent > 0 %}
-                    <strong class="deal-badge">-{{ product.discount_percent|int }}%</strong>
+                    <strong class="price-drop-tag"><small>KSh {{ "%.0f"|format(product.selling_price) }}</small>KSh {{ "%.0f"|format(product.discounted_price) }}</strong>
                     {% endif %}
                     {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
-                    {% if product.seller and product.seller.is_verified_seller %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+                    {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
                 </span>
                 <span class="hot-deal-copy">
                     <strong>{{ product.name[:44] }}</strong>
@@ -96,10 +96,10 @@
                     {% if product.is_hot_sale %}
                     <strong class="hot-sale-tag">Hot Sale</strong>
                     {% elif product.discount_percent and product.discount_percent > 0 %}
-                    <strong class="deal-badge">-{{ product.discount_percent|int }}%</strong>
+                    <strong class="price-drop-tag"><small>KSh {{ "%.0f"|format(product.selling_price) }}</small>KSh {{ "%.0f"|format(product.discounted_price) }}</strong>
                     {% endif %}
                     {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
-                    {% if product.seller and product.seller.is_verified_seller %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+                    {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
                 </span>
                 <span class="hot-deal-copy">
                     <strong>{{ product.name[:44] }}</strong>
@@ -194,10 +194,10 @@
                 {% if product.is_hot_sale %}
                 <strong class="hot-sale-tag">Hot Sale</strong>
                 {% elif product.discount_percent and product.discount_percent > 0 %}
-                <strong class="deal-badge">-{{ product.discount_percent|int }}%</strong>
+                <strong class="price-drop-tag"><small>KSh {{ "%.0f"|format(product.selling_price) }}</small>KSh {{ "%.0f"|format(product.discounted_price) }}</strong>
                 {% endif %}
                 {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
-                {% if product.seller and product.seller.is_verified_seller %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+                {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
             </a>
             <div class="product-copy">
                 <a href="{{ url_for('product_page', slug=product.slug) }}" class="product-title">{{ product.name[:70] }}</a>

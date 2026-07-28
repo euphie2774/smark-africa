@@ -119,6 +119,15 @@
                             <option value="production" {{ 'selected' if settings.daraja_env == 'production' else '' }}>Production</option>
                         </select>
                     </div>
+                    <div class="col-md-8">
+                        <label class="form-label">Public App Base URL</label>
+                        <input type="url" name="app_base_url" class="form-control" value="{{ settings.app_base_url or '' }}" placeholder="https://your-domain.com">
+                        <div class="form-text">Used immediately for Daraja callbacks after deployment. Leave blank only on a public production host that can build its own URL.</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Callback Secret</label>
+                        <input type="text" name="daraja_callback_secret" class="form-control" value="{{ settings.daraja_callback_secret or '' }}" placeholder="Optional webhook signature secret">
+                    </div>
                 </div>
             </div>
         </div>
@@ -321,14 +330,23 @@
                         <label class="form-label">Card Number Prefix</label>
                         <input name="shopping_card_prefix" class="form-control" value="{{ settings.shopping_card_prefix or '607845' }}">
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-4">
                         <label class="form-label">KYC Provider</label>
                         <select name="kyc_provider" class="form-select">
                             <option value="inbuilt" {{ 'selected' if settings.kyc_provider != 'external' }}>Inbuilt review and fingerprinting</option>
                             <option value="external" {{ 'selected' if settings.kyc_provider == 'external' }}>External provider configured separately</option>
                         </select>
                     </div>
-                    <div class="col-md-6">
+                    {% if current_user.admin_level == 'mvp' %}
+                    <div class="col-md-4">
+                        <label class="form-label">KYC Approval Mode</label>
+                        <select name="kyc_system_only_enabled" class="form-select">
+                            <option value="0" {{ 'selected' if settings.kyc_system_only_enabled != '1' }}>System + Manual Review</option>
+                            <option value="1" {{ 'selected' if settings.kyc_system_only_enabled == '1' }}>System Only</option>
+                        </select>
+                    </div>
+                    {% endif %}
+                    <div class="col-md-4">
                         <label class="form-label">SMS OTP Enabled</label>
                         <select name="sms_otp_enabled" class="form-select">
                             <option value="0" {{ 'selected' if settings.sms_otp_enabled != '1' }}>Email OTP only</option>

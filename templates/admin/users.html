@@ -67,6 +67,14 @@
                                             <i class="fas fa-crown"></i>
                                         </button>
                                     </form>
+                                    {% if user.is_admin and user.admin_level != 'mvp' %}
+                                    <form method="POST" action="{{ url_for('admin_toggle_super_admin', uid=user.id) }}" style="display:inline;">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button type="submit" class="btn btn-outline-dark" title="{{ 'Remove Super Admin' if user.admin_level == 'super_admin' else 'Make Super Admin' }}" onclick="return confirm('Change super admin role for this user?');">
+                                            <i class="fas fa-user-shield"></i>
+                                        </button>
+                                    </form>
+                                    {% endif %}
                                     <form method="POST" action="{{ url_for('admin_toggle_verified_seller', uid=user.id) }}" style="display:inline;">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                                         <button type="submit" class="btn btn-outline-success" title="Toggle Verified Seller Seal">
@@ -76,6 +84,18 @@
                                     <a href="{{ url_for('admin_reset_password', uid=user.id) }}" class="btn btn-outline-info btn-sm" title="Reset Password">
                                         <i class="fas fa-key"></i>
                                     </a>
+                                    {% endif %}
+                                    {% if user.is_verified_seller or user.seller_status in ['verified', 'pending'] %}
+                                    <form method="POST" action="{{ url_for('admin_update_seller_rating', uid=user.id) }}" class="d-flex gap-1 mt-1">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <input name="seller_rating" type="number" step="0.1" min="0" max="5" class="form-control form-control-sm" value="{{ user.seller_rating or 0 }}" title="Seller rating">
+                                        <input name="seller_rating_notes" class="form-control form-control-sm" value="{{ user.seller_rating_notes or '' }}" placeholder="Rating note">
+                                        <input type="hidden" name="verified_seller_badge_enabled" value="0">
+                                        <label class="btn btn-sm btn-outline-primary mb-0" title="Verified badge privilege">
+                                            <input type="checkbox" name="verified_seller_badge_enabled" value="1" {{ 'checked' if user.verified_seller_badge_enabled }}> Badge
+                                        </label>
+                                        <button class="btn btn-sm btn-outline-success">Save</button>
+                                    </form>
                                     {% endif %}
                                     <form method="POST" action="{{ url_for('admin_freeze_user', uid=user.id) }}" style="display:inline;">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>

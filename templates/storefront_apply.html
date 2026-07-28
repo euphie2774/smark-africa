@@ -15,8 +15,31 @@
                         <input name="business_name" class="form-control" required>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label">Categories</label>
-                        <input name="categories" class="form-control" placeholder="Electronics, Fashion, Services">
+                        <label class="form-label">Business Category</label>
+                        <select name="category_id" class="form-select" required>
+                            <option value="">Choose category</option>
+                            {% for category in categories %}
+                            <option value="{{ category.id }}">{{ category.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Precise Physical Address</label>
+                        <input name="physical_address" class="form-control" placeholder="Street, building, floor/shop number, town" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Building or Landmark</label>
+                        <input name="landmark" class="form-control" placeholder="Nearest known building or landmark" required>
+                    </div>
+                    <div class="row g-2 mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label">Contact Phone</label>
+                            <input name="contact_phone" class="form-control" value="{{ current_user.phone or '' }}" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Contact Email</label>
+                            <input name="contact_email" type="email" class="form-control" value="{{ current_user.email or '' }}" required>
+                        </div>
                     </div>
                     <button class="btn btn-gold w-100">Submit for Approval</button>
                 </div>
@@ -27,17 +50,18 @@
                 <div class="card-header bg-white"><h5 class="mb-0">My Applications</h5></div>
                 <div class="card-body p-0 table-responsive">
                     <table class="table table-hover mb-0">
-                        <thead class="table-light"><tr><th>Business</th><th>Categories</th><th>Status</th><th>Commission</th></tr></thead>
+                        <thead class="table-light"><tr><th>Business</th><th>Category</th><th>Address</th><th>Status</th><th>Commission</th></tr></thead>
                         <tbody>
                             {% for storefront in storefronts %}
                             <tr>
                                 <td>{{ storefront.business_name }}</td>
                                 <td>{{ storefront.categories }}</td>
+                                <td>{{ storefront.physical_address or '-' }}{% if storefront.landmark %}<div class="small text-muted">{{ storefront.landmark }}</div>{% endif %}</td>
                                 <td><span class="badge bg-secondary">{{ storefront.status }}</span></td>
                                 <td>{{ storefront.commission_percent }}%</td>
                             </tr>
                             {% else %}
-                            <tr><td colspan="4" class="text-center text-muted py-4">No storefront applications yet.</td></tr>
+                            <tr><td colspan="5" class="text-center text-muted py-4">No storefront applications yet.</td></tr>
                             {% endfor %}
                         </tbody>
                     </table>
@@ -47,4 +71,3 @@
     </div>
 </div>
 {% endblock %}
-

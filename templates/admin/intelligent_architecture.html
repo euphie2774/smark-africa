@@ -203,22 +203,77 @@
 
         <div class="col-12">
             <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Storefront Applications</h5></div>
+                <div class="card-body p-0 table-responsive">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead class="table-light"><tr><th>Business</th><th>Owner</th><th>Category</th><th>Address</th><th>Contact</th><th>Status</th><th>Review</th></tr></thead>
+                        <tbody>
+                            {% for storefront in storefronts %}
+                            <tr>
+                                <td>{{ storefront.business_name }}</td>
+                                <td>{{ storefront.owner.username if storefront.owner else '-' }}</td>
+                                <td>{{ storefront.categories or (storefront.category.name if storefront.category else '-') }}</td>
+                                <td>{{ storefront.physical_address or '-' }}<div class="small text-muted">{{ storefront.landmark or '' }}</div></td>
+                                <td>{{ storefront.contact_phone or '-' }}<div class="small text-muted">{{ storefront.contact_email or '' }}</div></td>
+                                <td><span class="badge bg-secondary">{{ storefront.status }}</span></td>
+                                <td>
+                                    <form method="POST" class="row g-1">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <input type="hidden" name="action" value="storefront_status">
+                                        <input type="hidden" name="storefront_id" value="{{ storefront.id }}">
+                                        <div class="col-md-4">
+                                            <select name="status" class="form-select form-select-sm">
+                                                <option value="pending_review" {{ 'selected' if storefront.status == 'pending_review' else '' }}>Pending</option>
+                                                <option value="more_details" {{ 'selected' if storefront.status == 'more_details' else '' }}>Ask More Details</option>
+                                                <option value="approved" {{ 'selected' if storefront.status == 'approved' else '' }}>Approve</option>
+                                                <option value="rejected" {{ 'selected' if storefront.status == 'rejected' else '' }}>Reject</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-6"><input name="verification_notes" class="form-control form-control-sm" value="{{ storefront.verification_notes or '' }}" placeholder="Admin note"></div>
+                                        <div class="col-md-2"><button class="btn btn-sm btn-gold w-100">Save</button></div>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr><td colspan="7" class="text-center text-muted py-4">No storefront applications yet.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
                 <div class="card-header bg-white"><h5 class="mb-0">Engine Automation Tasks</h5></div>
-                <div class="card-body row g-2">
+                <div class="card-body">
+                    {% if current_user.admin_level in ['mvp', 'super_admin'] %}
+                    <form method="POST" class="row g-2 border-bottom pb-3 mb-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="assign_task">
+                        <div class="col-md-3"><input name="task_name" class="form-control" placeholder="New task title"></div>
+                        <div class="col-md-2"><select name="assigned_to_id" class="form-select">{% for admin in admins %}<option value="{{ admin.id }}">{{ admin.username }} ({{ admin.admin_level }})</option>{% endfor %}</select></div>
+                        <div class="col-md-2"><select name="priority" class="form-select"><option value="normal">Normal</option><option value="quick_action">Quick action</option><option value="critical">Critical</option></select></div>
+                        <div class="col-md-2"><input name="task_type" class="form-control" value="admin_action"></div>
+                        <div class="col-md-3"><button class="btn btn-gold w-100">Assign New Task</button></div>
+                        <div class="col-12"><input name="task_note" class="form-control" placeholder="Task instruction or context"></div>
+                    </form>
+                    {% endif %}
+                    <div class="row g-2">
                     {% for task in tasks %}
                     <div class="col-md-6 col-xl-3">
                         <div class="border rounded p-3 h-100">
                             <div class="fw-bold">{{ task.name }}</div>
-                            <div class="small text-muted">{{ task.task_type }} - {{ task.cadence }}</div>
+                            <div class="small text-muted">{{ task.task_type }} - {{ task.cadence }} - {{ task.priority }}</div>
+                            <div class="small">Assigned to: {{ task.assignee.username if task.assignee else 'Unassigned' }}</div>
                             <div class="small mt-2">{{ task.last_result }}</div>
                         </div>
                     </div>
                     {% endfor %}
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 </div>
 {% endblock %}
-
-

@@ -25,7 +25,7 @@ class User(UserMixin, db.Model):
     password_hash = db.Column(db.String(256), nullable=False)
     phone = db.Column(db.String(20), unique=True)
     is_admin = db.Column(db.Boolean, default=False)
-    admin_level = db.Column(db.String(20), default='user')  # user, admin, mvp
+    admin_level = db.Column(db.String(20), default='user')  # user, admin, super_admin, mvp
     seller_status = db.Column(db.String(30), default='buyer')  # buyer, pending, verified, rejected, frozen
     country = db.Column(db.String(80))
     bank_card_last4 = db.Column(db.String(4))
@@ -39,6 +39,9 @@ class User(UserMixin, db.Model):
     ai_training_coins = db.Column(db.Integer, default=0)
     is_verified_seller = db.Column(db.Boolean, default=False)
     verified_seller_at = db.Column(db.DateTime)
+    seller_rating = db.Column(db.Float, default=0.0)
+    seller_rating_notes = db.Column(db.Text)
+    verified_seller_badge_enabled = db.Column(db.Boolean, default=True)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     last_login = db.Column(db.DateTime)
@@ -568,9 +571,15 @@ class AutomationTask(db.Model):
     cadence = db.Column(db.String(60), default='daily')
     efficiency_score = db.Column(db.Float, default=0.0)
     last_result = db.Column(db.Text)
+    assigned_to_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    assigned_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    priority = db.Column(db.String(20), default='normal')
     is_active = db.Column(db.Boolean, default=True)
     last_run_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    assignee = db.relationship('User', foreign_keys=[assigned_to_id], lazy=True)
+    assigner = db.relationship('User', foreign_keys=[assigned_by_id], lazy=True)
 
 
 class PointOfSaleSale(db.Model):
@@ -699,6 +708,11 @@ class BusinessStorefront(db.Model):
     business_name = db.Column(db.String(180), nullable=False)
     slug = db.Column(db.String(180), unique=True, nullable=False)
     categories = db.Column(db.String(500))
+    category_id = db.Column(db.Integer, db.ForeignKey('categories.id'), nullable=True)
+    physical_address = db.Column(db.String(300))
+    landmark = db.Column(db.String(180))
+    contact_phone = db.Column(db.String(40))
+    contact_email = db.Column(db.String(160))
     commission_percent = db.Column(db.Float, default=10.0)
     status = db.Column(db.String(30), default='pending_review')
     verification_notes = db.Column(db.Text)
@@ -706,6 +720,7 @@ class BusinessStorefront(db.Model):
     approved_at = db.Column(db.DateTime)
 
     owner = db.relationship('User', lazy=True)
+    category = db.relationship('Category', lazy=True)
 
 
 class ExchangeRate(db.Model):
@@ -768,6 +783,13 @@ class BNPLPlan(db.Model):
     risk_score = db.Column(db.Float, default=0.0)
     approval_status = db.Column(db.String(30), default='manual_review')
     device_lock_code = db.Column(db.String(120))
+    device_imei = db.Column(db.String(32))
+    device_serial = db.Column(db.String(80))
+    device_install_method = db.Column(db.String(30), default='imei')
+    device_install_status = db.Column(db.String(30), default='pending_install')
+    device_installed_at = db.Column(db.DateTime)
+    device_remote_payload = db.Column(db.Text)
+    device_status_note = db.Column(db.Text)
     lock_status = db.Column(db.String(30), default='unlocked')
     next_due_at = db.Column(db.DateTime)
     last_reminder_at = db.Column(db.DateTime)
@@ -1149,6 +1171,8 @@ class Raffle(db.Model):
     product_value = db.Column(db.Float, nullable=False)
     ticket_price = db.Column(db.Float, nullable=False)
     total_tickets = db.Column(db.Integer, nullable=False)
+    min_participants = db.Column(db.Integer, default=100)
+    client_product_fee_pct = db.Column(db.Float, default=25.0)
     tickets_sold = db.Column(db.Integer, default=0)
     status = db.Column(db.String(30), default='active')  # active, sold_out, drawing, completed, cancelled
     winner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)

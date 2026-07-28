@@ -8,7 +8,15 @@
             <h2 class="mb-1"><i class="fas fa-calendar-check me-2"></i>Buy Now, Pay Later Console</h2>
             <div class="small text-muted">MVP-approved products, deposits, short terms, repayment tracking, reminders, and transparent remote functional lock control.</div>
         </div>
-        <a href="{{ url_for('admin_intelligent_architecture') }}" class="btn btn-outline-warning"><i class="fas fa-network-wired me-1"></i> Architecture Hub</a>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="{{ url_for('admin_bnpl_mobile_scanner') }}" class="btn btn-gold" target="_blank" rel="noopener"><i class="fas fa-mobile-screen-button me-1"></i> Use Phone Scanner</a>
+            <a href="{{ url_for('admin_intelligent_architecture') }}" class="btn btn-outline-warning"><i class="fas fa-network-wired me-1"></i> Architecture Hub</a>
+        </div>
+    </div>
+
+    <div class="alert alert-info d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <span><i class="fas fa-barcode me-1"></i> BNPL IMEI scanner is <strong id="bnpl-scan-status">listening</strong>. Click any IMEI field before scanning to fill that exact row.</span>
+        <a href="{{ url_for('admin_bnpl_mobile_scanner') }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-primary">Open Scanner</a>
     </div>
 
     <div class="row g-3 mb-4">
@@ -60,10 +68,18 @@
                         <div class="col-md-2"><input name="deposit_percent" type="number" min="10" max="20" class="form-control" placeholder="15%"></div>
                         <div class="col-md-2"><input name="term_months" type="number" min="1" max="6" class="form-control" placeholder="3 mo"></div>
                         <div class="col-md-2"><button class="btn btn-gold w-100">Create</button></div>
-                        <div class="col-12"><input name="device_lock_code" class="form-control" placeholder="Remote functional lock code installed on financed device"></div>
+                        <div class="col-md-4">
+                            <select name="device_install_method" class="form-select">
+                                <option value="imei">Install by IMEI</option>
+                                <option value="usb">Install by USB cable</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4"><input name="device_imei" class="form-control bnpl-imei-input" inputmode="numeric" placeholder="Device IMEI"></div>
+                        <div class="col-md-4"><input name="device_serial" class="form-control" placeholder="Serial / asset tag"></div>
+                        <div class="col-12"><input name="device_lock_code" class="form-control" placeholder="Remote lock code auto-generates if blank"></div>
                     </form>
                 </div>
-                <div class="alert alert-warning rounded-0 mb-0 small">No location tracking is used. Overdue devices can be switched to calls/SMS-only plus payment reminder screen, then unlocked when payment clears.</div>
+                <div class="alert alert-warning rounded-0 mb-0 small">No location tracking is used. The generated installer payload binds the BNPL plan to the IMEI/serial and can be copied by USB or entered into the device agent manually.</div>
             </div>
         </div>
     </div>
@@ -72,7 +88,7 @@
         <div class="card-header bg-white"><h5 class="mb-0">Plans and Device Lock</h5></div>
         <div class="table-responsive">
             <table class="table table-hover mb-0 align-middle">
-                <thead class="table-light"><tr><th>User</th><th>Product</th><th>Amount</th><th>Risk</th><th>Approval</th><th>Lock</th><th>Next Due</th><th></th></tr></thead>
+                <thead class="table-light"><tr><th>User</th><th>Product</th><th>Amount</th><th>Risk</th><th>Approval</th><th>Device</th><th>Lock</th><th>Next Due</th><th></th></tr></thead>
                 <tbody>
                 {% for plan in bnpl_plans %}
                 <tr>
@@ -85,17 +101,28 @@
                         <td>KSh {{ "%.2f"|format(plan.principal_amount) }}<div class="small text-muted">{{ plan.deposit_percent }}% deposit / {{ plan.term_months }} mo</div></td>
                         <td>{{ plan.risk_score }}</td>
                         <td><span class="badge bg-{{ 'success' if plan.approval_status == 'approved' else 'warning text-dark' }}">{{ plan.approval_status|replace('_', ' ') }}</span></td>
-                        <td><select name="lock_status" class="form-select form-select-sm"><option value="unlocked" {{ 'selected' if plan.lock_status == 'unlocked' else '' }}>Unlocked</option><option value="locked" {{ 'selected' if plan.lock_status == 'locked' else '' }}>Calls/SMS Only</option></select><input name="device_lock_code" class="form-control form-control-sm mt-1" value="{{ plan.device_lock_code or '' }}" placeholder="Lock code auto-generates if blank"></td>
+                        <td>
+                            <select name="device_install_method" class="form-select form-select-sm mb-1">
+                                <option value="imei" {{ 'selected' if plan.device_install_method != 'usb' else '' }}>IMEI</option>
+                                <option value="usb" {{ 'selected' if plan.device_install_method == 'usb' else '' }}>USB</option>
+                            </select>
+                            <input name="device_imei" class="form-control form-control-sm mb-1 bnpl-imei-input" value="{{ plan.device_imei or '' }}" placeholder="IMEI">
+                            <input name="device_serial" class="form-control form-control-sm mb-1" value="{{ plan.device_serial or '' }}" placeholder="Serial / asset tag">
+                            <div class="small text-muted">{{ plan.device_install_status or 'pending_install' }}{% if plan.device_installed_at %} / {{ plan.device_installed_at.strftime('%d %b %Y') }}{% endif %}</div>
+                        </td>
+                        <td><select name="lock_status" class="form-select form-select-sm"><option value="unlocked" {{ 'selected' if plan.lock_status == 'unlocked' else '' }}>Unlocked</option><option value="locked" {{ 'selected' if plan.lock_status == 'locked' else '' }}>Calls/SMS Only</option></select><input name="device_lock_code" class="form-control form-control-sm mt-1" value="{{ plan.device_lock_code or '' }}" placeholder="Lock code auto-generates if blank"><div class="small mt-1">Remote functional code: <code>{{ plan.remote_functional_code }}</code></div></td>
                         <td>{{ plan.next_due_at.strftime('%d %b %Y') if plan.next_due_at else 'N/A' }}</td>
                         <td>
-                            <div class="d-flex gap-1">
+                            <div class="d-flex flex-wrap gap-1">
+                                <label class="btn btn-sm btn-outline-success mb-0"><input type="checkbox" name="mark_installed" value="1" class="d-none"> Installed</label>
                                 <button class="btn btn-sm btn-outline-warning">Save</button>
                                 <button class="btn btn-sm btn-outline-secondary" type="submit" onclick="this.form.querySelector('[name=action]').value='bnpl_generate_code'">Generate</button>
+                                <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_bnpl_installer_payload', plan_id=plan.id) }}">Installer</a>
                             </div>
                         </td>
                     </form>
                 </tr>
-                {% else %}<tr><td colspan="8" class="text-center text-muted py-4">No BNPL plans yet.</td></tr>{% endfor %}
+                {% else %}<tr><td colspan="9" class="text-center text-muted py-4">No BNPL plans yet.</td></tr>{% endfor %}
                 </tbody>
             </table>
         </div>
@@ -119,4 +146,63 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const status = document.getElementById('bnpl-scan-status');
+    let activeImeiInput = null;
+
+    document.querySelectorAll('.bnpl-imei-input').forEach(input => {
+        input.addEventListener('focus', () => {
+            activeImeiInput = input;
+            if (status) status.textContent = 'ready for selected IMEI field';
+        });
+        input.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                input.form?.requestSubmit();
+            }
+        });
+    });
+
+    function cleanImei(value) {
+        return String(value || '').replace(/\D/g, '').slice(0, 15);
+    }
+
+    function targetInput() {
+        if (activeImeiInput && document.body.contains(activeImeiInput)) return activeImeiInput;
+        return Array.from(document.querySelectorAll('.bnpl-imei-input')).find(input => !input.value.trim())
+            || document.querySelector('.bnpl-imei-input');
+    }
+
+    function fillImei(imei, source) {
+        const clean = cleanImei(imei);
+        if (clean.length < 14) {
+            if (status) status.textContent = 'scan ignored - invalid IMEI';
+            return;
+        }
+        const input = targetInput();
+        if (!input) return;
+        input.value = clean;
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        input.focus();
+        if (status) status.textContent = `captured ${clean} from ${source}`;
+    }
+
+    async function pollLatestImei() {
+        try {
+            const response = await fetch('{{ url_for("admin_bnpl_latest_scan") }}', {cache: 'no-store'});
+            const data = await response.json();
+            if (data.success && data.imei) {
+                fillImei(data.imei, 'phone scanner');
+                if (navigator.vibrate) navigator.vibrate(80);
+            }
+        } catch (error) {}
+    }
+
+    setInterval(pollLatestImei, 1800);
+})();
+</script>
 {% endblock %}

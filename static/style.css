@@ -612,13 +612,13 @@ footer a:hover {
 .authenticity-seal {
     right: 10px;
     bottom: 10px;
-    background: #0f5e42;
+    background: #0d6efd;
     color: #fffaf0;
 }
 
 .verified-seller-seal {
     top: 48px;
-    background: #0d6efd;
+    background: #0f5e42;
 }
 
 .hot-sale-tag {
@@ -1087,7 +1087,7 @@ h6 {
 
 .marketplace-shell {
     display: grid;
-    grid-template-columns: 260px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) 230px;
     gap: 18px;
     margin-top: -18px;
     position: relative;
@@ -1325,6 +1325,27 @@ h6 {
     padding: 5px 8px;
     border-radius: 5px;
     font-size: 0.8rem;
+}
+
+.price-drop-tag {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    min-width: 78px;
+    min-height: 54px;
+    padding: 8px 10px 8px 12px;
+    background: #d83b24;
+    color: #fff;
+    clip-path: polygon(0 0, 82% 0, 100% 50%, 82% 100%, 0 100%);
+    font-size: 0.68rem;
+    font-weight: 900;
+    line-height: 1.05;
+}
+
+.price-drop-tag small {
+    display: block;
+    color: #ffe2da;
+    text-decoration: line-through;
 }
 
 .product-copy {
@@ -1683,6 +1704,29 @@ h6 {
         position: static;
     }
 
+    .marketplace-shell {
+        grid-template-columns: minmax(0, 1fr) 112px;
+        align-items: start;
+    }
+
+    .market-category-rail {
+        max-height: 260px;
+        overflow-y: auto;
+        padding: 10px;
+    }
+
+    .market-category-rail h2 {
+        font-size: 0.72rem;
+        margin-bottom: 8px;
+    }
+
+    .market-category-link {
+        font-size: 0.74rem;
+        line-height: 1.15;
+        padding: 7px 6px;
+        gap: 5px;
+    }
+
     .feedback-strip form {
         grid-template-columns: 1fr 1fr;
     }
@@ -1710,6 +1754,41 @@ h6 {
 
     .market-search button {
         padding: 12px;
+    }
+
+    .marketplace-shell {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 92px;
+        gap: 8px;
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+
+    .market-promo {
+        min-height: 0;
+        padding: 14px;
+    }
+
+    .market-promo h2 {
+        font-size: 1.1rem;
+    }
+
+    .market-promo p {
+        font-size: 0.82rem;
+    }
+
+    .market-category-rail {
+        max-height: 220px;
+        padding: 8px 6px;
+    }
+
+    .market-category-link {
+        font-size: 0.68rem;
+        padding: 6px 4px;
+    }
+
+    .market-category-link i {
+        display: none;
     }
 
     .image-inspo-search div {
