@@ -63,7 +63,10 @@
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">Live Face Capture</label>
-                            <video id="selfie-video" class="capture-video mb-2" autoplay playsinline></video>
+                            <div class="selfie-capture-frame mb-2">
+                                <video id="selfie-video" class="capture-video selfie-video" autoplay playsinline></video>
+                                <div class="selfie-guide" aria-hidden="true"></div>
+                            </div>
                             <canvas id="selfie-canvas" class="d-none"></canvas>
                             <input type="hidden" name="selfie_capture" id="selfie_capture">
                             <input type="hidden" name="liveness_passed" id="liveness_passed" value="0">
@@ -85,10 +88,17 @@
 {% block scripts %}
 {{ super() }}
 <script>
-async function startCapture(videoId) {
+async function startCapture(videoId, facingMode = 'environment') {
     const video = document.getElementById(videoId);
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: { ideal: facingMode },
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+            },
+            audio: false
+        });
         video.srcObject = stream;
     } catch (err) {
         video.insertAdjacentHTML('afterend', '<div class="alert alert-warning small">Camera access failed. Use a browser with camera permission enabled.</div>');
@@ -102,7 +112,12 @@ function captureFrame(kind) {
     const status = document.getElementById(`${kind}-status`);
     canvas.width = video.videoWidth || 960;
     canvas.height = video.videoHeight || 540;
-    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    const context = canvas.getContext('2d');
+    if (kind === 'selfie') {
+        context.translate(canvas.width, 0);
+        context.scale(-1, 1);
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
     hidden.value = canvas.toDataURL('image/jpeg', 0.86);
     status.textContent = 'Captured. Retake if unclear before submitting.';
 }
@@ -126,7 +141,7 @@ function captureLivenessStep() {
     prompt.textContent = `Move your head ${livenessSteps[livenessIndex]}, then capture.`;
 }
 
-startCapture('document-video');
-startCapture('selfie-video');
+startCapture('document-video', 'environment');
+startCapture('selfie-video', 'user');
 </script>
 {% endblock %}

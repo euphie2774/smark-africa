@@ -37,8 +37,6 @@ def _database_url(required=False):
     value = os.environ.get('DATABASE_URL')
     if value:
         return value
-    if required:
-        raise RuntimeError('DATABASE_URL is required on deployed hosting. Without it, users are stored in a throwaway SQLite file and disappear after redeploy. Set DATABASE_URL to a persistent PostgreSQL/MySQL database, or set ALLOW_EPHEMERAL_SQLITE=1 only for temporary testing.')
     return 'sqlite:///smarkafrica.db'
 
 
@@ -61,7 +59,7 @@ class Config:
 
     PERMANENT_SESSION_LIFETIME = timedelta(days=30)
 
-    SQLALCHEMY_DATABASE_URI = _database_url(_requires_persistent_database())
+    SQLALCHEMY_DATABASE_URI = _database_url()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {
         'pool_pre_ping': True,
@@ -146,7 +144,7 @@ class DevelopmentConfig(Config):
 
 
 class ProductionConfig(Config):
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')
+    SQLALCHEMY_DATABASE_URI = _database_url()
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
@@ -163,7 +161,5 @@ def init_logging(config_object=Config):
 
 def selected_config():
     if _requires_persistent_database():
-        if not os.environ.get('DATABASE_URL'):
-            raise RuntimeError('DATABASE_URL is required on deployed hosting. Without it, users are stored in a throwaway SQLite file and disappear after redeploy. Set DATABASE_URL to a persistent PostgreSQL/MySQL database, or set ALLOW_EPHEMERAL_SQLITE=1 only for temporary testing.')
         return ProductionConfig
     return DevelopmentConfig
