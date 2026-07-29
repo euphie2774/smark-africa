@@ -903,6 +903,12 @@ def production_setup_pending(admin_user=None):
         issues.append('Complete Daraja credentials')
     return issues
 
+
+def allowed_file(filename):
+    """Return True for supported safe product image filenames."""
+    return bool(filename and is_safe_file(filename, 'image'))
+
+
 def save_uploaded_file(file, subfolder='products'):
     """
     Save uploaded file and return the URL path
@@ -961,6 +967,10 @@ def save_product_image(file):
             image = ImageOps.exif_transpose(image).convert('RGB')
             image.thumbnail((1600, 1600))
             image.save(target_path, 'JPEG', quality=82, optimize=True)
+    except ImportError:
+        app.logger.warning('Pillow is not installed; saving product image without compression')
+        file.stream.seek(0)
+        return save_uploaded_file(file, 'products')
     except Exception as exc:
         app.logger.exception('Product image validation/compression failed')
         raise ValueError('Upload a valid PNG, JPG, GIF, or WebP product image.') from exc
