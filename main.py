@@ -3640,7 +3640,11 @@ def homepage_featured_products(limit=12):
 
 
 def product_search_cache_key(search='', category_slug='', product_type='', sort='newest'):
+    version = 'nocache'
+    if cache:
+        version = cache.get('product_search_cache_version') or 'v1'
     clean = '|'.join([
+        str(version),
         slugify(search or '', 120),
         slugify(category_slug or 'all', 80),
         slugify(product_type or 'all', 40),
@@ -3678,9 +3682,10 @@ def build_product_search_query(search='', category_slug='', product_type='', sor
 
 
 def invalidate_product_cache():
-    """Clear all product search caches so new/edited products appear immediately."""
+    """Invalidate product search caches without clearing unrelated global caches."""
     if cache:
-        cache.clear()
+        cache.set('product_search_cache_version', uuid.uuid4().hex, timeout=86400)
+        cache.delete('hot_sale_pop_product')
 
 
 def cached_product_search_ids(search='', category_slug='', product_type='', sort='newest'):
@@ -4499,8 +4504,9 @@ def inject_globals():
     """Inject settings and utility vars into all templates"""
     try:
         s = _get_cached_settings()
-        platform_ad, platform_ads = _get_cached_platform_ads()
-        hot_sale_pop = _get_cached_hot_sale()
+        is_admin_page = (request.endpoint or '').startswith('admin')
+        platform_ad, platform_ads = (None, []) if is_admin_page else _get_cached_platform_ads()
+        hot_sale_pop = None if is_admin_page else _get_cached_hot_sale()
         auth_user = getattr(g, 'auth_user', {
             'is_authenticated': False,
             'is_admin': False,
@@ -11524,6 +11530,8 @@ def upsert_carrier_partner(data):
 
 
 def seed_large_supplier_catalog():
+    if Manufacturer.query.count() >= 180:
+        return
     sectors = [
         'Electronics and phone accessories', 'Fashion apparel', 'Shoes and bags', 'Beauty and cosmetics',
         'Home and kitchen', 'Furniture and decor', 'Baby products', 'Toys and games', 'Office supplies',
@@ -11598,6 +11606,14 @@ def seed_large_supplier_catalog():
 
 
 def seed_marketplace_supplier_catalog():
+    if Manufacturer.query.filter(Manufacturer.supplier_type.in_([
+        'marketplace_seller',
+        'china_factory_source',
+        'wholesale_marketplace',
+        'verified_supplier_directory',
+        'manufacturer_directory',
+    ])).count() >= 60:
+        return
     marketplace_categories = [
         ('Drones and FPV quadcopters', 'drone fpv quadcopter camera drone spare battery propeller'),
         ('Gaming pads and controllers', 'gamepad controller joystick bluetooth wireless controller'),
@@ -11642,6 +11658,8 @@ def seed_marketplace_supplier_catalog():
 
 
 def seed_carrier_partners():
+    if CarrierPartner.query.count() >= 10:
+        return
     partners = [
         {
             'name': 'Aquantuo Mall Limited',
@@ -11817,6 +11835,8 @@ def seed_carrier_partners():
 
 
 def seed_shipping_rates():
+    if ShippingRate.query.count() >= 5:
+        return
     legacy_replacements = {
         'SmarkAfrica/' + 'Ju' + 'mia-style drop stations': 'SMARKAFRICA drop stations',
         'Nairobi ' + 'Ju' + 'mia-style pickup station': 'Nairobi SMARKAFRICA pickup station',
@@ -11873,8 +11893,10 @@ def seed_shipping_rates():
 def init_database():
     """Initialize database with default admin user and settings"""
     db.create_all()
-    ensure_phase_two_schema()
-    invalidate_product_cache()
+    schema_version = '2026-07-29-performance'
+    if Setting.get('phase_two_schema_version', '') != schema_version:
+        ensure_phase_two_schema()
+        Setting.set('phase_two_schema_version', schema_version)
 
     # Create admin user if not exists
     admin_username = app.config.get('ADMIN_USERNAME', 'admin')
@@ -12128,8 +12150,9 @@ def init_database():
             'notes': 'Turkey-based garment manufacturer focused on knitted fabrics.',
         },
     ]
-    for data in default_manufacturers:
-        upsert_manufacturer(data)
+    if Manufacturer.query.count() < 10:
+        for data in default_manufacturers:
+            upsert_manufacturer(data)
 
     seed_large_supplier_catalog()
     seed_marketplace_supplier_catalog()
@@ -12142,6 +12165,20 @@ def init_database():
 
 
 def start_background_jobs():
+    class NoopScheduler:
+        def shutdown(self, wait=False):
+            return None
+
+    if os.environ.get('DISABLE_BACKGROUND_JOBS') == '1':
+        app.logger.info('Background jobs disabled by DISABLE_BACKGROUND_JOBS=1')
+        return NoopScheduler()
+    if os.environ.get('FLASK_ENV') == 'production' and os.environ.get('RUN_BACKGROUND_JOBS') != '1':
+        app.logger.info('Background jobs disabled in production web worker; set RUN_BACKGROUND_JOBS=1 on one worker to enable them')
+        return NoopScheduler()
+    if app.debug and os.environ.get('WERKZEUG_RUN_MAIN') not in {'true', '1'}:
+        app.logger.info('Skipping background jobs in Werkzeug reloader parent')
+        return NoopScheduler()
+
     def market_price_job():
         with app.app_context():
             try:
@@ -12182,7 +12219,7 @@ def start_background_jobs():
     return scheduler
 
 
-background_scheduler = start_background_jobs()
+background_scheduler = None
 
 @app.before_request
 def before_request():
@@ -12218,6 +12255,8 @@ def add_security_headers(response):
 
 with app.app_context():
     init_database()
+
+background_scheduler = start_background_jobs()
 
 
 if __name__ == '__main__':
