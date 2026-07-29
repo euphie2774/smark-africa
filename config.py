@@ -6,12 +6,39 @@ from logging.config import dictConfig
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def _truthy(value):
+    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _looks_hosted():
+    hosted_markers = [
+        'RENDER',
+        'RAILWAY_ENVIRONMENT',
+        'DYNO',
+        'FLY_APP_NAME',
+        'K_SERVICE',
+        'VERCEL',
+        'PYTHONANYWHERE_DOMAIN',
+        'PASSENGER_BASE_URI',
+    ]
+    if any(os.environ.get(key) for key in hosted_markers):
+        return True
+    host_name = (os.environ.get('APP_BASE_URL') or os.environ.get('PUBLIC_URL') or os.environ.get('SERVER_NAME') or '').lower()
+    return 'smark-africa.com' in host_name
+
+
+def _requires_persistent_database():
+    if _truthy(os.environ.get('ALLOW_EPHEMERAL_SQLITE')):
+        return False
+    return os.environ.get('FLASK_ENV') == 'production' or _looks_hosted()
+
+
 def _database_url(required=False):
     value = os.environ.get('DATABASE_URL')
     if value:
         return value
     if required:
-        raise RuntimeError('DATABASE_URL is required when FLASK_ENV=production')
+        raise RuntimeError('DATABASE_URL is required on deployed hosting. Without it, users are stored in a throwaway SQLite file and disappear after redeploy. Set DATABASE_URL to a persistent PostgreSQL/MySQL database, or set ALLOW_EPHEMERAL_SQLITE=1 only for temporary testing.')
     return 'sqlite:///smarkafrica.db'
 
 
@@ -34,7 +61,7 @@ class Config:
 
     PERMANENT_SESSION_LIFETIME = timedelta(days=30)
 
-    SQLALCHEMY_DATABASE_URI = _database_url(os.environ.get('FLASK_ENV') == 'production')
+    SQLALCHEMY_DATABASE_URI = _database_url(_requires_persistent_database())
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {
         'pool_pre_ping': True,
@@ -135,10 +162,8 @@ def init_logging(config_object=Config):
 
 
 def selected_config():
-    if os.environ.get('FLASK_ENV') == 'production':
+    if _requires_persistent_database():
         if not os.environ.get('DATABASE_URL'):
-            raise RuntimeError('DATABASE_URL is required when FLASK_ENV=production')
+            raise RuntimeError('DATABASE_URL is required on deployed hosting. Without it, users are stored in a throwaway SQLite file and disappear after redeploy. Set DATABASE_URL to a persistent PostgreSQL/MySQL database, or set ALLOW_EPHEMERAL_SQLITE=1 only for temporary testing.')
         return ProductionConfig
     return DevelopmentConfig
-
-

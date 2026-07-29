@@ -18,6 +18,18 @@
         <a href="{{ url_for('admin_settings') }}" class="btn btn-sm btn-dark">Open Settings</a>
     </div>
     {% endif %}
+
+    {% if database_status %}
+    <div class="alert alert-{{ 'success' if database_status.persistent else 'danger' }} d-flex justify-content-between align-items-center mb-4" role="alert">
+        <div>
+            <strong><i class="fas fa-database me-1"></i> Database: {{ database_status.backend }}</strong>
+            <div class="small">{{ database_status.display }}{% if not database_status.persistent %} · Not safe for deployed user accounts{% endif %}</div>
+        </div>
+        {% if not database_status.persistent %}
+        <span class="badge bg-dark">Set DATABASE_URL</span>
+        {% endif %}
+    </div>
+    {% endif %}
     <!-- Stats Cards -->
     <div class="row g-3 mb-4">
         <div class="col-md-3">

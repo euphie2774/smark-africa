@@ -901,7 +901,25 @@ def production_setup_pending(admin_user=None):
         issues.append('Change the default admin password')
     if daraja_config_error():
         issues.append('Complete Daraja credentials')
+    db_uri = app.config.get('SQLALCHEMY_DATABASE_URI', '')
+    if db_uri.startswith('sqlite'):
+        issues.append('Database is SQLite. On deployed hosting this can reset users after redeploy; set DATABASE_URL to a persistent database.')
     return issues
+
+
+def database_status_summary():
+    uri = app.config.get('SQLALCHEMY_DATABASE_URI', '')
+    if uri.startswith('sqlite:///'):
+        return {
+            'backend': 'SQLite',
+            'persistent': False,
+            'display': uri.replace('sqlite:///', ''),
+        }
+    if uri.startswith('postgres'):
+        return {'backend': 'PostgreSQL', 'persistent': True, 'display': uri.split('@')[-1] if '@' in uri else 'configured'}
+    if uri.startswith('mysql'):
+        return {'backend': 'MySQL', 'persistent': True, 'display': uri.split('@')[-1] if '@' in uri else 'configured'}
+    return {'backend': 'Database', 'persistent': bool(uri), 'display': 'configured' if uri else 'not configured'}
 
 
 def allowed_file(filename):
@@ -6856,7 +6874,14 @@ def admin_dashboard():
         'low_stock_count': low_stock_count
     }
 
-    return render_template('admin/dashboard.html', production_setup_issues=production_setup_issues, stats=stats, recent_orders=recent_orders, pnl=pnl)
+    return render_template(
+        'admin/dashboard.html',
+        production_setup_issues=production_setup_issues,
+        database_status=database_status_summary(),
+        stats=stats,
+        recent_orders=recent_orders,
+        pnl=pnl
+    )
 
 
 @app.route('/admin/intelligent-architecture', methods=['GET', 'POST'])
