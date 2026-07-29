@@ -20,7 +20,7 @@ from flask_talisman import Talisman
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash
 from sqlalchemy import func, extract, and_, or_, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 try:
     import qrcode
@@ -8685,6 +8685,8 @@ def admin_add_product():
     categories = Category.query.all()
 
     if request.method == 'POST':
+        admin_user_id = current_user.id
+        admin_is_admin = bool(current_user.is_admin)
         name = request.form.get('name', '').strip()
         description = request.form.get('description', '')
         short_description = request.form.get('short_description', '')[:300]
@@ -8702,7 +8704,7 @@ def admin_add_product():
         commission_percent = form_float('commission_percent', 15, minimum=10.0, maximum=15.0)
         admin_priority = request.form.get('admin_priority') in ['1', 'on', 'true']
         is_hot_sale = request.form.get('is_hot_sale') in ['1', 'on', 'true']
-        is_original_source = current_user.is_admin and request.form.get('is_original_source') in ['1', 'on', 'true']
+        is_original_source = admin_is_admin and request.form.get('is_original_source') in ['1', 'on', 'true']
 
 
         if not name or buying_price < 0 or selling_price <= 0:
@@ -8717,9 +8719,9 @@ def admin_add_product():
             buying_price=buying_price, selling_price=selling_price,
             is_digital=is_digital, stock=stock, weight_kg=weight_kg,
             is_featured=is_featured, is_active=is_active,
-            seller_id=current_user.id, product_condition=product_condition,
+            seller_id=admin_user_id, product_condition=product_condition,
             sale_mode=sale_mode, bid_price=bid_price,
-            commission_percent=commission_percent, admin_priority=admin_priority or current_user.is_admin,
+            commission_percent=commission_percent, admin_priority=admin_priority or admin_is_admin,
             is_hot_sale=is_hot_sale, hot_sale_started_at=utcnow() if is_hot_sale else None,
             is_original_source=is_original_source
         )
@@ -8768,25 +8770,47 @@ def admin_add_product():
             ) if os.path.exists(os.path.join(app.config['UPLOAD_FOLDER'], 'digital',
                                              os.path.basename(product.file_path))) else 0
 
-        db.session.add(product)
-        db.session.flush()
+        try:
+            db.session.add(product)
+            db.session.flush()
 
-        if product.admin_priority and not Review.query.filter_by(product_id=product.id, is_admin_review=True).first():
-            db.session.add(Review(
-                user_id=current_user.id,
-                product_id=product.id,
-                rating=4,
-                comment='Trusted listing with responsive service and clear product details.',
-                is_visible=True,
-                is_admin_review=True
-            ))
+            if product.admin_priority and not Review.query.filter_by(product_id=product.id, is_admin_review=True).first():
+                db.session.add(Review(
+                    user_id=admin_user_id,
+                    product_id=product.id,
+                    rating=4,
+                    comment='Trusted listing with responsive service and clear product details.',
+                    is_visible=True,
+                    is_admin_review=True
+                ))
 
-        # Auto-apply discount check
-        apply_auto_discount(product)
-        db.session.commit()
-        alert_count = notify_price_alerts()
-        if alert_count:
-            flash(f'{alert_count} buyer price alert email(s) were triggered by this listing.', 'info')
+            # Auto-apply discount check
+            apply_auto_discount(product)
+            db.session.commit()
+        except SQLAlchemyError as exc:
+            db.session.rollback()
+            app.logger.exception('Product create failed; retrying schema upgrade before returning admin form: %s', exc)
+            try:
+                ensure_phase_two_schema()
+                Setting.set('phase_two_schema_version', '2026-07-29-product-create-schema-fix')
+            except Exception:
+                db.session.rollback()
+                app.logger.exception('Product create schema repair failed')
+            flash('Product could not be saved because the database schema was not ready. I ran the schema repair; please submit once more.', 'danger')
+            return render_template('admin/add_product.html', categories=categories, product=None)
+        except Exception as exc:
+            db.session.rollback()
+            app.logger.exception('Product create failed: %s', exc)
+            flash('Product could not be saved. Check the server logs for the exact create-product error.', 'danger')
+            return render_template('admin/add_product.html', categories=categories, product=None)
+
+        if Setting.get('product_create_send_alerts_sync', '0') == '1':
+            try:
+                alert_count = notify_price_alerts()
+                if alert_count:
+                    flash(f'{alert_count} buyer price alert email(s) were triggered by this listing.', 'info')
+            except Exception as exc:
+                app.logger.warning('Price alert notification skipped after product create: %s', exc)
 
         invalidate_product_cache()
         flash(f'Product "{name}" created successfully!', 'success')
@@ -11893,7 +11917,7 @@ def seed_shipping_rates():
 def init_database():
     """Initialize database with default admin user and settings"""
     db.create_all()
-    schema_version = '2026-07-29-performance'
+    schema_version = '2026-07-29-product-create-schema-fix'
     if Setting.get('phase_two_schema_version', '') != schema_version:
         ensure_phase_two_schema()
         Setting.set('phase_two_schema_version', schema_version)
