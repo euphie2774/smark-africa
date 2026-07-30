@@ -35,6 +35,9 @@ class User(UserMixin, db.Model):
     frozen_funds = db.Column(db.Float, default=0.0)
     salary_payment_method = db.Column(db.String(30), default='mpesa')
     salary_account_number = db.Column(db.String(120))
+    seller_payout_method = db.Column(db.String(30), default='mpesa')
+    seller_payout_account = db.Column(db.String(160))
+    seller_payout_name = db.Column(db.String(160))
     work_start_date = db.Column(db.Date)
     ai_training_coins = db.Column(db.Integer, default=0)
     is_verified_seller = db.Column(db.Boolean, default=False)
@@ -98,6 +101,8 @@ class Product(db.Model):
     buying_price = db.Column(db.Float, nullable=False, default=0.0)
     selling_price = db.Column(db.Float, nullable=False)
     discount_percent = db.Column(db.Float, default=0.0)
+    vat_applicable = db.Column(db.Boolean, default=False)
+    vat_rate = db.Column(db.Float, default=0.0)
     sale_mode = db.Column(db.String(20), default='direct')  # direct, bid
     bid_price = db.Column(db.Float, default=0.0)
     product_condition = db.Column(db.String(30), default='new')  # new, second_hand, thrifted, refurbished
@@ -303,6 +308,9 @@ class Transaction(db.Model):
     status = db.Column(db.String(20), default='completed')
     commission_amount = db.Column(db.Float, default=0.0)
     tax_amount = db.Column(db.Float, default=0.0)
+    destination_account = db.Column(db.String(200))
+    settlement_group = db.Column(db.String(80))
+    disbursed_at = db.Column(db.DateTime)
     available_on = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -622,6 +630,9 @@ class PointOfSaleItem(db.Model):
     product_name = db.Column(db.String(220))
     quantity = db.Column(db.Integer, default=1)
     unit_price = db.Column(db.Float, default=0.0)
+    list_price = db.Column(db.Float, default=0.0)
+    discount_amount = db.Column(db.Float, default=0.0)
+    tax_amount = db.Column(db.Float, default=0.0)
     line_total = db.Column(db.Float, default=0.0)
 
     product = db.relationship('Product', lazy=True)

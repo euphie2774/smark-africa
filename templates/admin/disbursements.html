@@ -62,6 +62,65 @@
         </div>
     </div>
 
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Seller Sales Settlement</h5>
+            <span class="badge bg-success">Commission split ledger</span>
+        </div>
+        <div class="card-body p-0 table-responsive">
+            <table class="table table-hover mb-0 align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Seller</th>
+                        <th>Price Paid</th>
+                        <th>Commission</th>
+                        <th>Balance To Disburse</th>
+                        <th>Phone</th>
+                        <th>Receiving Account</th>
+                        <th>Status</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in seller_sales %}
+                    <tr>
+                        <td>
+                            {{ row.seller.username if row.seller else 'Unknown seller' }}
+                            <div class="small text-muted">{{ row.txn.type.replace('_', ' ')|title }} #{{ row.txn.id }}</div>
+                        </td>
+                        <td>KSh {{ "%.2f"|format(row.price_paid) }}</td>
+                        <td class="text-warning">KSh {{ "%.2f"|format(row.commission) }}</td>
+                        <td class="fw-bold text-success">KSh {{ "%.2f"|format(row.balance) }}</td>
+                        <td>{{ row.phone or 'Not saved' }}</td>
+                        <td>
+                            {{ row.payout_account or 'Not saved' }}
+                            {% if not row.payout_account %}<div class="small text-danger">Seller must attach account before payout.</div>{% endif %}
+                        </td>
+                        <td>
+                            <span class="badge bg-{{ 'success' if row.txn.status == 'disbursed' else 'info' if row.disbursable else 'warning' }}">{{ row.txn.status }}</span>
+                            {% if row.txn.disbursed_at %}<div class="small text-muted">{{ row.txn.disbursed_at.strftime('%d %b %Y %H:%M') }}</div>{% endif %}
+                        </td>
+                        <td class="text-end">
+                            {% if row.disbursable %}
+                            <form method="POST" onsubmit="return confirm('Queue this seller payout and platform commission split?');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                <input type="hidden" name="action" value="disburse_seller_sale">
+                                <input type="hidden" name="transaction_id" value="{{ row.txn.id }}">
+                                <button class="btn btn-sm btn-gold"><i class="fas fa-money-bill-transfer me-1"></i>Disburse</button>
+                            </form>
+                            {% else %}
+                            <span class="text-muted small">Not ready</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="8" class="text-center text-muted py-4">No seller sales to settle yet.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
     <div class="row g-4">
         <div class="col-xl-7">
             <div class="card border-0 shadow-sm">
@@ -207,6 +266,7 @@
                         <th>Type</th>
                         <th>Recipient/Order</th>
                         <th>Amount</th>
+                        <th>Destination</th>
                         <th>Status</th>
                         <th>Date</th>
                     </tr>
@@ -229,11 +289,12 @@
                             <div class="small text-muted">{{ txn.description }}</div>
                         </td>
                         <td class="{{ 'text-success' if txn.amount >= 0 else 'text-danger' }}">KSh {{ "%.2f"|format(txn.amount) }}</td>
+                        <td>{{ txn.destination_account or 'Internal ledger' }}</td>
                         <td>{{ txn.status }}</td>
                         <td>{{ txn.created_at.strftime('%d %b %Y %H:%M') if txn.created_at else 'N/A' }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="7" class="text-center text-muted py-4">No ledger activity yet</td></tr>
+                    <tr><td colspan="8" class="text-center text-muted py-4">No ledger activity yet</td></tr>
                     {% endfor %}
                 </tbody>
             </table>

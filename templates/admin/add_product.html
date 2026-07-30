@@ -61,6 +61,16 @@
                         <div class="form-text">Max safe discount calculated automatically</div>
                     </div>
                     <div class="col-md-3">
+                        <label class="form-label">VAT</label>
+                        <div class="input-group">
+                            <span class="input-group-text">
+                                <input class="form-check-input mt-0" type="checkbox" name="vat_applicable" value="1" aria-label="VAT applies" {{ 'checked' if product and product.vat_applicable else '' }}>
+                            </span>
+                            <input type="number" name="vat_rate" class="form-control" step="0.01" min="0" max="100" value="{{ product.vat_rate if product else '16' }}" placeholder="Rate %">
+                        </div>
+                        <div class="form-text">Tick only for VAT-applicable goods.</div>
+                    </div>
+                    <div class="col-md-3">
                         <label class="form-label">Market Source</label>
                         <div class="form-control" id="market-source-box">Waiting for product name...</div>
                         <div class="form-text">Verified source ranges are shown only when available.</div>

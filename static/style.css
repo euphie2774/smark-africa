@@ -1357,17 +1357,32 @@ h6 {
 
 .price-drop-tag {
     position: absolute;
-    top: 10px;
-    left: 10px;
-    min-width: 78px;
-    min-height: 54px;
-    padding: 8px 10px 8px 12px;
-    background: #d83b24;
+    top: 8px;
+    right: 8px;
+    min-width: 58px;
+    min-height: 38px;
+    padding: 5px 8px 5px 12px;
+    background: #f3262d;
     color: #fff;
-    clip-path: polygon(0 0, 82% 0, 100% 50%, 82% 100%, 0 100%);
-    font-size: 0.68rem;
+    clip-path: polygon(16% 0, 100% 0, 100% 100%, 16% 100%, 0 50%);
+    font-size: 0.58rem;
     font-weight: 900;
     line-height: 1.05;
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    z-index: 3;
+}
+
+.price-drop-tag::before {
+    content: "";
+    position: absolute;
+    left: 8px;
+    top: 50%;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #fff;
+    transform: translateY(-50%);
 }
 
 .price-drop-tag small {

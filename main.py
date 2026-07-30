@@ -75,6 +75,13 @@ def handle_csrf_error(e):
     return redirect(request.url)
 
 
+@app.route('/favicon.ico')
+def favicon():
+    response = make_response(send_from_directory(os.path.join(app.root_path, 'static', 'images'), 'favicon.png', mimetype='image/png'))
+    response.headers['Cache-Control'] = 'public, max-age=86400'
+    return response
+
+
 # Rate Limiting
 limiter = Limiter(
     app=app,
@@ -1991,6 +1998,31 @@ def pos_unit_sale_price(product):
     return product.selling_price or 0
 
 
+def product_vat_rate(product):
+    if not product or not getattr(product, 'vat_applicable', False):
+        return 0.0
+    return max(0.0, float(getattr(product, 'vat_rate', 0) or 0))
+
+
+def pos_line_pricing(product, quantity=1):
+    qty = max(1, int(quantity or 1))
+    list_unit = float(product.selling_price or 0)
+    discount_percent = max(0.0, min(99.0, float(product.discount_percent or 0)))
+    net_unit = round(list_unit * (1 - discount_percent / 100), 2)
+    discount_amount = round((list_unit - net_unit) * qty, 2)
+    net_before_tax = round(net_unit * qty, 2)
+    tax_amount = round(net_before_tax * product_vat_rate(product) / 100, 2)
+    line_total = round(net_before_tax + tax_amount, 2)
+    return {
+        'quantity': qty,
+        'list_unit': list_unit,
+        'unit_price': net_unit,
+        'discount_amount': discount_amount,
+        'tax_amount': tax_amount,
+        'line_total': line_total,
+    }
+
+
 def seller_ad_plan_prices():
     return {
         'daily': max(0.0, float(Setting.get('seller_ad_daily_price', '15') or 15)),
@@ -2907,16 +2939,15 @@ def build_category_market_news_item(row):
 
 
 def disbursement_snapshot():
-    incoming_types = ['sale', 'commission', 'ad_commission']
-    outgoing_types = ['refund', 'withdrawal', 'salary', 'manufacturer_payout', 'disbursement']
+    incoming_types = ['sale', 'commission', 'ad_commission', 'raffle_ticket_sale', 'platform_commission_disbursement']
+    outgoing_types = ['refund', 'withdrawal', 'salary', 'manufacturer_payout', 'disbursement', 'seller_payout_disbursement']
     incoming_total = db.session.query(func.sum(Transaction.amount)).filter(
         Transaction.type.in_(incoming_types),
         Transaction.amount > 0
     ).scalar() or 0.0
-    outgoing_total = abs(db.session.query(func.sum(Transaction.amount)).filter(
-        Transaction.type.in_(outgoing_types),
-        Transaction.amount < 0
-    ).scalar() or 0.0)
+    outgoing_total = db.session.query(func.sum(func.abs(Transaction.amount))).filter(
+        Transaction.type.in_(outgoing_types)
+    ).scalar() or 0.0
     pending_withdrawals = WithdrawalRequest.query.filter_by(status='pending_review').all()
     releasable_seller_earnings = Transaction.query.filter(
         Transaction.type == 'seller_earning',
@@ -2975,6 +3006,119 @@ def release_eligible_seller_earnings():
         order.protection_status = 'released'
         released += 1
     return released
+
+
+def seller_receiving_account(user):
+    if not user:
+        return ''
+    method = user.seller_payout_method or 'mpesa'
+    account = user.seller_payout_account or ''
+    name = user.seller_payout_name or user.username
+    if account:
+        return f'{method.upper()} - {account} ({name})'
+    return ''
+
+
+def platform_commission_account():
+    method = Setting.get('platform_commission_receiving_method', 'mpesa') or 'mpesa'
+    account = Setting.get('platform_commission_receiving_account', '') or Setting.get('daraja_shortcode', '174379')
+    name = Setting.get('platform_commission_receiving_name', 'SMARK-AFRICA Commission')
+    return f'{method.upper()} - {account} ({name})'
+
+
+def seller_sale_settlement_rows():
+    earnings = Transaction.query.filter(
+        Transaction.type == 'seller_earning'
+    ).order_by(Transaction.created_at.desc()).limit(250).all()
+    rows = []
+    for earning in earnings:
+        seller = earning.user
+        commission = float(earning.commission_amount or 0)
+        balance = float(earning.amount or 0)
+        price_paid = round(balance + commission, 2)
+        payout_account = seller_receiving_account(seller)
+        disbursable = earning.status in {'released', 'completed'} and not earning.disbursed_at and bool(payout_account)
+        rows.append({
+            'txn': earning,
+            'seller': seller,
+            'price_paid': price_paid,
+            'commission': commission,
+            'balance': balance,
+            'phone': seller.phone if seller else '',
+            'payout_account': payout_account,
+            'disbursable': disbursable,
+        })
+    return rows
+
+
+def disburse_seller_sale(earning):
+    if not earning or earning.type != 'seller_earning':
+        return False, 'Settlement item was not found.'
+    if earning.disbursed_at:
+        return False, 'This seller sale has already been disbursed.'
+    if earning.status not in {'released', 'completed'}:
+        return False, 'Funds are not released yet. Complete delivery/protection review first.'
+    seller = earning.user
+    payout_account = seller_receiving_account(seller)
+    if not payout_account:
+        return False, 'Seller has no receiving account saved.'
+
+    group = f'settle-{earning.id}-{uuid.uuid4().hex[:8]}'
+    commission = round(float(earning.commission_amount or 0), 2)
+    seller_amount = round(float(earning.amount or 0), 2)
+    if commission > 0:
+        db.session.add(Transaction(
+            order_id=earning.order_id,
+            user_id=earning.user_id,
+            type='platform_commission_disbursement',
+            amount=commission,
+            description=f'Commission split for seller settlement transaction #{earning.id}',
+            status='queued',
+            commission_amount=commission,
+            destination_account=platform_commission_account(),
+            settlement_group=group,
+            available_on=utcnow(),
+        ))
+        record_platform_revenue(
+            'seller_commission',
+            commission,
+            f'Commission split for settlement transaction #{earning.id}',
+            str(earning.order_id or earning.id),
+            'order' if earning.order_id else 'settlement',
+            earning.user_id,
+        )
+    db.session.add(Transaction(
+        order_id=earning.order_id,
+        user_id=earning.user_id,
+        type='seller_payout_disbursement',
+        amount=-abs(seller_amount),
+        description=f'Seller payout for settlement transaction #{earning.id}',
+        status='queued',
+        destination_account=payout_account,
+        settlement_group=group,
+        available_on=utcnow(),
+    ))
+    earning.status = 'disbursed'
+    earning.disbursed_at = utcnow()
+    earning.destination_account = payout_account
+    earning.settlement_group = group
+    return True, f'Queued seller payout KSh {seller_amount:,.2f} and platform commission KSh {commission:,.2f}.'
+
+
+def auto_disburse_released_seller_sales():
+    queued = 0
+    if Setting.get('auto_disbursement_cadence', 'weekly') == 'off':
+        return queued
+    candidates = Transaction.query.filter(
+        Transaction.type == 'seller_earning',
+        Transaction.status.in_(['released', 'completed']),
+        Transaction.disbursed_at.is_(None)
+    ).limit(100).all()
+    for earning in candidates:
+        ok, _ = disburse_seller_sale(earning)
+        if ok:
+            queued += 1
+    return queued
 
 
 def auto_disbursement_due():
@@ -3333,15 +3477,19 @@ def pos_terminal_payload(user_id=None):
         if not product or not product.is_active:
             continue
         quantity = max(1, int(line.get('quantity') or 1))
-        unit_price = pos_unit_sale_price(product)
-        line_total = unit_price * quantity
+        pricing = pos_line_pricing(product, quantity)
+        unit_price = pricing['unit_price']
+        line_total = pricing['line_total']
         subtotal += line_total
         rows.append({
             'product_id': product.id,
             'name': product.name,
             'barcode': product_barcode_value(product),
             'quantity': quantity,
+            'list_unit': pricing['list_unit'],
             'unit_price': unit_price,
+            'discount_amount': pricing['discount_amount'],
+            'tax_amount': pricing['tax_amount'],
             'line_total': line_total,
             'stock': product.stock or 0,
             'low_stock': not product.is_digital and (product.stock or 0) <= 5,
@@ -6639,6 +6787,25 @@ def raffle_buy_ticket(raffle_id):
             ticket_number=raffle.tickets_sold,
         )
         db.session.add(ticket)
+    total_ticket_amount = round(qty * float(raffle.ticket_price or 0), 2)
+    db.session.add(Transaction(
+        user_id=current_user.id,
+        type='raffle_ticket_sale',
+        amount=total_ticket_amount,
+        description=f'Raffle ticket purchase: {qty} ticket(s) for {raffle.title}',
+        status='completed',
+        destination_account=platform_commission_account(),
+        available_on=utcnow(),
+    ))
+    if total_ticket_amount > 0:
+        record_platform_revenue(
+            'raffle_ticket_sale',
+            total_ticket_amount,
+            f'Raffle ticket purchase: {qty} ticket(s) for {raffle.title}',
+            str(raffle.id),
+            'raffle',
+            current_user.id,
+        )
 
     db.session.commit()
     flash(f'Successfully purchased {qty} ticket(s) for "{raffle.title}"!', 'success')
@@ -6659,33 +6826,6 @@ def _execute_raffle_draw(raffle):
         raffle.drawn_at = datetime.utcnow()
         raffle.status = 'completed'
         db.session.commit()
-
-        total_revenue = raffle.tickets_sold * raffle.ticket_price
-        fee_pct = raffle.client_product_fee_pct or 25.0
-        platform_profit = round(total_revenue * fee_pct / 100, 2)
-        seller_payout = max(0, total_revenue - platform_profit)
-
-        # Record seller payout transaction (platform buys product at full price)
-        db.session.add(Transaction(
-            order_id=None,
-            user_id=raffle.seller_id,
-            type='raffle_seller_payout',
-            amount=seller_payout,
-            description=f'Raffle product sold: {raffle.title}',
-            status='completed',
-        ))
-
-        # Record platform commission from ticket sales margin
-        if platform_profit > 0:
-            db.session.add(Transaction(
-                order_id=None,
-                user_id=raffle.seller_id,
-                type='raffle_platform_commission',
-                amount=platform_profit,
-                commission_amount=platform_profit,
-                description=f'Platform raffle fee from {raffle.title} ({fee_pct:.0f}% of ticket revenue)',
-                status='completed',
-            ))
 
         notif = CustomerNotification(
             user_id=winning_ticket.user_id,
@@ -7350,8 +7490,21 @@ def admin_disbursements():
             flash(f'Salary setup saved for {admin_user.username}.', 'success')
             return redirect(url_for('admin_disbursements'))
 
+        if action == 'disburse_seller_sale':
+            txn_id = request.form.get('transaction_id', type=int)
+            earning = Transaction.query.get(txn_id) if txn_id else None
+            ok, message = disburse_seller_sale(earning)
+            if ok:
+                db.session.commit()
+                flash(message, 'success')
+            else:
+                db.session.rollback()
+                flash(message, 'danger')
+            return redirect(url_for('admin_disbursements'))
+
         if action == 'run_cycle':
             released = release_eligible_seller_earnings()
+            seller_settlements = auto_disburse_released_seller_sales()
             for withdrawal in snapshot['pending_withdrawals']:
                 if seller_available_balance(withdrawal.user_id) < float(withdrawal.amount or 0):
                     withdrawal.status = 'insufficient_released_balance'
@@ -7393,21 +7546,24 @@ def admin_disbursements():
 
             db.session.commit()
             Setting.set('auto_disbursement_last_run_at', utcnow().isoformat())
-            flash(f'Disbursement automation released {released} seller earning(s) and queued {created} payment ledger item(s).', 'success')
+            flash(f'Disbursement automation released {released} seller earning(s), queued {seller_settlements} seller settlement(s), and queued {created} other payment ledger item(s).', 'success')
         return redirect(url_for('admin_disbursements'))
 
     if auto_disbursement_due():
         released = release_eligible_seller_earnings()
-        if released:
+        seller_settlements = auto_disburse_released_seller_sales()
+        if released or seller_settlements:
             Setting.set('auto_disbursement_last_run_at', utcnow().isoformat())
             db.session.commit()
 
     snapshot = disbursement_snapshot()
+    seller_sales = seller_sale_settlement_rows()
     transactions = Transaction.query.order_by(Transaction.created_at.desc()).limit(100).all()
     admins = User.query.filter_by(is_admin=True).order_by(User.username.asc()).all()
     manufacturers = Manufacturer.query.order_by(Manufacturer.priority.desc(), Manufacturer.name.asc()).limit(20).all()
     return render_template('admin/disbursements.html',
                            snapshot=snapshot,
+                           seller_sales=seller_sales,
                            transactions=transactions,
                            admins=admins,
                            manufacturers=manufacturers)
@@ -7893,7 +8049,10 @@ def admin_pos_request_mobile_auth():
 
 def pos_document_html(sale, title='Invoice'):
     rows = ''.join(
-        f'<tr><td>{html.escape(item.product_name or "")}</td><td style="text-align:right">{item.quantity}</td><td style="text-align:right">KSh {item.unit_price:,.2f}</td><td style="text-align:right">KSh {item.line_total:,.2f}</td></tr>'
+        f'<tr><td>{html.escape(item.product_name or "")}'
+        f'{"<br><small>Discount: KSh " + format(item.discount_amount or 0, ",.2f") + "</small>" if item.discount_amount and item.discount_amount > 0 else ""}'
+        f'{"<br><small>VAT: KSh " + format(item.tax_amount or 0, ",.2f") + "</small>" if item.tax_amount and item.tax_amount > 0 else ""}'
+        f'</td><td style="text-align:right">{item.quantity}</td><td style="text-align:right">KSh {item.unit_price:,.2f}</td><td style="text-align:right">KSh {item.line_total:,.2f}</td></tr>'
         for item in sale.items
     )
     document_no = sale.invoice_number if title == 'Invoice' else sale.receipt_number
@@ -7970,6 +8129,8 @@ def admin_pos():
             selling_price = request.form.get('selling_price', type=float) or 0
             buying_price = request.form.get('buying_price', type=float) or 0
             stock = request.form.get('stock', type=int) or 0
+            vat_applicable = request.form.get('vat_applicable') in ['1', 'on', 'true']
+            vat_rate = form_float('vat_rate', 16 if vat_applicable else 0, minimum=0, maximum=100) if vat_applicable else 0
             if not name or selling_price <= 0:
                 flash('Product name and selling price are required.', 'danger')
                 return redirect(url_for('admin_pos'))
@@ -7987,6 +8148,8 @@ def admin_pos():
                 category_id=request.form.get('category_id', type=int),
                 buying_price=max(0, buying_price),
                 selling_price=selling_price,
+                vat_applicable=vat_applicable,
+                vat_rate=vat_rate,
                 stock=0,
                 weight_kg=request.form.get('weight_kg', type=float) or 0,
                 is_digital=False,
@@ -8135,15 +8298,18 @@ def admin_pos():
             if not product.is_digital and (product.stock or 0) < qty:
                 flash(f'Insufficient inventory for {product.name}.', 'danger')
                 return redirect(url_for('admin_pos'))
-            unit_price = pos_unit_sale_price(product)
-            selected_lines.append((product, qty, unit_price, unit_price * qty))
+            selected_lines.append((product, pos_line_pricing(product, qty)))
         if not selected_lines:
             flash('Select at least one product for POS checkout.', 'warning')
             return redirect(url_for('admin_pos'))
-        subtotal = sum(line[3] for line in selected_lines)
-        discount_amount = max(0, float(request.form.get('discount_amount', 0) or 0))
-        tax_amount = max(0, float(request.form.get('tax_amount', 0) or 0))
-        total_amount = max(0, subtotal - discount_amount + tax_amount)
+        subtotal = round(sum(line[1]['list_unit'] * line[1]['quantity'] for line in selected_lines), 2)
+        product_discount_total = round(sum(line[1]['discount_amount'] for line in selected_lines), 2)
+        product_tax_total = round(sum(line[1]['tax_amount'] for line in selected_lines), 2)
+        sale_discount_amount = max(0, float(request.form.get('discount_amount', 0) or 0))
+        discount_amount = round(product_discount_total + sale_discount_amount, 2)
+        tax_raw = request.form.get('tax_amount', '').strip()
+        tax_amount = max(0, float(tax_raw)) if tax_raw else product_tax_total
+        total_amount = max(0, round(subtotal - discount_amount + tax_amount, 2))
         payment_method = request.form.get('payment_method', 'cash')
         split_parts = {
             'cash': max(0, float(request.form.get('split_cash', 0) or 0)),
@@ -8217,14 +8383,18 @@ def admin_pos():
                 sale.payment_status = 'pending'
             else:
                 sale.payment_status = 'paid'
-        for product, qty, unit_price, line_total in selected_lines:
+        for product, pricing in selected_lines:
+            qty = pricing['quantity']
             db.session.add(PointOfSaleItem(
                 sale_id=sale.id,
                 product_id=product.id,
                 product_name=product.name,
                 quantity=qty,
-                unit_price=unit_price,
-                line_total=line_total
+                unit_price=pricing['unit_price'],
+                list_price=pricing['list_unit'],
+                discount_amount=pricing['discount_amount'],
+                tax_amount=pricing['tax_amount'],
+                line_total=pricing['line_total']
             ))
             product.sales_count = (product.sales_count or 0) + qty
             if not product.is_digital:
@@ -8755,6 +8925,7 @@ def admin_add_product():
         category_id = request.form.get('category_id', type=int)
         buying_price = form_float('buying_price', 0, minimum=0)
         selling_price = form_float('selling_price', 0, minimum=0)
+        discount_percent = form_float('discount_percent', 0, minimum=0, maximum=99)
         is_digital = request.form.get('is_digital') in ['1', 'on', 'true']
         stock = form_int('stock', 0, minimum=0)
         weight_kg = form_float('weight_kg', 0, minimum=0)
@@ -8764,6 +8935,8 @@ def admin_add_product():
         sale_mode = request.form.get('sale_mode', 'direct')
         bid_price = form_float('bid_price', 0, minimum=0)
         commission_percent = form_float('commission_percent', 15, minimum=10.0, maximum=15.0)
+        vat_applicable = request.form.get('vat_applicable') in ['1', 'on', 'true']
+        vat_rate = form_float('vat_rate', 16 if vat_applicable else 0, minimum=0, maximum=100) if vat_applicable else 0
         admin_priority = request.form.get('admin_priority') in ['1', 'on', 'true']
         is_hot_sale = request.form.get('is_hot_sale') in ['1', 'on', 'true']
         is_original_source = admin_is_admin and request.form.get('is_original_source') in ['1', 'on', 'true']
@@ -8779,6 +8952,8 @@ def admin_add_product():
             name=name, slug=slug, description=description,
             short_description=short_description, category_id=category_id,
             buying_price=buying_price, selling_price=selling_price,
+            discount_percent=discount_percent,
+            vat_applicable=vat_applicable, vat_rate=vat_rate,
             is_digital=is_digital, stock=stock, weight_kg=weight_kg,
             is_featured=is_featured, is_active=is_active,
             seller_id=admin_user_id, product_condition=product_condition,
@@ -8910,6 +9085,8 @@ def admin_edit_product(pid):
         product.is_featured = form_bool('is_featured')
         product.is_active = form_bool('is_active')
         product.discount_percent = form_float('discount_percent', product.discount_percent or 0, minimum=0, maximum=99)
+        product.vat_applicable = form_bool('vat_applicable')
+        product.vat_rate = form_float('vat_rate', product.vat_rate or (16 if product.vat_applicable else 0), minimum=0, maximum=100) if product.vat_applicable else 0
         product.product_condition = request.form.get('product_condition', product.product_condition or 'new')
         product.sale_mode = request.form.get('sale_mode', product.sale_mode or 'direct')
         product.bid_price = form_float('bid_price', product.bid_price or 0, minimum=0)
@@ -9805,13 +9982,23 @@ def seller_withdrawals():
         flash('Complete seller verification before requesting withdrawals.', 'warning')
         return redirect(url_for('seller_apply'))
     if request.method == 'POST':
+        action = request.form.get('action', 'withdraw')
+        if action == 'save_payout_account':
+            current_user.seller_payout_method = request.form.get('seller_payout_method', 'mpesa')
+            current_user.seller_payout_account = request.form.get('seller_payout_account', '').strip()
+            current_user.seller_payout_name = request.form.get('seller_payout_name', '').strip()
+            db.session.commit()
+            flash('Receiving account saved. Future seller disbursements can use this account.', 'success')
+            return redirect(url_for('seller_withdrawals'))
         amount = float(request.form.get('amount', 0) or 0)
         method = request.form.get('method', 'mpesa')
-        destination = request.form.get('destination', '').strip()
+        destination = request.form.get('destination', '').strip() or current_user.seller_payout_account or ''
         if current_user.seller_status == 'frozen':
             flash('Withdrawals are blocked while your account is frozen. Submit an appeal to admin.', 'danger')
         elif amount <= 0:
             flash('Enter a valid withdrawal amount.', 'danger')
+        elif not destination:
+            flash('Add a receiving account before requesting withdrawal.', 'danger')
         elif amount > seller_available_balance(current_user.id):
             flash('That amount is not available yet. Seller payments are released only after buyers receive their products.', 'warning')
         else:
@@ -10573,6 +10760,9 @@ def admin_settings():
             'pesapal_consumer_secret': '',
             'dpo_company_token': '',
             'auto_disbursement_cadence': 'weekly',
+            'platform_commission_receiving_method': 'mpesa',
+            'platform_commission_receiving_account': '174379',
+            'platform_commission_receiving_name': 'SMARK-AFRICA Commission',
             'seller_ads_enabled': '0',
             'seller_ad_service_fee_percent': '2',
             'seller_ad_daily_price': '15',
@@ -10609,6 +10799,8 @@ def admin_settings():
         mvp_only_keys = {
             'about_content', 'terms_content', 'user_agreement_content',
             'seller_signup_enabled', 'seller_ads_enabled', 'auto_disbursement_cadence',
+            'platform_commission_receiving_method', 'platform_commission_receiving_account',
+            'platform_commission_receiving_name',
             'seller_ad_daily_price', 'seller_ad_weekly_price', 'seller_ad_monthly_price',
             'kyc_system_only_enabled'
         }
@@ -11410,6 +11602,9 @@ def ensure_phase_two_schema():
             ('frozen_funds', 'frozen_funds FLOAT DEFAULT 0'),
             ('salary_payment_method', "salary_payment_method VARCHAR(30) DEFAULT 'mpesa'"),
             ('salary_account_number', 'salary_account_number VARCHAR(120)'),
+            ('seller_payout_method', "seller_payout_method VARCHAR(30) DEFAULT 'mpesa'"),
+            ('seller_payout_account', 'seller_payout_account VARCHAR(160)'),
+            ('seller_payout_name', 'seller_payout_name VARCHAR(160)'),
             ('work_start_date', 'work_start_date DATE'),
             ('ai_training_coins', 'ai_training_coins INTEGER DEFAULT 0'),
             ('is_verified_seller', 'is_verified_seller BOOLEAN DEFAULT 0'),
@@ -11422,6 +11617,8 @@ def ensure_phase_two_schema():
             ('seller_id', 'seller_id INTEGER'),
             ('sale_mode', "sale_mode VARCHAR(20) DEFAULT 'direct'"),
             ('bid_price', 'bid_price FLOAT DEFAULT 0'),
+            ('vat_applicable', 'vat_applicable BOOLEAN DEFAULT 0'),
+            ('vat_rate', 'vat_rate FLOAT DEFAULT 0'),
             ('product_condition', "product_condition VARCHAR(30) DEFAULT 'new'"),
             ('review_status', "review_status VARCHAR(30) DEFAULT 'approved'"),
             ('commission_percent', 'commission_percent FLOAT DEFAULT 15'),
@@ -11447,7 +11644,15 @@ def ensure_phase_two_schema():
         'transactions': [
             ('commission_amount', 'commission_amount FLOAT DEFAULT 0'),
             ('tax_amount', 'tax_amount FLOAT DEFAULT 0'),
+            ('destination_account', 'destination_account VARCHAR(200)'),
+            ('settlement_group', 'settlement_group VARCHAR(80)'),
+            ('disbursed_at', 'disbursed_at DATETIME'),
             ('available_on', 'available_on DATETIME'),
+        ],
+        'point_of_sale_items': [
+            ('list_price', 'list_price FLOAT DEFAULT 0'),
+            ('discount_amount', 'discount_amount FLOAT DEFAULT 0'),
+            ('tax_amount', 'tax_amount FLOAT DEFAULT 0'),
         ],
         'ad_campaigns': [
             ('objective', 'objective VARCHAR(80)'),
@@ -11979,7 +12184,7 @@ def seed_shipping_rates():
 def init_database():
     """Initialize database with default admin user and settings"""
     db.create_all()
-    schema_version = '2026-07-29-product-create-schema-fix'
+    schema_version = '2026-07-30-pos-vat-raffle-ledger'
     if Setting.get('phase_two_schema_version', '') != schema_version:
         ensure_phase_two_schema()
         Setting.set('phase_two_schema_version', schema_version)
@@ -12060,6 +12265,9 @@ def init_database():
         'show_country_launch_popup': '1',
         'seller_signup_enabled': '0',
         'seller_ads_enabled': '0',
+        'platform_commission_receiving_method': 'mpesa',
+        'platform_commission_receiving_account': '174379',
+        'platform_commission_receiving_name': 'SMARK-AFRICA Commission',
         'seller_ad_service_fee_percent': '2',
         'seller_ad_daily_price': '15',
         'seller_ad_weekly_price': '100',

@@ -175,6 +175,21 @@
                         </select>
                     </div>
                     <div class="col-md-4">
+                        <label class="form-label">Commission Receiving Method</label>
+                        <select name="platform_commission_receiving_method" class="form-select">
+                            <option value="mpesa" {{ 'selected' if settings.platform_commission_receiving_method != 'bank' }}>M-Pesa</option>
+                            <option value="bank" {{ 'selected' if settings.platform_commission_receiving_method == 'bank' }}>Bank</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Commission Receiving Account</label>
+                        <input name="platform_commission_receiving_account" class="form-control" value="{{ settings.platform_commission_receiving_account or settings.daraja_shortcode or '174379' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Commission Account Name</label>
+                        <input name="platform_commission_receiving_name" class="form-control" value="{{ settings.platform_commission_receiving_name or 'SMARK-AFRICA Commission' }}">
+                    </div>
+                    <div class="col-md-4">
                         <label class="form-label">Seller Ad Service Fee %</label>
                         <input name="seller_ad_service_fee_percent" type="number" step="0.01" min="0" class="form-control" value="{{ settings.seller_ad_service_fee_percent or '2' }}">
                     </div>

@@ -263,6 +263,13 @@
                         <div class="col-md-4"><input name="buying_price" type="number" step="0.01" min="0" class="form-control" placeholder="Cost"></div>
                         <div class="col-md-4"><input name="selling_price" type="number" step="0.01" min="0" class="form-control" placeholder="Selling" required></div>
                         <div class="col-md-4"><input name="stock" type="number" min="0" class="form-control" placeholder="Stock"></div>
+                        <div class="col-md-5">
+                            <label class="form-check small">
+                                <input class="form-check-input" type="checkbox" name="vat_applicable" value="1">
+                                <span class="form-check-label">VAT applies</span>
+                            </label>
+                        </div>
+                        <div class="col-md-3"><input name="vat_rate" type="number" step="0.01" min="0" max="100" class="form-control" value="16" placeholder="VAT %"></div>
                         <div class="col-md-8"><input name="barcode" class="form-control" placeholder="Barcode optional; auto-generated if blank"></div>
                         <div class="col-md-4"><input name="weight_kg" type="number" step="0.01" min="0" class="form-control" placeholder="Kg"></div>
                         <div class="col-12"><input name="short_description" class="form-control" placeholder="SKU, supplier code, brand, pack size"></div>
@@ -460,24 +467,26 @@
         const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
         return token ? {'Content-Type': 'application/json', 'X-CSRFToken': token} : {'Content-Type': 'application/json'};
     }
+    function populateRegistrationBarcode(barcode) {
+        const regBarcodeField = document.querySelector('input[name="barcode"]');
+        const clean = String(barcode || '').trim();
+        if (!regBarcodeField || !clean) return;
+        regBarcodeField.value = clean;
+        regBarcodeField.classList.add('border-warning');
+        setTimeout(() => regBarcodeField.classList.remove('border-warning'), 3000);
+    }
     async function pollPhoneScanner() {
         try {
             const response = await fetch('{{ url_for("admin_pos_latest_scan") }}', {cache: 'no-store'});
             if (!response.ok) return;
             const data = await response.json();
             if (!data.success) return;
+            if (data.barcode) populateRegistrationBarcode(data.barcode);
             if (data.cart) renderCart(data.cart);
             if (data.product_name) {
                 if (status) status.textContent = `${data.action === 'remove' ? 'removed' : 'received'} ${data.product_name}`;
             } else if (data.barcode) {
                 if (status) status.textContent = `scanned ${data.barcode} - product not found`;
-                const regBarcodeField = document.querySelector('input[name="barcode"]');
-                if (regBarcodeField) {
-                    regBarcodeField.value = data.barcode;
-                    regBarcodeField.scrollIntoView({behavior: 'smooth', block: 'center'});
-                    regBarcodeField.classList.add('border-warning');
-                    setTimeout(() => regBarcodeField.classList.remove('border-warning'), 3000);
-                }
             }
         } catch (error) {
             if (status) status.textContent = 'offline';
@@ -514,6 +523,7 @@
     async function submitScannerBarcode(barcode, sourceLabel) {
         const clean = String(barcode || '').trim();
         if (!clean) return;
+        populateRegistrationBarcode(clean);
         const response = await fetch('{{ url_for("admin_pos_cart_add") }}', {
             method: 'POST',
             headers: csrfHeaders(),
@@ -525,13 +535,6 @@
             if (status) status.textContent = `added from ${sourceLabel}`;
         } else {
             if (status) status.textContent = data.error || 'barcode not found';
-            const regBarcodeField = document.querySelector('input[name="barcode"]');
-            if (regBarcodeField) {
-                regBarcodeField.value = clean;
-                regBarcodeField.scrollIntoView({behavior: 'smooth', block: 'center'});
-                regBarcodeField.classList.add('border-warning');
-                setTimeout(() => regBarcodeField.classList.remove('border-warning'), 3000);
-            }
         }
     }
     if (wiredInput) {

@@ -186,6 +186,12 @@
                         <td>
                             {{ item.product_name[:28] }}
                             <span class="receipt-product-code">{{ item.product_id }}</span>
+                            {% if item.discount_amount and item.discount_amount > 0 %}
+                            <span class="receipt-product-code">Disc {{ "%.2f"|format(item.discount_amount) }}{% if item.list_price %} from {{ "%.2f"|format(item.list_price) }}{% endif %}</span>
+                            {% endif %}
+                            {% if item.tax_amount and item.tax_amount > 0 %}
+                            <span class="receipt-product-code">VAT {{ "%.2f"|format(item.tax_amount) }}</span>
+                            {% endif %}
                         </td>
                         <td class="qty">{{ "%.3f"|format(item.quantity) }}</td>
                         <td class="money">{{ "%.2f"|format(item.unit_price) }}</td>
