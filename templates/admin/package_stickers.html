@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Package Stickers - {{ super() }}{% endblock %}
+
+{% block content %}
+{% set sticker_class = 'sticker-' ~ size %}
+<style>
+.sticker-toolbar {
+    max-width: 1100px;
+    margin: 0 auto 18px;
+}
+.sticker-sheet {
+    max-width: 1100px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 10px;
+}
+.package-sticker {
+    min-height: 132px;
+    border: 1px dashed rgba(18, 92, 55, 0.65);
+    background: #fff;
+    color: #123421;
+    padding: 10px;
+    display: grid;
+    grid-template-columns: 58px 1fr 34px;
+    align-items: center;
+    gap: 8px;
+    break-inside: avoid;
+    position: relative;
+}
+.package-sticker img {
+    width: 58px;
+    height: 58px;
+    object-fit: contain;
+}
+.sticker-message {
+    font-weight: 800;
+    font-size: 15px;
+    line-height: 1.15;
+}
+.sticker-subtext {
+    color: #f58212;
+    font-size: 11px;
+    font-weight: 700;
+    margin-top: 3px;
+}
+.sticker-mark {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: #0b5a2c;
+    color: #fff;
+    font-size: 16px;
+}
+.sticker-small {
+    min-height: 96px;
+    grid-template-columns: 44px 1fr 28px;
+}
+.sticker-small img {
+    width: 44px;
+    height: 44px;
+}
+.sticker-small .sticker-message {
+    font-size: 12px;
+}
+.sticker-small .sticker-mark {
+    width: 26px;
+    height: 26px;
+    font-size: 13px;
+}
+.sticker-large {
+    min-height: 168px;
+    grid-template-columns: 76px 1fr 44px;
+}
+.sticker-large img {
+    width: 76px;
+    height: 76px;
+}
+.sticker-large .sticker-message {
+    font-size: 18px;
+}
+.sticker-large .sticker-mark {
+    width: 40px;
+    height: 40px;
+    font-size: 19px;
+}
+@media print {
+    @page {
+        size: A4;
+        margin: 8mm;
+    }
+    body,
+    main,
+    .container-fluid {
+        background: #fff !important;
+        color: #111 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+    .navbar,
+    footer,
+    .sticker-toolbar,
+    .no-print {
+        display: none !important;
+    }
+    .sticker-sheet {
+        max-width: none;
+        gap: 4mm;
+        grid-template-columns: repeat(3, 1fr);
+    }
+    .package-sticker {
+        box-shadow: none;
+        border: 1px dashed #444;
+        page-break-inside: avoid;
+    }
+}
+</style>
+
+<div class="container-fluid py-4">
+    <div class="sticker-toolbar">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
+            <div>
+                <h2 class="mb-1"><i class="fas fa-tags me-2"></i>Package Stickers</h2>
+                <div class="small text-muted">Print customer package stickers with the current Smark-Africa logo.</div>
+            </div>
+            <div class="d-flex gap-2">
+                <button class="btn btn-gold" type="button" onclick="window.print()"><i class="fas fa-print me-1"></i>Print Stickers</button>
+                <a href="{{ url_for('admin_pos') }}" class="btn btn-outline-secondary">Back to POS</a>
+            </div>
+        </div>
+
+        <form method="GET" class="card border-0 shadow-sm">
+            <div class="card-body row g-3 align-items-end">
+                <div class="col-md-5">
+                    <label class="form-label">Sticker Message</label>
+                    <input name="message" class="form-control" maxlength="80" value="{{ message }}">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">Size</label>
+                    <select name="size" class="form-select">
+                        <option value="small" {{ 'selected' if size == 'small' }}>Small package seal</option>
+                        <option value="medium" {{ 'selected' if size == 'medium' }}>Medium label</option>
+                        <option value="large" {{ 'selected' if size == 'large' }}>Large package label</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Quantity</label>
+                    <input name="quantity" type="number" min="1" max="120" class="form-control" value="{{ quantity }}">
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-outline-warning w-100" type="submit"><i class="fas fa-wand-magic-sparkles me-1"></i>Generate</button>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <section class="sticker-sheet">
+        {% for sticker in stickers %}
+        <article class="package-sticker {{ sticker_class }}">
+            <img src="{{ url_for('static', filename='images/smark-africa-logo.png') }}" alt="Smark-Africa">
+            <div>
+                <div class="sticker-message">{{ sticker.message }}</div>
+                <div class="sticker-subtext">Buy. Sell. Grow Africa.</div>
+            </div>
+            <div class="sticker-mark" aria-label="Gratitude mark">{{ sticker.mark }}</div>
+        </article>
+        {% endfor %}
+    </section>
+</div>
+{% endblock %}

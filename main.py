@@ -7899,8 +7899,12 @@ def pos_document_html(sale, title='Invoice'):
     document_no = sale.invoice_number if title == 'Invoice' else sale.receipt_number
     pre_vat = (sale.total_amount or 0) - (sale.tax_amount or 0)
     tax_code = 'G - 16.0%' if sale.tax_amount and sale.tax_amount > 0 else 'Z - 0.0%'
+    logo_url = url_for('static', filename='images/smark-africa-logo.png', _external=True)
     return f"""
-    <h2>SMARK-AFRICA {title}</h2>
+    <div style="text-align:center;margin-bottom:12px">
+        <img src="{logo_url}" alt="SMARK-AFRICA" style="max-width:120px;height:auto">
+        <h2 style="margin:6px 0 0">SMARK-AFRICA {title}</h2>
+    </div>
     <p><strong>{title} No:</strong> {document_no}</p>
     <p><strong>Customer:</strong> {sale.customer_name or 'Walk-in customer'}</p>
     <p><strong>Date:</strong> {sale.created_at.strftime('%d %b %Y %H:%M')}</p>
@@ -8375,6 +8379,29 @@ def admin_pos_labels():
         product.pos_barcode = product_barcode_value(product)
     db.session.commit()
     return render_template('admin/pos_labels.html', products=products)
+
+
+@app.route('/admin/pos/stickers')
+@login_required
+@admin_required
+def admin_package_stickers():
+    quantity = max(1, min(request.args.get('quantity', 24, type=int) or 24, 120))
+    size = request.args.get('size', 'medium')
+    if size not in {'small', 'medium', 'large'}:
+        size = 'medium'
+    message = (request.args.get('message') or 'Thank you for shopping with us').strip()
+    if len(message) > 80:
+        message = message[:80].strip()
+    gratitude_marks = ['★', '♥', '✓', '✦', '☀', '🎁', '😊', '🌿']
+    stickers = [
+        {
+            'message': message,
+            'mark': gratitude_marks[index % len(gratitude_marks)],
+            'number': index + 1,
+        }
+        for index in range(quantity)
+    ]
+    return render_template('admin/package_stickers.html', stickers=stickers, quantity=quantity, size=size, message=message)
 
 
 def pos_report_payload(start=None, end=None):

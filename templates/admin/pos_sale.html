@@ -31,6 +31,13 @@
     font-weight: 800;
     letter-spacing: 1px;
 }
+.receipt-logo {
+    width: 34mm;
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 0 auto 4px;
+}
 .thermal-muted { color: #444; }
 .thermal-rule {
     border: 0;
@@ -143,6 +150,7 @@
 
         <section class="thermal-sheet">
             <div class="thermal-center">
+                <img class="receipt-logo" src="{{ url_for('static', filename='images/smark-africa-logo.png') }}" alt="SMARK-AFRICA">
                 <div class="thermal-brand">SMARK-AFRICA</div>
                 <div>SHOP SMARTER, LIVE BETTER</div>
                 <div>P.O. Box 930, Kirinyaga, Kenya</div>
@@ -233,6 +241,7 @@
         </section>
 
         <section class="thermal-sheet receipt-back">
+            <img class="receipt-logo" src="{{ url_for('static', filename='images/smark-africa-logo.png') }}" alt="SMARK-AFRICA">
             <div class="thermal-brand">SMARK-AFRICA</div>
             <h3>Thank You</h3>
             <p>We appreciate your purchase and your trust in SMARK-Africa.</p>
