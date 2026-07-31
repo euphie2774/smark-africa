@@ -6,17 +6,7 @@
     <div class="row g-4">
         <div class="col-lg-5">
             <h1 class="fw-bold">Seller Verification</h1>
-            <p class="text-muted">Attach a valid ID or passport, a clear face photo, phone details, country, and a bank card last four digits for buyer protection cases.</p>
-            <div class="card border-0 shadow-sm mb-3">
-                <div class="card-body">
-                    <h5 class="fw-bold mb-2">SmarkAfrica Free KYC</h5>
-                    <ul class="small text-muted mb-0">
-                        {% for item in kyc_policy %}
-                        <li>{{ item }}</li>
-                        {% endfor %}
-                    </ul>
-                </div>
-            </div>
+            <p class="text-muted">Complete a secure identity check so your seller account can be reviewed for marketplace protection.</p>
             {% if verification %}
             <div class="alert alert-info">
                 Latest status: <strong>{{ verification.status }}</strong><br>
@@ -29,20 +19,17 @@
             <div class="card border-0 shadow-sm">
                 <div class="card-body">
                     {% if kyc_provider == 'didit' %}
-                    <h5 class="fw-bold mb-2">Didit Hosted Verification</h5>
-                    <p class="text-muted">Start a secure hosted KYC session. Your seller status updates automatically after Didit completes the review.</p>
+                    <h5 class="fw-bold mb-2">Secure Seller Verification</h5>
+                    <p class="text-muted">Start the secure identity check. Your seller status updates automatically after the review is complete.</p>
                     {% if not didit_status.ready %}
                     <div class="alert alert-warning small">
-                        Didit is selected but not fully configured. Missing: {{ didit_status.missing|join(', ') }}.
+                        Seller verification is being configured. Please try again shortly.
                     </div>
                     {% endif %}
-                    <form method="POST" action="{{ url_for('seller_didit_start') }}">
+                    <form method="POST" action="{{ url_for('seller_verification_start') }}" data-hosted-verification-form>
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                        <button class="btn btn-gold btn-lg" {% if not didit_status.ready %}disabled{% endif %}>Start Didit Verification</button>
+                        <button class="btn btn-gold btn-lg" {% if not didit_status.ready %}disabled{% endif %} data-hosted-verification-button>Start Verification</button>
                     </form>
-                    {% if didit_status.webhook_url %}
-                    <div class="form-text mt-3">Didit webhook URL: {{ didit_status.webhook_url }}</div>
-                    {% endif %}
                     {% else %}
                     <form method="POST" enctype="multipart/form-data" class="row g-3">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
@@ -104,6 +91,19 @@
 
 {% block scripts %}
 {{ super() }}
+{% if kyc_provider == 'didit' %}
+<script>
+const hostedVerificationForm = document.querySelector('[data-hosted-verification-form]');
+if (hostedVerificationForm) {
+    hostedVerificationForm.addEventListener('submit', () => {
+        const button = hostedVerificationForm.querySelector('[data-hosted-verification-button]');
+        if (!button) return;
+        button.disabled = true;
+        button.textContent = 'Opening verification...';
+    });
+}
+</script>
+{% endif %}
 {% if kyc_provider != 'didit' %}
 <script>
 async function startCapture(videoId, facingMode = 'environment') {

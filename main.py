@@ -4554,7 +4554,7 @@ def didit_decision_scores(payload):
     return best_score(['face_matches', 'face_match']), best_score(['liveness_checks', 'liveness'])
 
 
-def upsert_didit_verification(user, session_id, status='awaiting_user', notes='Didit hosted KYC session created.'):
+def upsert_didit_verification(user, session_id, status='awaiting_user', notes='Hosted seller verification session created.'):
     fingerprint = didit_document_fingerprint(session_id)
     kyc = KYCIdentityVerification.query.filter_by(provider='didit', provider_reference=session_id).first()
     if not kyc:
@@ -4589,14 +4589,31 @@ def create_didit_session_for_user(user):
     api_key = didit_api_key()
     if not api_key:
         raise RuntimeError('DIDIT_API_KEY is not configured on the server.')
+    payload = {
+        'workflow_id': didit_workflow_id(),
+        'vendor_data': str(user.id),
+        'callback': didit_callback_url(),
+        'callback_method': 'both',
+        'metadata': {
+            'user_id': user.id,
+            'source': 'seller_verification',
+        },
+        'language': 'en',
+    }
+    contact_details = {}
+    if user.email:
+        contact_details['email'] = user.email
+        contact_details['send_notification_emails'] = True
+        contact_details['email_lang'] = 'en'
+    if user.phone:
+        contact_details['phone'] = user.phone
+    if contact_details:
+        payload['contact_details'] = contact_details
+
     response = requests.post(
         'https://verification.didit.me/v3/session/',
         headers={'x-api-key': api_key, 'Content-Type': 'application/json'},
-        json={
-            'workflow_id': didit_workflow_id(),
-            'vendor_data': str(user.id),
-            'callback': didit_callback_url(),
-        },
+        json=payload,
         timeout=20,
     )
     response.raise_for_status()
@@ -4626,7 +4643,7 @@ def apply_didit_status(payload):
         logger.warning('Didit webhook could not match user/session: %s', payload)
         return False
 
-    notes = f'Didit status: {didit_status or "Unknown"}.'
+    notes = f'Verification status: {didit_status or "Unknown"}.'
     face_score, liveness_score = didit_decision_scores(payload)
     kyc, verification = upsert_didit_verification(user, session_id, local_status, notes)
     kyc.face_match_score = face_score
@@ -10032,7 +10049,7 @@ def seller_apply():
     kyc_provider = selected_kyc_provider()
     if request.method == 'POST':
         if kyc_provider == 'didit':
-            flash('Start the hosted Didit verification session to continue seller KYC.', 'info')
+            flash('Start the secure verification session to continue seller approval.', 'info')
             return redirect(url_for('seller_apply'))
         legal_name = request.form.get('legal_name', '').strip()
         country = request.form.get('country', '').strip()
@@ -10168,9 +10185,19 @@ def seller_apply():
                            kyc_provider=kyc_provider, didit_status=didit_config_status())
 
 
+@app.route('/seller/verification/start', methods=['POST'])
+@login_required
+def seller_verification_start():
+    return start_hosted_seller_verification()
+
+
 @app.route('/seller/kyc/didit/start', methods=['POST'])
 @login_required
 def seller_didit_start():
+    return start_hosted_seller_verification()
+
+
+def start_hosted_seller_verification():
     if Setting.get('seller_signup_enabled', '0') != '1':
         flash(SELLER_SOON_MESSAGE, 'info')
         return redirect(url_for('home'))
@@ -10178,18 +10205,18 @@ def seller_didit_start():
         flash('Admins are already approved platform operators.', 'info')
         return redirect(url_for('admin_dashboard'))
     if not didit_enabled():
-        flash('Hosted Didit KYC is not enabled in settings.', 'warning')
+        flash('Hosted seller verification is not enabled in settings.', 'warning')
         return redirect(url_for('seller_apply'))
     status = didit_config_status()
     if not status['ready']:
-        flash(f'Didit KYC is missing: {", ".join(status["missing"])}.', 'danger')
+        flash('Seller verification is not fully configured yet. Please try again shortly.', 'danger')
         return redirect(url_for('seller_apply'))
     try:
         session_data = create_didit_session_for_user(current_user)
         return redirect(session_data['url'])
     except Exception as exc:
         logger.error('Could not create Didit KYC session: %s', exc, exc_info=True)
-        flash('Could not start Didit KYC right now. Check the Didit API credentials and try again.', 'danger')
+        flash('Could not start seller verification right now. Please try again shortly.', 'danger')
         return redirect(url_for('seller_apply'))
 
 
