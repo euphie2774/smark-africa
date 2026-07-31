@@ -95,11 +95,53 @@
 <script>
 const hostedVerificationForm = document.querySelector('[data-hosted-verification-form]');
 if (hostedVerificationForm) {
-    hostedVerificationForm.addEventListener('submit', () => {
+    hostedVerificationForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
         const button = hostedVerificationForm.querySelector('[data-hosted-verification-button]');
-        if (!button) return;
-        button.disabled = true;
-        button.textContent = 'Opening verification...';
+        const originalText = button ? button.textContent : '';
+        let message = hostedVerificationForm.querySelector('[data-hosted-verification-message]');
+        if (!message) {
+            message = document.createElement('div');
+            message.className = 'form-text mt-3';
+            message.setAttribute('data-hosted-verification-message', '');
+            hostedVerificationForm.appendChild(message);
+        }
+        if (button) {
+            button.disabled = true;
+            button.textContent = 'Opening verification...';
+        }
+        message.textContent = '';
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 25000);
+        try {
+            const response = await fetch(hostedVerificationForm.action, {
+                method: 'POST',
+                body: new FormData(hostedVerificationForm),
+                headers: {
+                    'Accept': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                credentials: 'same-origin',
+                signal: controller.signal
+            });
+            const result = await response.json().catch(() => ({}));
+            if (response.ok && result.url) {
+                window.location.assign(result.url);
+                return;
+            }
+            throw new Error(result.error || 'Could not open verification. Please try again.');
+        } catch (error) {
+            message.textContent = error.name === 'AbortError'
+                ? 'Verification is taking too long to open. Please try again.'
+                : error.message;
+            if (button) {
+                button.disabled = false;
+                button.textContent = originalText || 'Start Verification';
+            }
+        } finally {
+            clearTimeout(timeoutId);
+        }
     });
 }
 </script>

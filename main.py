@@ -4506,6 +4506,19 @@ def didit_callback_url():
     return f"{public_base_url()}{url_for('seller_apply')}"
 
 
+def didit_contact_phone(phone):
+    normalized = normalize_mpesa_phone(phone)
+    return f'+{normalized}' if normalized else ''
+
+
+def wants_json_response():
+    return (
+        request.is_json or
+        request.headers.get('X-Requested-With') == 'XMLHttpRequest' or
+        request.accept_mimetypes.best == 'application/json'
+    )
+
+
 def didit_canonical_payload(value):
     if isinstance(value, dict):
         return {key: didit_canonical_payload(value[key]) for key in sorted(value)}
@@ -4605,16 +4618,17 @@ def create_didit_session_for_user(user):
         contact_details['email'] = user.email
         contact_details['send_notification_emails'] = True
         contact_details['email_lang'] = 'en'
-    if user.phone:
-        contact_details['phone'] = user.phone
+    phone = didit_contact_phone(user.phone)
+    if phone:
+        contact_details['phone'] = phone
     if contact_details:
         payload['contact_details'] = contact_details
 
     response = requests.post(
         'https://verification.didit.me/v3/session/',
-        headers={'x-api-key': api_key, 'Content-Type': 'application/json'},
+        headers={'x-api-key': api_key, 'Content-Type': 'application/json', 'Accept': 'application/json'},
         json=payload,
-        timeout=20,
+        timeout=(5, 15),
     )
     response.raise_for_status()
     data = response.json()
@@ -10198,24 +10212,52 @@ def seller_didit_start():
 
 
 def start_hosted_seller_verification():
+    wants_json = wants_json_response()
     if Setting.get('seller_signup_enabled', '0') != '1':
+        if wants_json:
+            return jsonify({'success': False, 'error': SELLER_SOON_MESSAGE}), 403
         flash(SELLER_SOON_MESSAGE, 'info')
         return redirect(url_for('home'))
     if current_user.is_admin:
+        if wants_json:
+            return jsonify({'success': False, 'error': 'Admins are already approved platform operators.'}), 403
         flash('Admins are already approved platform operators.', 'info')
         return redirect(url_for('admin_dashboard'))
     if not didit_enabled():
+        if wants_json:
+            return jsonify({'success': False, 'error': 'Hosted seller verification is not enabled in settings.'}), 400
         flash('Hosted seller verification is not enabled in settings.', 'warning')
         return redirect(url_for('seller_apply'))
     status = didit_config_status()
     if not status['ready']:
+        if wants_json:
+            return jsonify({'success': False, 'error': 'Seller verification is not fully configured yet. Please try again shortly.'}), 503
         flash('Seller verification is not fully configured yet. Please try again shortly.', 'danger')
         return redirect(url_for('seller_apply'))
     try:
         session_data = create_didit_session_for_user(current_user)
+        if wants_json:
+            return jsonify({'success': True, 'url': session_data['url']})
         return redirect(session_data['url'])
+    except requests.Timeout as exc:
+        logger.error('Timed out creating Didit KYC session: %s', exc, exc_info=True)
+        message = 'Verification is taking too long to open. Please try again.'
+        if wants_json:
+            return jsonify({'success': False, 'error': message}), 504
+        flash(message, 'danger')
+        return redirect(url_for('seller_apply'))
+    except requests.HTTPError as exc:
+        response_text = exc.response.text[:500] if exc.response is not None else ''
+        logger.error('Could not create Didit KYC session: %s %s', exc, response_text, exc_info=True)
+        message = 'Could not start seller verification right now. Please try again shortly.'
+        if wants_json:
+            return jsonify({'success': False, 'error': message}), 502
+        flash(message, 'danger')
+        return redirect(url_for('seller_apply'))
     except Exception as exc:
         logger.error('Could not create Didit KYC session: %s', exc, exc_info=True)
+        if wants_json:
+            return jsonify({'success': False, 'error': 'Could not start seller verification right now. Please try again shortly.'}), 500
         flash('Could not start seller verification right now. Please try again shortly.', 'danger')
         return redirect(url_for('seller_apply'))
 
