@@ -348,10 +348,18 @@
                     <div class="col-md-4">
                         <label class="form-label">KYC Provider</label>
                         <select name="kyc_provider" class="form-select">
-                            <option value="inbuilt" {{ 'selected' if settings.kyc_provider != 'external' }}>Inbuilt review and fingerprinting</option>
+                            <option value="inbuilt" {{ 'selected' if settings.kyc_provider not in ['didit', 'external'] }}>Inbuilt review and fingerprinting</option>
+                            <option value="didit" {{ 'selected' if settings.kyc_provider == 'didit' }}>Didit hosted verification</option>
                             <option value="external" {{ 'selected' if settings.kyc_provider == 'external' }}>External provider configured separately</option>
                         </select>
                     </div>
+                    {% if current_user.admin_level == 'mvp' %}
+                    <div class="col-md-4">
+                        <label class="form-label">Didit Workflow ID</label>
+                        <input name="didit_workflow_id" class="form-control" value="{{ settings.didit_workflow_id or '9dcb8c91-e2f1-41aa-a20b-59de798c80e8' }}">
+                        <div class="form-text">Keep DIDIT_API_KEY and DIDIT_WEBHOOK_SECRET as deployment environment variables.</div>
+                    </div>
+                    {% endif %}
                     {% if current_user.admin_level == 'mvp' %}
                     <div class="col-md-4">
                         <label class="form-label">KYC Approval Mode</label>

@@ -929,6 +929,13 @@ def database_status_summary():
     return {'backend': 'Database', 'persistent': bool(uri), 'display': 'configured' if uri else 'not configured'}
 
 
+def public_base_url():
+    configured = (Setting.get('app_base_url', '') or os.environ.get('APP_BASE_URL', '')).strip()
+    if configured:
+        return configured.rstrip('/')
+    return request.host_url.rstrip('/') if request else ''
+
+
 def allowed_file(filename):
     """Return True for supported safe product image filenames."""
     return bool(filename and is_safe_file(filename, 'image'))
@@ -4436,6 +4443,206 @@ def user_has_storefront(user):
         BusinessStorefront.owner_id == user.id,
         BusinessStorefront.status.in_(['approved', 'active', 'verified'])
     ).first() is not None
+
+
+DIDIT_WORKFLOW_ID_DEFAULT = '9dcb8c91-e2f1-41aa-a20b-59de798c80e8'
+DIDIT_STATUS_MAP = {
+    'Not Started': 'awaiting_user',
+    'In Progress': 'in_progress',
+    'Awaiting User': 'awaiting_user',
+    'In Review': 'manual_review',
+    'Approved': 'approved',
+    'Declined': 'rejected',
+    'Resubmitted': 'manual_review',
+    'Abandoned': 'abandoned',
+    'Expired': 'expired',
+    'Kyc Expired': 'expired',
+}
+
+
+def didit_workflow_id():
+    return (Setting.get('didit_workflow_id', DIDIT_WORKFLOW_ID_DEFAULT) or DIDIT_WORKFLOW_ID_DEFAULT).strip()
+
+
+def didit_api_key():
+    return (os.environ.get('DIDIT_API_KEY') or '').strip()
+
+
+def didit_webhook_secret():
+    return (os.environ.get('DIDIT_WEBHOOK_SECRET') or '').strip()
+
+
+def didit_enabled():
+    return Setting.get('kyc_provider', 'inbuilt') == 'didit'
+
+
+def didit_config_status():
+    missing = []
+    if not didit_workflow_id():
+        missing.append('DIDIT workflow ID')
+    if not didit_api_key():
+        missing.append('DIDIT_API_KEY')
+    if not didit_webhook_secret():
+        missing.append('DIDIT_WEBHOOK_SECRET')
+    return {
+        'ready': not missing,
+        'missing': missing,
+        'workflow_id': didit_workflow_id(),
+        'webhook_url': f"{public_base_url()}{url_for('didit_webhook')}" if public_base_url() else '',
+    }
+
+
+def didit_document_fingerprint(session_id):
+    return hashlib.sha256(f'didit:{session_id}'.encode('utf-8')).hexdigest()
+
+
+def didit_callback_url():
+    return f"{public_base_url()}{url_for('seller_apply')}"
+
+
+def didit_canonical_payload(value):
+    if isinstance(value, dict):
+        return {key: didit_canonical_payload(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [didit_canonical_payload(item) for item in value]
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def didit_signature_is_valid(payload):
+    secret = didit_webhook_secret()
+    signature = request.headers.get('X-Signature-V2', '')
+    timestamp = request.headers.get('X-Timestamp', '')
+    if not secret or not signature or not timestamp:
+        return False
+    try:
+        event_time = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return False
+    if abs((utcnow().replace(tzinfo=timezone.utc) - event_time).total_seconds()) > 300:
+        return False
+    canonical = json.dumps(didit_canonical_payload(payload), ensure_ascii=False, separators=(',', ':'))
+    expected = hmac.new(secret.encode('utf-8'), canonical.encode('utf-8'), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def didit_decision_scores(payload):
+    decision = payload.get('decision') or payload.get('verification') or {}
+
+    def best_score(keys):
+        scores = []
+        for key in keys:
+            value = decision.get(key) or payload.get(key) or []
+            if isinstance(value, dict):
+                value = [value]
+            for item in value:
+                if isinstance(item, dict):
+                    score = item.get('score') or item.get('confidence') or item.get('value')
+                    try:
+                        scores.append(float(score))
+                    except (TypeError, ValueError):
+                        pass
+        return max(scores) if scores else 0.0
+
+    return best_score(['face_matches', 'face_match']), best_score(['liveness_checks', 'liveness'])
+
+
+def upsert_didit_verification(user, session_id, status='awaiting_user', notes='Didit hosted KYC session created.'):
+    fingerprint = didit_document_fingerprint(session_id)
+    kyc = KYCIdentityVerification.query.filter_by(provider='didit', provider_reference=session_id).first()
+    if not kyc:
+        kyc = KYCIdentityVerification(
+            user_id=user.id,
+            provider='didit',
+            provider_reference=session_id,
+            document_type='didit_hosted',
+            document_fingerprint=fingerprint,
+        )
+        db.session.add(kyc)
+    kyc.user_id = user.id
+    kyc.status = status
+    kyc.notes = notes
+    kyc.captcha_passed = True
+
+    verification = SellerVerification.query.filter_by(document_fingerprint=fingerprint).first()
+    if not verification:
+        verification = SellerVerification(
+            user_id=user.id,
+            document_type='didit_hosted',
+            document_fingerprint=fingerprint,
+        )
+        db.session.add(verification)
+    verification.status = status
+    verification.automated_score = 0
+    verification.notes = notes
+    return kyc, verification
+
+
+def create_didit_session_for_user(user):
+    api_key = didit_api_key()
+    if not api_key:
+        raise RuntimeError('DIDIT_API_KEY is not configured on the server.')
+    response = requests.post(
+        'https://verification.didit.me/v3/session/',
+        headers={'x-api-key': api_key, 'Content-Type': 'application/json'},
+        json={
+            'workflow_id': didit_workflow_id(),
+            'vendor_data': str(user.id),
+            'callback': didit_callback_url(),
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json()
+    session_id = data.get('session_id') or data.get('id')
+    verification_url = data.get('url') or data.get('verification_url')
+    if not session_id or not verification_url:
+        raise RuntimeError('Didit did not return a verification session URL.')
+    upsert_didit_verification(user, session_id)
+    user.verification_status = 'awaiting_user'
+    user.seller_status = 'pending'
+    user.is_verified_seller = False
+    db.session.commit()
+    return {'url': verification_url, 'session_id': session_id}
+
+
+def apply_didit_status(payload):
+    session_id = str(payload.get('session_id') or payload.get('id') or payload.get('reference_id') or '').strip()
+    vendor_data = str(payload.get('vendor_data') or '').strip()
+    didit_status = payload.get('status') or payload.get('verification_status') or ''
+    local_status = DIDIT_STATUS_MAP.get(didit_status, 'manual_review')
+    user = User.query.get(int(vendor_data)) if vendor_data.isdigit() else None
+    kyc = KYCIdentityVerification.query.filter_by(provider='didit', provider_reference=session_id).first() if session_id else None
+    if not user and kyc:
+        user = kyc.user
+    if not user or not session_id:
+        logger.warning('Didit webhook could not match user/session: %s', payload)
+        return False
+
+    notes = f'Didit status: {didit_status or "Unknown"}.'
+    face_score, liveness_score = didit_decision_scores(payload)
+    kyc, verification = upsert_didit_verification(user, session_id, local_status, notes)
+    kyc.face_match_score = face_score
+    kyc.liveness_score = liveness_score
+    kyc.reviewed_at = utcnow() if local_status in {'approved', 'rejected', 'expired'} else None
+    verification.automated_score = max(face_score, liveness_score)
+    verification.reviewed_at = kyc.reviewed_at
+
+    user.verification_status = local_status
+    user.verification_notes = notes
+    if local_status == 'approved':
+        user.seller_status = 'verified'
+        user.is_verified_seller = True
+        user.verified_seller_at = utcnow()
+    elif local_status == 'rejected':
+        user.seller_status = 'rejected'
+        user.is_verified_seller = False
+    else:
+        user.seller_status = 'pending'
+        user.is_verified_seller = False
+    db.session.commit()
+    return True
 
 
 def own_kyc_security_policy():
@@ -9816,7 +10023,11 @@ def seller_apply():
         return redirect(url_for('admin_dashboard'))
 
     latest = SellerVerification.query.filter_by(user_id=current_user.id).order_by(SellerVerification.created_at.desc()).first()
+    kyc_provider = Setting.get('kyc_provider', 'inbuilt')
     if request.method == 'POST':
+        if kyc_provider == 'didit':
+            flash('Start the hosted Didit verification session to continue seller KYC.', 'info')
+            return redirect(url_for('seller_apply'))
         legal_name = request.form.get('legal_name', '').strip()
         country = request.form.get('country', '').strip()
         phone = request.form.get('phone', current_user.phone or '').strip()
@@ -9842,6 +10053,7 @@ def seller_apply():
             else:
                 flash('You cannot become a seller on this platform due to security reasons unless an appeal is submitted and approved.', 'danger')
             return render_template('seller_apply.html', verification=latest, kyc_policy=own_kyc_security_policy(),
+                                   kyc_provider=kyc_provider, didit_status=didit_config_status(),
                                    blocked_blacklist=blacklist_match)
 
         document_path = ''
@@ -9946,7 +10158,53 @@ def seller_apply():
         flash('Seller application submitted. Approved applications can list products; manual reviews remain pending.', 'success')
         return redirect(url_for('seller_apply'))
 
-    return render_template('seller_apply.html', verification=latest, kyc_policy=own_kyc_security_policy())
+    return render_template('seller_apply.html', verification=latest, kyc_policy=own_kyc_security_policy(),
+                           kyc_provider=kyc_provider, didit_status=didit_config_status())
+
+
+@app.route('/seller/kyc/didit/start', methods=['POST'])
+@login_required
+def seller_didit_start():
+    if Setting.get('seller_signup_enabled', '0') != '1':
+        flash(SELLER_SOON_MESSAGE, 'info')
+        return redirect(url_for('home'))
+    if current_user.is_admin:
+        flash('Admins are already approved platform operators.', 'info')
+        return redirect(url_for('admin_dashboard'))
+    if not didit_enabled():
+        flash('Hosted Didit KYC is not enabled in settings.', 'warning')
+        return redirect(url_for('seller_apply'))
+    status = didit_config_status()
+    if not status['ready']:
+        flash(f'Didit KYC is missing: {", ".join(status["missing"])}.', 'danger')
+        return redirect(url_for('seller_apply'))
+    try:
+        session_data = create_didit_session_for_user(current_user)
+        return redirect(session_data['url'])
+    except Exception as exc:
+        logger.error('Could not create Didit KYC session: %s', exc, exc_info=True)
+        flash('Could not start Didit KYC right now. Check the Didit API credentials and try again.', 'danger')
+        return redirect(url_for('seller_apply'))
+
+
+@app.route('/webhooks/didit', methods=['POST'])
+@csrf.exempt
+def didit_webhook():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict) or not didit_signature_is_valid(payload):
+        logger.warning('Rejected Didit webhook with invalid signature or payload.')
+        return jsonify({'error': 'invalid signature'}), 401
+
+    event_id = str(payload.get('event_id') or payload.get('id') or '').strip()
+    if event_id:
+        dedupe_key = f'didit_event_{event_id}'
+        if Setting.get(dedupe_key):
+            return jsonify({'status': 'ok'})
+
+    applied = apply_didit_status(payload)
+    if event_id:
+        Setting.set(dedupe_key, utcnow().isoformat())
+    return jsonify({'status': 'ok', 'applied': applied})
 
 
 @app.route('/claims/new/<int:order_id>', methods=['GET', 'POST'])
@@ -10791,6 +11049,7 @@ def admin_settings():
             'coins_streak_bonus_7day': '25',
             'coins_event_participation': '20',
             'kyc_provider': 'inbuilt',
+            'didit_workflow_id': DIDIT_WORKFLOW_ID_DEFAULT,
             'kyc_system_only_enabled': '0',
             'sms_otp_enabled': '0',
         }
@@ -10802,7 +11061,7 @@ def admin_settings():
             'platform_commission_receiving_method', 'platform_commission_receiving_account',
             'platform_commission_receiving_name',
             'seller_ad_daily_price', 'seller_ad_weekly_price', 'seller_ad_monthly_price',
-            'kyc_system_only_enabled'
+            'kyc_provider', 'didit_workflow_id', 'kyc_system_only_enabled'
         }
         for key, default in settings_map.items():
             if key in mvp_only_keys and not current_user_is_mvp():
@@ -12289,6 +12548,7 @@ def init_database():
         'coins_streak_bonus_7day': '25',
         'coins_event_participation': '20',
         'kyc_provider': 'inbuilt',
+        'didit_workflow_id': DIDIT_WORKFLOW_ID_DEFAULT,
         'kyc_system_only_enabled': '0',
         'sms_otp_enabled': '0',
         'affiliate_commission_percent': '5',
