@@ -121,7 +121,7 @@
                     </div>
                     <div class="col-md-8">
                         <label class="form-label">Public App Base URL</label>
-                        <input type="url" name="app_base_url" class="form-control" value="{{ settings.app_base_url or '' }}" placeholder="https://your-domain.com">
+                        <input type="url" name="app_base_url" class="form-control" value="{{ settings.app_base_url or 'https://www.smark-africa.com' }}" placeholder="https://www.smark-africa.com">
                         <div class="form-text">Used immediately for Daraja callbacks after deployment. Leave blank only on a public production host that can build its own URL.</div>
                     </div>
                     <div class="col-md-4">

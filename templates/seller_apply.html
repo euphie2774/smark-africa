@@ -108,18 +108,47 @@
 <script>
 async function startCapture(videoId, facingMode = 'environment') {
     const video = document.getElementById(videoId);
+    if (!video || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        return;
+    }
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-                facingMode: { ideal: facingMode },
-                width: { ideal: 1280 },
-                height: { ideal: 720 }
-            },
-            audio: false
-        });
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: { exact: facingMode },
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                },
+                audio: false
+            });
+        } catch (preferredErr) {
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    facingMode: { ideal: facingMode },
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                },
+                audio: false
+            });
+        }
+        video.muted = true;
+        video.playsInline = true;
         video.srcObject = stream;
+        await video.play();
     } catch (err) {
-        video.insertAdjacentHTML('afterend', '<div class="alert alert-warning small">Camera access failed. Use a browser with camera permission enabled.</div>');
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: false
+            });
+            video.muted = true;
+            video.playsInline = true;
+            video.srcObject = stream;
+            await video.play();
+        } catch (fallbackErr) {
+            video.insertAdjacentHTML('afterend', '<div class="alert alert-warning small">Camera access failed. Allow camera permission and use HTTPS or localhost.</div>');
+        }
     }
 }
 

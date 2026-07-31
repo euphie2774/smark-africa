@@ -930,7 +930,7 @@ def database_status_summary():
 
 
 def public_base_url():
-    configured = (Setting.get('app_base_url', '') or os.environ.get('APP_BASE_URL', '')).strip()
+    configured = (os.environ.get('APP_BASE_URL', '') or Setting.get('app_base_url', '') or DEFAULT_PUBLIC_BASE_URL).strip()
     if configured:
         return configured.rstrip('/')
     return request.host_url.rstrip('/') if request else ''
@@ -4445,6 +4445,7 @@ def user_has_storefront(user):
     ).first() is not None
 
 
+DEFAULT_PUBLIC_BASE_URL = 'https://www.smark-africa.com'
 DIDIT_WORKFLOW_ID_DEFAULT = '9dcb8c91-e2f1-41aa-a20b-59de798c80e8'
 DIDIT_STATUS_MAP = {
     'Not Started': 'awaiting_user',
@@ -4472,8 +4473,13 @@ def didit_webhook_secret():
     return (os.environ.get('DIDIT_WEBHOOK_SECRET') or '').strip()
 
 
+def selected_kyc_provider():
+    configured = (os.environ.get('KYC_PROVIDER') or Setting.get('kyc_provider', 'didit') or 'didit').strip().lower()
+    return configured if configured in {'inbuilt', 'didit', 'external'} else 'didit'
+
+
 def didit_enabled():
-    return Setting.get('kyc_provider', 'inbuilt') == 'didit'
+    return selected_kyc_provider() == 'didit'
 
 
 def didit_config_status():
@@ -4488,7 +4494,7 @@ def didit_config_status():
         'ready': not missing,
         'missing': missing,
         'workflow_id': didit_workflow_id(),
-        'webhook_url': f"{public_base_url()}{url_for('didit_webhook')}" if public_base_url() else '',
+        'webhook_url': f"{public_base_url()}/api/kyc/didit/webhook" if public_base_url() else '',
     }
 
 
@@ -10023,7 +10029,7 @@ def seller_apply():
         return redirect(url_for('admin_dashboard'))
 
     latest = SellerVerification.query.filter_by(user_id=current_user.id).order_by(SellerVerification.created_at.desc()).first()
-    kyc_provider = Setting.get('kyc_provider', 'inbuilt')
+    kyc_provider = selected_kyc_provider()
     if request.method == 'POST':
         if kyc_provider == 'didit':
             flash('Start the hosted Didit verification session to continue seller KYC.', 'info')
@@ -10132,7 +10138,7 @@ def seller_apply():
         if document_fingerprint:
             db.session.add(KYCIdentityVerification(
                 user_id=current_user.id,
-                provider=Setting.get('kyc_provider', 'inbuilt'),
+                provider=selected_kyc_provider(),
                 document_type=document_type,
                 document_country=country,
                 document_fingerprint=document_fingerprint,
@@ -10187,6 +10193,7 @@ def seller_didit_start():
         return redirect(url_for('seller_apply'))
 
 
+@app.route('/api/kyc/didit/webhook', methods=['POST'])
 @app.route('/webhooks/didit', methods=['POST'])
 @csrf.exempt
 def didit_webhook():
@@ -10996,7 +11003,7 @@ def admin_settings():
             'daraja_shortcode': '174379',
             'daraja_env': 'sandbox',
             'daraja_callback_secret': '',
-            'app_base_url': '',
+            'app_base_url': DEFAULT_PUBLIC_BASE_URL,
             'business_name': 'SMARKAFRICA',
             'mail_server': 'smtp.gmail.com',
             'mail_port': '587',
@@ -11048,7 +11055,7 @@ def admin_settings():
             'coins_review_reward': '10',
             'coins_streak_bonus_7day': '25',
             'coins_event_participation': '20',
-            'kyc_provider': 'inbuilt',
+            'kyc_provider': 'didit',
             'didit_workflow_id': DIDIT_WORKFLOW_ID_DEFAULT,
             'kyc_system_only_enabled': '0',
             'sms_otp_enabled': '0',
@@ -11074,6 +11081,9 @@ def admin_settings():
             cache.delete('global_settings_dict')
             cache.delete('platform_ads_list')
             cache.delete('hot_sale_pop_product')
+        if didit_api_key() and didit_webhook_secret() and Setting.get('kyc_provider', 'inbuilt') == 'inbuilt':
+            Setting.set('kyc_provider', 'didit')
+
         daraja_message = daraja_config_error()
         if daraja_message:
             flash(f'Settings saved. {daraja_message}. Daraja will activate as soon as those values are completed.', 'warning')
@@ -12518,7 +12528,7 @@ def init_database():
         'pesapal_consumer_secret': '',
         'dpo_company_token': '',
         'daraja_callback_secret': '',
-        'app_base_url': '',
+        'app_base_url': DEFAULT_PUBLIC_BASE_URL,
         'site_keywords': 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products',
         'checkout_allowed_countries': 'Kenya',
         'show_country_launch_popup': '1',
@@ -12547,7 +12557,7 @@ def init_database():
         'coins_review_reward': '10',
         'coins_streak_bonus_7day': '25',
         'coins_event_participation': '20',
-        'kyc_provider': 'inbuilt',
+        'kyc_provider': 'didit',
         'didit_workflow_id': DIDIT_WORKFLOW_ID_DEFAULT,
         'kyc_system_only_enabled': '0',
         'sms_otp_enabled': '0',
@@ -12578,6 +12588,9 @@ def init_database():
         row = Setting.query.filter_by(key=key).first()
         if row and (row.value or '').strip() in old_values:
             Setting.set(key, defaults[key])
+
+    if didit_api_key() and didit_webhook_secret() and Setting.get('kyc_provider', 'inbuilt') == 'inbuilt':
+        Setting.set('kyc_provider', 'didit')
 
     # Default categories
     default_categories = [
