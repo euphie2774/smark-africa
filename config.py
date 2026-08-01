@@ -34,9 +34,23 @@ def _requires_persistent_database():
 
 
 def _database_url(required=False):
-    value = os.environ.get('DATABASE_URL')
+    value = (os.environ.get('DATABASE_URL') or '').strip()
     if value:
+        if value.startswith('postgres://'):
+            value = value.replace('postgres://', 'postgresql://', 1)
+        if required and value.startswith('sqlite') and not _truthy(os.environ.get('ALLOW_EPHEMERAL_SQLITE')):
+            raise RuntimeError(
+                'SQLite is not safe for deployed user accounts. Set DATABASE_URL '
+                'to a persistent PostgreSQL/MySQL database, or set '
+                'ALLOW_EPHEMERAL_SQLITE=1 only for disposable test deployments.'
+            )
         return value
+    if required:
+        raise RuntimeError(
+            'DATABASE_URL must be set for production/deployed environments. '
+            'SQLite smarkafrica.db is only for local development and is not safe '
+            'for deployed user accounts.'
+        )
     return 'sqlite:///smarkafrica.db'
 
 
@@ -144,7 +158,7 @@ class DevelopmentConfig(Config):
 
 
 class ProductionConfig(Config):
-    SQLALCHEMY_DATABASE_URI = _database_url()
+    SQLALCHEMY_DATABASE_URI = _database_url(required=_requires_persistent_database())
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
