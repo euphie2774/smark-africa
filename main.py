@@ -19,7 +19,7 @@ from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash
-from sqlalchemy import func, extract, and_, or_, text
+from sqlalchemy import func, extract, and_, or_, text, inspect as sa_inspect
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 try:
@@ -4338,10 +4338,11 @@ def bi_period_snapshot(days, period_type):
 def record_business_checkins():
     snapshots = [bi_period_snapshot(1, 'daily'), bi_period_snapshot(7, 'weekly'), bi_period_snapshot(30, 'monthly')]
     for snapshot in snapshots:
-        today_key = utcnow().strftime('%Y-%m-%d')
+        day_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         exists = BusinessCheckIn.query.filter(
             BusinessCheckIn.period_type == snapshot['period_type'],
-            func.strftime('%Y-%m-%d', BusinessCheckIn.created_at) == today_key
+            BusinessCheckIn.created_at >= day_start,
+            BusinessCheckIn.created_at < day_start + timedelta(days=1)
         ).first()
         if exists:
             exists.sales_total = snapshot['sales_total']
@@ -11909,11 +11910,35 @@ def admin_revenue_dashboard():
 # INIT & MAIN
 # ========================================================================
 
+def _db_dialect():
+    return db.session.get_bind().dialect.name
+
+
+def _translate_ddl(ddl):
+    """Rewrite the SQLite-flavoured column DDL above for the active dialect."""
+    if _db_dialect() == 'sqlite':
+        return ddl
+    # DATETIME is not a Postgres type, and booleans reject 0/1 literals.
+    ddl = re.sub(r'\bDATETIME\b', 'TIMESTAMP', ddl, flags=re.IGNORECASE)
+    ddl = re.sub(r'(\bBOOLEAN\s+DEFAULT\s+)0\b', r'\1FALSE', ddl, flags=re.IGNORECASE)
+    ddl = re.sub(r'(\bBOOLEAN\s+DEFAULT\s+)1\b', r'\1TRUE', ddl, flags=re.IGNORECASE)
+    return ddl
+
+
 def ensure_column(table, column, ddl):
-    existing = db.session.execute(text(f"PRAGMA table_info({table})")).fetchall()
-    if column not in [row[1] for row in existing]:
-        db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+    inspector = sa_inspect(db.session.get_bind())
+    if not inspector.has_table(table):
+        return
+    if column in {col['name'] for col in inspector.get_columns(table)}:
+        return
+    try:
+        db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {_translate_ddl(ddl)}"))
         db.session.commit()
+    except Exception:
+        # A failed DDL statement aborts the whole Postgres transaction, so roll
+        # back rather than let every later column in the loop fail too.
+        db.session.rollback()
+        app.logger.warning('Could not add column %s to %s', column, table, exc_info=True)
 
 
 def ensure_index(name, table, columns, unique=False):
@@ -11927,7 +11952,11 @@ def ensure_index(name, table, columns, unique=False):
 
 
 def ensure_phase_two_schema():
-    """Add Phase Two columns to existing SQLite databases without Flask-Migrate."""
+    """Add Phase Two columns to an existing database without Flask-Migrate.
+
+    The DDL below is written in SQLite flavour and translated per dialect by
+    _translate_ddl, so this runs against SQLite and PostgreSQL alike.
+    """
     columns = {
         'users': [
             ('admin_level', "admin_level VARCHAR(20) DEFAULT 'user'"),

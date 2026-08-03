@@ -33,6 +33,26 @@ def _requires_persistent_database():
     return os.environ.get('FLASK_ENV') == 'production' or _looks_hosted()
 
 
+def _engine_options(uri):
+    """Pool settings tuned per backend.
+
+    SQLite needs a longer lock timeout; server backends need bounded pools so
+    that gunicorn workers x pool size stays under the provider connection cap
+    (Render/Railway Postgres plans typically allow ~100 total).
+    """
+    if uri.startswith('sqlite'):
+        return {'pool_pre_ping': True, 'connect_args': {'timeout': 30}}
+    return {
+        'pool_pre_ping': True,
+        # Hosted Postgres drops idle connections; recycle before they go stale.
+        'pool_recycle': int(os.environ.get('DB_POOL_RECYCLE', '280')),
+        'pool_size': int(os.environ.get('DB_POOL_SIZE', '5')),
+        'max_overflow': int(os.environ.get('DB_MAX_OVERFLOW', '5')),
+        'pool_timeout': int(os.environ.get('DB_POOL_TIMEOUT', '30')),
+        'connect_args': {},
+    }
+
+
 def _database_url(required=False):
     value = (os.environ.get('DATABASE_URL') or '').strip()
     if value:
@@ -75,10 +95,7 @@ class Config:
 
     SQLALCHEMY_DATABASE_URI = _database_url()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    SQLALCHEMY_ENGINE_OPTIONS = {
-        'pool_pre_ping': True,
-        'connect_args': {'timeout': 30} if SQLALCHEMY_DATABASE_URI.startswith('sqlite') else {},
-    }
+    SQLALCHEMY_ENGINE_OPTIONS = _engine_options(SQLALCHEMY_DATABASE_URI)
     MAX_CONTENT_LENGTH = 30 * 1024 * 1024
     PRODUCT_IMAGE_MAX_CONTENT_LENGTH = 5 * 1024 * 1024
     UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static', 'uploads')
@@ -159,6 +176,8 @@ class DevelopmentConfig(Config):
 
 class ProductionConfig(Config):
     SQLALCHEMY_DATABASE_URI = _database_url(required=_requires_persistent_database())
+    # Recompute: the base class sized its pool for whatever URI it resolved.
+    SQLALCHEMY_ENGINE_OPTIONS = _engine_options(SQLALCHEMY_DATABASE_URI)
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'

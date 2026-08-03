@@ -1,6 +1,12 @@
 """
 Simple migration script to add card_authorization_requests table
 This avoids Flask app initialization issues
+
+SQLite only - it talks to instance/smarkafrica.db through the sqlite3 driver.
+On PostgreSQL (any deploy with DATABASE_URL set) do NOT run this; the table is
+created by db.create_all() during init_database(), or run
+add_card_authorization_table.py, which goes through SQLAlchemy and works on
+every backend.
 """
 import sqlite3
 import os
@@ -13,6 +19,11 @@ if sys.stdout.encoding != 'utf-8':
 
 # Find the database file
 db_path = os.path.join('instance', 'smarkafrica.db')
+
+if (os.environ.get('DATABASE_URL') or '').strip() and not os.environ.get('DATABASE_URL', '').startswith('sqlite'):
+    print("DATABASE_URL points at a non-SQLite database.")
+    print("This script only speaks SQLite. Run add_card_authorization_table.py instead.")
+    exit(1)
 
 if not os.path.exists(db_path):
     print(f"Database not found at {db_path}")

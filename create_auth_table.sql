@@ -1,5 +1,12 @@
 -- Migration: Add card_authorization_requests table
 -- Run this SQL script in your database
+--
+-- This file is SQLite flavour (INTEGER PRIMARY KEY AUTOINCREMENT).
+-- On PostgreSQL, substitute:
+--     id INTEGER PRIMARY KEY AUTOINCREMENT  ->  id SERIAL PRIMARY KEY
+--     DATETIME                              ->  TIMESTAMP
+-- Or skip the raw SQL entirely and run add_card_authorization_table.py, which
+-- creates the table through SQLAlchemy on whichever backend DATABASE_URL names.
 
 CREATE TABLE IF NOT EXISTS card_authorization_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
