@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}Storefront Approvals - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-store me-2"></i>Storefront Approvals</h2>
+            <p class="text-muted mb-0">
+                Every business storefront application lands here. Pending ones are listed first
+                and are never pushed off the page by newer approved shops.
+            </p>
+        </div>
+        <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-arrow-left me-1"></i>Dashboard
+        </a>
+    </div>
+
+    <div class="row g-3 mb-4">
+        {% for status in statuses %}
+        <div class="col-md-3 col-6">
+            <a href="{{ url_for('admin_storefronts', status=status) }}"
+               class="text-decoration-none">
+                <div class="card border-0 shadow-sm h-100 {% if status_filter == status %}border-start border-4 border-success{% endif %}">
+                    <div class="card-body py-3">
+                        <div class="text-muted small text-uppercase">{{ status.replace('_', ' ') }}</div>
+                        <div class="fs-3 fw-bold {% if status == 'pending_review' and counts[status] %}text-warning{% else %}text-dark{% endif %}">
+                            {{ counts[status] }}
+                        </div>
+                    </div>
+                </div>
+            </a>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-body">
+            <form method="GET" class="row g-2 align-items-end">
+                <div class="col-md-4">
+                    <label class="form-label small text-muted">Search</label>
+                    <input type="text" name="q" class="form-control" value="{{ search }}"
+                           placeholder="Business name, address or phone">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small text-muted">Status</label>
+                    <select name="status" class="form-select">
+                        <option value="">All statuses</option>
+                        {% for status in statuses %}
+                        <option value="{{ status }}" {% if status_filter == status %}selected{% endif %}>
+                            {{ status.replace('_', ' ')|title }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button type="submit" class="btn btn-success w-100"><i class="fas fa-filter me-1"></i>Filter</button>
+                </div>
+                <div class="col-md-2">
+                    <a href="{{ url_for('admin_storefronts') }}" class="btn btn-outline-secondary w-100">Reset</a>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    {% for storefront in storefronts %}
+    <div class="card border-0 shadow-sm mb-3 {% if storefront.status == 'pending_review' %}border-start border-4 border-warning{% endif %}">
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-lg-7">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <h5 class="mb-1">{{ storefront.business_name }}</h5>
+                        <span class="badge bg-{{ 'warning text-dark' if storefront.status == 'pending_review' else 'success' if storefront.status == 'approved' else 'danger' if storefront.status == 'rejected' else 'secondary' }}">
+                            {{ storefront.status.replace('_', ' ')|title }}
+                        </span>
+                    </div>
+                    <p class="text-muted small mb-2">
+                        Applied {{ storefront.created_at.strftime('%d %b %Y, %H:%M') if storefront.created_at else 'unknown date' }}
+                        {% if storefront.approved_at %} &middot; approved {{ storefront.approved_at.strftime('%d %b %Y') }}{% endif %}
+                    </p>
+                    <dl class="row small mb-0">
+                        <dt class="col-sm-3 text-muted fw-normal">Owner</dt>
+                        <dd class="col-sm-9">
+                            {% if storefront.owner %}
+                                {{ storefront.owner.first_name }} {{ storefront.owner.last_name }}
+                                <span class="text-muted">({{ storefront.owner.email }})</span>
+                            {% else %}<span class="text-muted">Account removed</span>{% endif %}
+                        </dd>
+                        <dt class="col-sm-3 text-muted fw-normal">Category</dt>
+                        <dd class="col-sm-9">{{ storefront.categories or '—' }}</dd>
+                        <dt class="col-sm-3 text-muted fw-normal">Address</dt>
+                        <dd class="col-sm-9">
+                            <i class="fas fa-location-dot text-danger me-1"></i>{{ storefront.physical_address or '—' }}
+                            {% if storefront.landmark %}<span class="text-muted">near {{ storefront.landmark }}</span>{% endif %}
+                            {% if storefront.location_lat is not none %}
+                            <a class="ms-1" target="_blank" rel="noopener"
+                               href="https://www.openstreetmap.org/?mlat={{ storefront.location_lat }}&mlon={{ storefront.location_lng }}#map=16/{{ storefront.location_lat }}/{{ storefront.location_lng }}">
+                                view on map
+                            </a>
+                            {% else %}
+                            <span class="badge bg-light text-muted border ms-1">not geocoded</span>
+                            {% endif %}
+                        </dd>
+                        <dt class="col-sm-3 text-muted fw-normal">Contact</dt>
+                        <dd class="col-sm-9">{{ storefront.contact_phone or '—' }} &middot; {{ storefront.contact_email or '—' }}</dd>
+                        {% if storefront.verification_notes %}
+                        <dt class="col-sm-3 text-muted fw-normal">Last note</dt>
+                        <dd class="col-sm-9">{{ storefront.verification_notes }}</dd>
+                        {% endif %}
+                    </dl>
+                </div>
+                <div class="col-lg-5">
+                    <form method="POST" class="border rounded p-3 bg-light h-100">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="storefront_id" value="{{ storefront.id }}">
+                        <label class="form-label small text-muted">Decision</label>
+                        <select name="status" class="form-select mb-2">
+                            {% for status in statuses %}
+                            <option value="{{ status }}" {% if storefront.status == status %}selected{% endif %}>
+                                {{ status.replace('_', ' ')|title }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                        <label class="form-label small text-muted">Note to the applicant</label>
+                        <textarea name="verification_notes" class="form-control mb-2" rows="3"
+                                  placeholder="Why approved, or exactly what to fix before reapplying">{{ storefront.verification_notes or '' }}</textarea>
+                        <button type="submit" class="btn btn-success w-100">
+                            <i class="fas fa-gavel me-1"></i>Save decision &amp; notify owner
+                        </button>
+                        <p class="small text-muted mb-0 mt-2">
+                            Approving unlocks product listing for this seller and emails them.
+                        </p>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="card border-0 shadow-sm">
+        <div class="card-body text-center text-muted py-5">
+            <i class="fas fa-inbox fa-2x mb-2 d-block"></i>
+            No storefront applications match this view.
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}

@@ -123,6 +123,12 @@ class Product(db.Model):
     stock = db.Column(db.Integer, default=0)
     weight_kg = db.Column(db.Float, default=0.0)  # For shipping calc
 
+    # Where the item actually is, so buyers see a pin before they open it
+    location_label = db.Column(db.String(200))
+    location_county = db.Column(db.String(100))
+    location_lat = db.Column(db.Float)
+    location_lng = db.Column(db.Float)
+
     # Media
     image_url = db.Column(db.String(500))
     additional_images = db.Column(db.Text)  # JSON list
@@ -144,6 +150,20 @@ class Product(db.Model):
         if self.discount_percent > 0:
             return round(self.selling_price * (1 - self.discount_percent / 100), 2)
         return self.selling_price
+
+    @property
+    def location_display(self):
+        """Short human label for the pin, or None when we know nothing."""
+        label = (self.location_label or self.location_county or '').strip()
+        if label:
+            return label
+        if self.location_lat is not None and self.location_lng is not None:
+            return f'{self.location_lat:.3f}, {self.location_lng:.3f}'
+        return None
+
+    @property
+    def has_location(self):
+        return self.location_display is not None
 
     @property
     def average_rating(self):
@@ -727,11 +747,25 @@ class BusinessStorefront(db.Model):
     commission_percent = db.Column(db.Float, default=10.0)
     status = db.Column(db.String(30), default='pending_review')
     verification_notes = db.Column(db.Text)
+    # Geocoded once at review time; products listed here inherit the pin.
+    location_lat = db.Column(db.Float)
+    location_lng = db.Column(db.Float)
+    location_county = db.Column(db.String(100))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     approved_at = db.Column(db.DateTime)
 
     owner = db.relationship('User', lazy=True)
     category = db.relationship('Category', lazy=True)
+
+    @property
+    def is_live(self):
+        """True once an admin has cleared the storefront to trade."""
+        return (self.status or '') in ('approved', 'active', 'verified')
+
+    @property
+    def location_label(self):
+        parts = [p for p in [self.physical_address, self.landmark, self.location_county] if p]
+        return ', '.join(parts[:2]) if parts else None
 
 
 class ExchangeRate(db.Model):

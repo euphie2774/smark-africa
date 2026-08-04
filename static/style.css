@@ -1448,6 +1448,21 @@ h6 {
     font-size: 0.74rem;
 }
 
+/* Small pin showing where the item physically is. Muted on purpose so it
+   reads as provenance rather than competing with price and category. */
+.product-meta span.product-pin {
+    background: #fdecec;
+    color: #a52834;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.product-meta span.product-pin i {
+    margin-right: 4px;
+}
+
 .image-match-score {
     display: grid;
     gap: 2px;

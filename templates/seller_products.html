@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+{% block title %}List a Product - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+        <div>
+            <h1 class="fw-bold mb-1">{{ storefront.business_name }}</h1>
+            <p class="text-muted mb-0">
+                <span class="badge bg-success"><i class="fas fa-circle-check me-1"></i>Verified storefront</span>
+                <i class="fas fa-location-dot text-danger ms-2 me-1"></i>{{ storefront.location_label or 'address on file' }}
+            </p>
+        </div>
+        <a href="{{ url_for('storefront_apply') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-store me-1"></i>Storefront details
+        </a>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-5">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="mb-3">
+                        {% if product %}Edit "{{ product.name }}"{% else %}List a new product{% endif %}
+                    </h5>
+                    <form method="POST"
+                          action="{{ url_for('seller_products', product_id=product.id) if product else url_for('seller_products') }}"
+                          enctype="multipart/form-data">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+
+                        <label class="form-label">Product name *</label>
+                        <input name="name" class="form-control mb-3" required maxlength="200"
+                               value="{{ product.name if product else '' }}"
+                               placeholder="e.g. Solar lantern, 10W">
+
+                        <label class="form-label">Category</label>
+                        <select name="category_id" class="form-select mb-3">
+                            <option value="">Uncategorised</option>
+                            {% for category in categories %}
+                            <option value="{{ category.id }}"
+                                {% if product and product.category_id == category.id %}selected
+                                {% elif not product and storefront.category_id == category.id %}selected{% endif %}>
+                                {{ category.name }}
+                            </option>
+                            {% endfor %}
+                        </select>
+
+                        <label class="form-label">Short description</label>
+                        <input name="short_description" class="form-control mb-3" maxlength="300"
+                               value="{{ product.short_description if product else '' }}"
+                               placeholder="One line buyers see on the card">
+
+                        <label class="form-label">Full details</label>
+                        <textarea name="description" class="form-control mb-3" rows="4"
+                                  placeholder="Specs, what is in the box, warranty, condition notes">{{ product.description if product else '' }}</textarea>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-6">
+                                <label class="form-label">Selling price (KSh) *</label>
+                                <input type="number" step="0.01" min="0" name="selling_price" required
+                                       class="form-control" value="{{ product.selling_price if product else '' }}">
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label">Your cost (KSh)</label>
+                                <input type="number" step="0.01" min="0" name="buying_price"
+                                       class="form-control" value="{{ product.buying_price if product else '0' }}">
+                            </div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-4">
+                                <label class="form-label">Discount %</label>
+                                <input type="number" step="1" min="0" max="99" name="discount_percent"
+                                       class="form-control" value="{{ product.discount_percent|int if product else '0' }}">
+                            </div>
+                            <div class="col-4">
+                                <label class="form-label">Stock</label>
+                                <input type="number" step="1" min="0" name="stock"
+                                       class="form-control" value="{{ product.stock if product else '1' }}">
+                            </div>
+                            <div class="col-4">
+                                <label class="form-label">Weight (kg)</label>
+                                <input type="number" step="0.01" min="0" name="weight_kg"
+                                       class="form-control" value="{{ product.weight_kg if product else '0' }}">
+                                <div class="form-text">Used for the delivery quote.</div>
+                            </div>
+                        </div>
+
+                        <label class="form-label">Condition</label>
+                        <select name="product_condition" class="form-select mb-3">
+                            {% for condition in conditions %}
+                            <option value="{{ condition }}"
+                                {% if product and product.product_condition == condition %}selected{% endif %}>
+                                {{ condition.replace('_', ' ')|title }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text mb-3">
+                            New stock goes live immediately. Second-hand, refurbished and thrifted
+                            items wait for an admin check first.
+                        </div>
+
+                        <label class="form-label">Photos</label>
+                        <input type="file" name="product_images" class="form-control mb-2" multiple
+                               accept="image/png,image/jpeg,image/gif,image/webp">
+                        <input name="image_url" class="form-control mb-3" placeholder="…or paste an image URL"
+                               value="{{ product.image_url if product and not product.image_url.startswith('/') else '' }}">
+
+                        <label class="form-label">Where is this item?</label>
+                        <input name="location_label" class="form-control mb-2"
+                               value="{{ product.location_label if product else (storefront.physical_address or '') }}"
+                               placeholder="Shop or pickup address">
+                        <div class="row g-2 mb-2">
+                            <div class="col-6">
+                                <input type="number" step="any" name="location_lat" class="form-control"
+                                       placeholder="Latitude"
+                                       value="{{ product.location_lat if product and product.location_lat is not none else '' }}">
+                            </div>
+                            <div class="col-6">
+                                <input type="number" step="any" name="location_lng" class="form-control"
+                                       placeholder="Longitude"
+                                       value="{{ product.location_lng if product and product.location_lng is not none else '' }}">
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-secondary mb-3" id="useMyLocation">
+                            <i class="fas fa-crosshairs me-1"></i>Use my current location
+                        </button>
+                        <div class="form-text mb-3">
+                            Leave blank to inherit your storefront address. Buyers see this as a small
+                            pin on the product card.
+                        </div>
+
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" name="is_active" id="is_active"
+                                   value="1" {% if not product or product.is_active %}checked{% endif %}>
+                            <label class="form-check-label" for="is_active">Show in the shop straight away</label>
+                        </div>
+
+                        <button type="submit" class="btn btn-success w-100">
+                            <i class="fas fa-{{ 'save' if product else 'plus' }} me-1"></i>
+                            {{ 'Save changes' if product else 'List product' }}
+                        </button>
+                        {% if product %}
+                        <a href="{{ url_for('seller_products') }}" class="btn btn-outline-secondary w-100 mt-2">Cancel edit</a>
+                        {% endif %}
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Your listings</h5>
+                    <span class="text-muted small">{{ products|length }} product{{ 's' if products|length != 1 }}</span>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Product</th>
+                                    <th>Price</th>
+                                    <th>Stock</th>
+                                    <th>Status</th>
+                                    <th class="text-end">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for item in products %}
+                                <tr>
+                                    <td>
+                                        <div class="d-flex align-items-center gap-2">
+                                            {% if item.image_url %}
+                                            <img src="{{ item.image_url }}" alt="{{ item.name }}"
+                                                 style="width:40px;height:40px;object-fit:cover;border-radius:.35rem;">
+                                            {% endif %}
+                                            <div>
+                                                <div class="fw-semibold">{{ item.name[:48] }}</div>
+                                                {% if item.has_location %}
+                                                <div class="small text-muted">
+                                                    <i class="fas fa-location-dot text-danger me-1"></i>{{ item.location_display }}
+                                                </div>
+                                                {% else %}
+                                                <div class="small text-warning">
+                                                    <i class="fas fa-location-crosshairs me-1"></i>No location pin
+                                                </div>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td>KSh {{ "%.2f"|format(item.discounted_price) }}</td>
+                                    <td>{{ item.stock }}</td>
+                                    <td>
+                                        {% if item.review_status != 'approved' %}
+                                        <span class="badge bg-warning text-dark">Awaiting review</span>
+                                        {% elif item.is_active %}
+                                        <span class="badge bg-success">Live</span>
+                                        {% else %}
+                                        <span class="badge bg-secondary">Hidden</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="text-end">
+                                        <div class="btn-group btn-group-sm">
+                                            <a href="{{ url_for('seller_products', product_id=item.id) }}"
+                                               class="btn btn-outline-primary"><i class="fas fa-pen"></i></a>
+                                            <a href="{{ url_for('product_page', slug=item.slug) }}"
+                                               class="btn btn-outline-secondary"><i class="fas fa-eye"></i></a>
+                                        </div>
+                                        <form method="POST" class="d-inline"
+                                              action="{{ url_for('seller_product_toggle', product_id=item.id) }}">
+                                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                            <button class="btn btn-sm btn-outline-dark" title="Show or hide">
+                                                <i class="fas fa-power-off"></i>
+                                            </button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                {% else %}
+                                <tr>
+                                    <td colspan="5" class="text-center text-muted py-5">
+                                        <i class="fas fa-box-open fa-2x mb-2 d-block"></i>
+                                        Nothing listed yet. Use the form to publish your first product.
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('useMyLocation')?.addEventListener('click', function () {
+    if (!navigator.geolocation) {
+        alert('This browser cannot share a location.');
+        return;
+    }
+    this.disabled = true;
+    navigator.geolocation.getCurrentPosition(
+        pos => {
+            document.querySelector('[name="location_lat"]').value = pos.coords.latitude.toFixed(6);
+            document.querySelector('[name="location_lng"]').value = pos.coords.longitude.toFixed(6);
+            this.disabled = false;
+        },
+        () => {
+            alert('Could not read your location. Type the address instead.');
+            this.disabled = false;
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+    );
+});
+</script>
+{% endblock %}

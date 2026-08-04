@@ -9,6 +9,16 @@
     </div>
 
 
+    {% if stats.pending_storefronts %}
+    <div class="alert alert-warning d-flex justify-content-between align-items-center mb-4" role="alert">
+        <div>
+            <strong><i class="fas fa-store me-1"></i> {{ stats.pending_storefronts }} storefront application{{ 's' if stats.pending_storefronts != 1 }} waiting for approval</strong>
+            <div class="small">Sellers cannot list products until you approve their storefront.</div>
+        </div>
+        <a href="{{ url_for('admin_storefronts') }}" class="btn btn-sm btn-dark">Review now</a>
+    </div>
+    {% endif %}
+
     {% if production_setup_issues %}
     <div class="alert alert-warning d-flex justify-content-between align-items-center mb-4" role="alert">
         <div>
@@ -177,6 +187,12 @@
                 </div>
                 <div class="card-body">
                     <div class="d-grid gap-2">
+                        <a href="{{ url_for('admin_storefronts') }}" class="btn btn-outline-success text-start d-flex justify-content-between align-items-center">
+                            <span><i class="fas fa-store me-2"></i> Storefront Approvals</span>
+                            {% if stats.pending_storefronts %}
+                            <span class="badge bg-warning text-dark">{{ stats.pending_storefronts }} waiting</span>
+                            {% endif %}
+                        </a>
                         <a href="{{ url_for('admin_products') }}" class="btn btn-outline-success text-start">
                             <i class="fas fa-box me-2"></i> Manage Products
                         </a>

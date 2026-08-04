@@ -19,7 +19,7 @@ from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash
-from sqlalchemy import func, extract, and_, or_, text, inspect as sa_inspect
+from sqlalchemy import func, extract, and_, or_, text, case, inspect as sa_inspect
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 try:
@@ -4699,13 +4699,67 @@ def user_can_sell(user):
     return bool(user and (user.is_admin or user.seller_status == 'verified' or user.is_verified_seller))
 
 
-def user_has_storefront(user):
-    if not user or not user.is_authenticated:
-        return False
+def seller_storefront(user):
+    """The verified storefront a seller trades under, if any."""
+    if not user or not getattr(user, 'is_authenticated', False):
+        return None
     return BusinessStorefront.query.filter(
         BusinessStorefront.owner_id == user.id,
         BusinessStorefront.status.in_(['approved', 'active', 'verified'])
-    ).first() is not None
+    ).order_by(BusinessStorefront.created_at.desc()).first()
+
+
+def user_has_storefront(user):
+    return seller_storefront(user) is not None
+
+
+def apply_product_location(product, storefront=None, label=None, lat=None, lng=None):
+    """Give a product a map pin so its card can show where the item is.
+
+    An explicit pin from the listing form wins; otherwise the seller's verified
+    storefront address supplies one. Resolving it here - not in a later batch
+    job - is what makes the icon appear the moment the product is listed.
+    """
+    label = (label or '').strip()
+    county = None
+
+    if storefront is not None:
+        if not label:
+            label = (storefront.physical_address or storefront.landmark
+                     or storefront.business_name or '').strip()
+        if lat is None or lng is None:
+            geocode_storefront(storefront)
+            lat, lng = storefront.location_lat, storefront.location_lng
+        county = storefront.location_county
+
+    point = None
+    if lat is not None and lng is not None:
+        try:
+            candidate = GeoPoint(float(lat), float(lng))
+            point = candidate if candidate.is_valid() else None
+        except (TypeError, ValueError):
+            point = None
+
+    if point is None and label:
+        # No usable coordinates yet, so resolve the written address instead.
+        try:
+            point, resolved_county, _resolved_label = resolve_destination(
+                country='Kenya', address=label)
+            county = county or resolved_county
+        except Exception:
+            app.logger.exception('Product location geocode failed')
+
+    display = (label or county or '').strip()
+    # Never wipe a pin we already have: an edit that supplies nothing new
+    # should leave the existing location alone.
+    if display:
+        product.location_label = display[:200]
+    if county:
+        product.location_county = county[:100]
+    if point is not None:
+        product.location_lat = point.lat
+        product.location_lng = point.lng
+    return product
 
 
 DEFAULT_PUBLIC_BASE_URL = 'https://www.smark-africa.com'
@@ -6841,6 +6895,91 @@ def support_chatbot():
     })
 
 
+STOREFRONT_REVIEW_STATUSES = ['pending_review', 'more_details', 'approved', 'suspended', 'rejected']
+
+
+def geocode_storefront(storefront):
+    """Fill in the storefront's map pin from its written address.
+
+    Idempotent and cheap: the geocoder is cached, and a storefront that already
+    has coordinates is left alone.
+    """
+    if storefront.location_lat is not None and storefront.location_lng is not None:
+        return storefront
+    address = ', '.join([p for p in [storefront.physical_address, storefront.landmark] if p])
+    try:
+        point, county, _label = resolve_destination(
+            country='Kenya', address=address or None, city=storefront.landmark or None)
+    except Exception:
+        app.logger.exception('Storefront geocode failed for %s', storefront.id)
+        return storefront
+    if point:
+        storefront.location_lat = point.lat
+        storefront.location_lng = point.lng
+    if county:
+        storefront.location_county = county
+    return storefront
+
+
+def notify_admins_of_storefront(storefront):
+    """Push a new application at every admin, not just whoever opens a console.
+
+    Applications used to sit in a table nobody had a reason to open, which is
+    why they never reached review.
+    """
+    address = storefront.physical_address or 'no address given'
+    for admin in User.query.filter(User.is_admin.is_(True)).all():
+        create_customer_notification(
+            admin.id,
+            'Storefront awaiting approval',
+            f'{storefront.business_name} ({address}) applied for a storefront. '
+            f'Open the storefront queue to approve or reject it.',
+            'storefront'
+        )
+
+
+def review_storefront(storefront, status, notes=None):
+    """Apply an approval decision and tell the owner what happened.
+
+    Shared by the dedicated queue and the MVP architecture console so the two
+    can never drift on what approval actually does.
+    """
+    status = (status or storefront.status or 'pending_review').strip()
+    if status not in STOREFRONT_REVIEW_STATUSES:
+        status = storefront.status or 'pending_review'
+    storefront.status = status
+    if notes is not None:
+        storefront.verification_notes = (notes or '').strip()
+    if status == 'approved':
+        if not storefront.approved_at:
+            storefront.approved_at = utcnow()
+        geocode_storefront(storefront)
+    if storefront.owner:
+        create_customer_notification(
+            storefront.owner.id,
+            f'Storefront review: {status.replace("_", " ").title()}',
+            storefront.verification_notes or f'Your storefront application for {storefront.business_name} was updated.',
+            'storefront'
+        )
+        if status == 'approved':
+            create_customer_notification(
+                storefront.owner.id,
+                'You can now list products',
+                f'{storefront.business_name} is verified. Open "List a product" to publish your first item.',
+                'storefront'
+            )
+        if storefront.owner.email:
+            send_email(
+                storefront.owner.email,
+                'SMARK-Africa storefront application update',
+                f'<p>Your storefront application for <strong>{html.escape(storefront.business_name)}</strong> '
+                f'is now <strong>{html.escape(status)}</strong>.</p>'
+                f'<p>{html.escape(storefront.verification_notes or "")}</p>'
+                + ('<p>You can now list products from your seller dashboard.</p>' if status == 'approved' else '')
+            )
+    return storefront
+
+
 @app.route('/storefront/apply', methods=['GET', 'POST'])
 @login_required
 def storefront_apply():
@@ -6877,9 +7016,13 @@ def storefront_apply():
             commission_percent=10.0,
             status='pending_review',
         )
+        # Pin it now so the queue can show reviewers where the shop actually is.
+        geocode_storefront(storefront)
         db.session.add(storefront)
+        db.session.flush()
+        notify_admins_of_storefront(storefront)
         db.session.commit()
-        flash('Storefront application submitted for MVP approval.', 'success')
+        flash('Storefront application submitted. Our review team has been notified.', 'success')
         return redirect(url_for('storefront_apply'))
     storefronts = BusinessStorefront.query.filter_by(owner_id=current_user.id).order_by(BusinessStorefront.created_at.desc()).all()
     categories = Category.query.filter_by(is_active=True).order_by(Category.name.asc()).all()
@@ -7584,7 +7727,8 @@ def admin_dashboard():
         'total_sales': total_sales,
         'pending_orders': pending_orders,
         'pending_reviews': pending_reviews,
-        'low_stock_count': low_stock_count
+        'low_stock_count': low_stock_count,
+        'pending_storefronts': BusinessStorefront.query.filter_by(status='pending_review').count(),
     }
 
     return render_template(
@@ -7595,6 +7739,49 @@ def admin_dashboard():
         recent_orders=recent_orders,
         pnl=pnl
     )
+
+
+@app.route('/admin/storefronts', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def admin_storefronts():
+    """Approval queue for business storefront applications.
+
+    Deliberately @admin_required rather than @mvp_required: applications were
+    stalling because the only review UI lived behind the MVP-only console.
+    """
+    if request.method == 'POST':
+        storefront = BusinessStorefront.query.get_or_404(request.form.get('storefront_id', type=int))
+        review_storefront(storefront,
+                          request.form.get('status', ''),
+                          request.form.get('verification_notes', ''))
+        db.session.commit()
+        log_admin_action('storefront_review', 'business_storefront', storefront.id,
+                         f'status={storefront.status}')
+        flash(f'{storefront.business_name} marked {storefront.status.replace("_", " ")}.', 'success')
+        return redirect(url_for('admin_storefronts', status=request.args.get('status', '')))
+
+    status_filter = (request.args.get('status') or '').strip()
+    search = (request.args.get('q') or '').strip()
+    query = BusinessStorefront.query
+    if status_filter in STOREFRONT_REVIEW_STATUSES:
+        query = query.filter(BusinessStorefront.status == status_filter)
+    if search:
+        like = f'%{search}%'
+        query = query.filter(or_(BusinessStorefront.business_name.ilike(like),
+                                 BusinessStorefront.physical_address.ilike(like),
+                                 BusinessStorefront.contact_phone.ilike(like)))
+    # Pending first, then newest. A waiting application must never be pushed
+    # off the page by a wave of already-approved shops.
+    storefronts = query.order_by(
+        case((BusinessStorefront.status == 'pending_review', 0), else_=1),
+        BusinessStorefront.created_at.desc()
+    ).limit(300).all()
+    counts = {status: BusinessStorefront.query.filter_by(status=status).count()
+              for status in STOREFRONT_REVIEW_STATUSES}
+    return render_template('admin/storefronts.html', storefronts=storefronts, counts=counts,
+                           status_filter=status_filter, search=search,
+                           statuses=STOREFRONT_REVIEW_STATUSES)
 
 
 @app.route('/admin/intelligent-architecture', methods=['GET', 'POST'])
@@ -7686,23 +7873,9 @@ def admin_intelligent_architecture():
                 flash('Trust score updated.', 'success')
         elif action == 'storefront_status':
             storefront = BusinessStorefront.query.get_or_404(request.form.get('storefront_id', type=int))
-            storefront.status = request.form.get('status', storefront.status)
-            storefront.verification_notes = request.form.get('verification_notes', storefront.verification_notes or '').strip()
-            if storefront.status == 'approved' and not storefront.approved_at:
-                storefront.approved_at = utcnow()
-            if storefront.owner:
-                create_customer_notification(
-                    storefront.owner.id,
-                    f'Storefront review: {storefront.status.replace("_", " ").title()}',
-                    storefront.verification_notes or f'Your storefront application for {storefront.business_name} was updated.',
-                    'storefront'
-                )
-                if storefront.owner.email:
-                    send_email(
-                        storefront.owner.email,
-                        'SMARK-Africa storefront application update',
-                        f'<p>Your storefront application for <strong>{html.escape(storefront.business_name)}</strong> is now <strong>{html.escape(storefront.status)}</strong>.</p><p>{html.escape(storefront.verification_notes or "")}</p>'
-                    )
+            review_storefront(storefront,
+                              request.form.get('status', ''),
+                              request.form.get('verification_notes', ''))
             flash('Storefront review updated.', 'success')
         elif action == 'loyalty_points':
             user = User.query.get_or_404(request.form.get('user_id', type=int))
@@ -7752,7 +7925,12 @@ def admin_intelligent_architecture():
         snapshot=snapshot,
         exchange_rates=ExchangeRate.query.order_by(ExchangeRate.quote_currency.asc()).all(),
         tickets=SupportTicket.query.order_by(SupportTicket.created_at.desc()).limit(20).all(),
-        storefronts=BusinessStorefront.query.order_by(BusinessStorefront.created_at.desc()).limit(20).all(),
+        storefronts=BusinessStorefront.query.order_by(
+            # Pending first, so a backlog of approved shops cannot bury an
+            # application below the row limit.
+            case((BusinessStorefront.status == 'pending_review', 0), else_=1),
+            BusinessStorefront.created_at.desc()
+        ).limit(20).all(),
         bnpl_plans=BNPLPlan.query.order_by(BNPLPlan.created_at.desc()).limit(20).all(),
         bnpl_policies=BNPLProductPolicy.query.order_by(BNPLProductPolicy.updated_at.desc()).limit(20).all(),
         bnpl_installments=BNPLInstallment.query.order_by(BNPLInstallment.due_at.asc()).limit(30).all(),
@@ -9558,6 +9736,15 @@ def admin_add_product():
         else:
             product.review_status = 'approved'
 
+        # Give the listing a pin so its card matches seller-listed products.
+        apply_product_location(
+            product,
+            storefront=seller_storefront(current_user),
+            label=request.form.get('location_label', ''),
+            lat=request.form.get('location_lat', type=float),
+            lng=request.form.get('location_lng', type=float),
+        )
+
         # Handle image upload
         product_images = uploaded_product_images()
         if product_images:
@@ -9658,6 +9845,13 @@ def admin_edit_product(pid):
         product.is_featured = form_bool('is_featured')
         product.is_active = form_bool('is_active')
         product.discount_percent = form_float('discount_percent', product.discount_percent or 0, minimum=0, maximum=99)
+        apply_product_location(
+            product,
+            storefront=seller_storefront(current_user) if product.seller_id == current_user.id else None,
+            label=request.form.get('location_label', product.location_label or ''),
+            lat=request.form.get('location_lat', type=float),
+            lng=request.form.get('location_lng', type=float),
+        )
         product.vat_applicable = form_bool('vat_applicable')
         product.vat_rate = form_float('vat_rate', product.vat_rate or (16 if product.vat_applicable else 0), minimum=0, maximum=100) if product.vat_applicable else 0
         product.product_condition = request.form.get('product_condition', product.product_condition or 'new')
@@ -11190,6 +11384,151 @@ def file_claim(order_id):
         flash('Claim filed. Refund review target is 3-7 business days, depending on case details.', 'success')
         return redirect(url_for('orders'))
     return render_template('claim_form.html', order=order)
+
+
+SELLER_PRODUCT_CONDITIONS = ['new', 'second_hand', 'refurbished', 'thrifted']
+
+
+def seller_listing_gate():
+    """Return (storefront, redirect) for the seller listing pages.
+
+    Listing is the reward for a verified storefront, so an approved storefront
+    is the gate. Sellers stuck earlier in the funnel get sent to the step they
+    actually need next rather than a bare 403.
+    """
+    storefront = seller_storefront(current_user)
+    if storefront:
+        return storefront, None
+    if not user_can_sell(current_user):
+        flash('Complete seller verification first, then apply for a storefront.', 'warning')
+        return None, redirect(url_for('seller_apply'))
+    pending = BusinessStorefront.query.filter_by(owner_id=current_user.id).first()
+    if pending:
+        flash('Your storefront is still under review. Product listing opens as soon as it is approved.', 'info')
+    else:
+        flash('Apply for a storefront to start listing products.', 'warning')
+    return None, redirect(url_for('storefront_apply'))
+
+
+def save_seller_product(product, storefront, is_new):
+    """Read the listing form onto a product. Returns an error string or None."""
+    name = request.form.get('name', '').strip()
+    selling_price = form_float('selling_price', 0, minimum=0)
+    buying_price = form_float('buying_price', 0, minimum=0)
+    if not name:
+        return 'Product name is required.'
+    if selling_price <= 0:
+        return 'Set a selling price above zero.'
+
+    condition = request.form.get('product_condition', 'new')
+    if condition not in SELLER_PRODUCT_CONDITIONS:
+        condition = 'new'
+
+    if is_new or name != product.name:
+        product.slug = unique_product_slug(name, current_id=product.id)
+    product.name = name
+    product.description = request.form.get('description', '').strip() or name
+    product.short_description = request.form.get('short_description', '').strip()[:300]
+    product.category_id = request.form.get('category_id', type=int)
+    product.buying_price = buying_price
+    product.selling_price = selling_price
+    product.discount_percent = form_float('discount_percent', 0, minimum=0, maximum=99)
+    product.stock = form_int('stock', 0, minimum=0)
+    product.weight_kg = form_float('weight_kg', 0, minimum=0)
+    product.product_condition = condition
+    product.is_active = request.form.get('is_active') in ['1', 'on', 'true']
+    product.seller_id = current_user.id
+
+    # Second-hand and thrifted goods still need a human to look at them; new
+    # stock from a verified storefront goes live immediately.
+    if condition in ['second_hand', 'refurbished']:
+        product.review_status = 'manual_second_review'
+        product.is_active = False
+    elif condition == 'thrifted':
+        product.review_status = 'admin_review'
+    else:
+        product.review_status = 'approved'
+
+    images = uploaded_product_images()
+    if images:
+        product.image_url = images[0]
+        if len(images) > 1:
+            product.additional_images = json.dumps(images[1:])
+    elif request.form.get('image_url', '').strip():
+        product.image_url = request.form.get('image_url', '').strip()
+
+    apply_product_location(
+        product,
+        storefront=storefront,
+        label=request.form.get('location_label', ''),
+        lat=request.form.get('location_lat', type=float),
+        lng=request.form.get('location_lng', type=float),
+    )
+    return None
+
+
+@app.route('/seller/products', methods=['GET', 'POST'])
+@app.route('/seller/products/<int:product_id>', methods=['GET', 'POST'])
+@login_required
+def seller_products(product_id=None):
+    """List and edit the products a verified storefront sells."""
+    storefront, bounce = seller_listing_gate()
+    if bounce:
+        return bounce
+
+    product = None
+    if product_id:
+        product = Product.query.filter_by(id=product_id, seller_id=current_user.id).first_or_404()
+
+    if request.method == 'POST':
+        is_new = product is None
+        target = product or Product(seller_id=current_user.id, commission_percent=15.0)
+        error = save_seller_product(target, storefront, is_new)
+        if error:
+            flash(error, 'danger')
+        else:
+            try:
+                if is_new:
+                    db.session.add(target)
+                db.session.commit()
+            except SQLAlchemyError:
+                db.session.rollback()
+                app.logger.exception('Seller product save failed')
+                flash('The product could not be saved. Please try again.', 'danger')
+            else:
+                invalidate_product_cache()
+                if is_new:
+                    where = target.location_display or 'your storefront address'
+                    flash(f'"{target.name}" is listed and pinned to {where}.', 'success')
+                else:
+                    flash(f'"{target.name}" updated.', 'success')
+                if target.review_status != 'approved':
+                    flash('This condition needs an admin check before it appears in the shop.', 'info')
+                return redirect(url_for('seller_products'))
+
+    products = Product.query.filter_by(seller_id=current_user.id).order_by(
+        Product.created_at.desc()).all()
+    categories = Category.query.filter_by(is_active=True).order_by(Category.name.asc()).all()
+    return render_template('seller_products.html', storefront=storefront, products=products,
+                           categories=categories, product=product,
+                           conditions=SELLER_PRODUCT_CONDITIONS)
+
+
+@app.route('/seller/products/<int:product_id>/toggle', methods=['POST'])
+@login_required
+def seller_product_toggle(product_id):
+    storefront, bounce = seller_listing_gate()
+    if bounce:
+        return bounce
+    product = Product.query.filter_by(id=product_id, seller_id=current_user.id).first_or_404()
+    if product.review_status != 'approved' and not product.is_active:
+        flash('This listing is waiting on an admin review and cannot be published yet.', 'warning')
+        return redirect(url_for('seller_products'))
+    product.is_active = not product.is_active
+    db.session.commit()
+    invalidate_product_cache()
+    flash(f'"{product.name}" is now {"visible" if product.is_active else "hidden"}.', 'success')
+    return redirect(url_for('seller_products'))
 
 
 @app.route('/seller/withdrawals', methods=['GET', 'POST'])
@@ -12875,6 +13214,10 @@ def ensure_phase_two_schema():
             ('is_hot_sale', 'is_hot_sale BOOLEAN DEFAULT 0'),
             ('hot_sale_started_at', 'hot_sale_started_at DATETIME'),
             ('is_original_source', 'is_original_source BOOLEAN DEFAULT 0'),
+            ('location_label', 'location_label VARCHAR(200)'),
+            ('location_county', 'location_county VARCHAR(100)'),
+            ('location_lat', 'location_lat FLOAT'),
+            ('location_lng', 'location_lng FLOAT'),
         ],
         'orders': [
             ('payment_method', "payment_method VARCHAR(30) DEFAULT 'mpesa'"),
@@ -13000,6 +13343,9 @@ def ensure_phase_two_schema():
             ('landmark', 'landmark VARCHAR(180)'),
             ('contact_phone', 'contact_phone VARCHAR(40)'),
             ('contact_email', 'contact_email VARCHAR(160)'),
+            ('location_lat', 'location_lat FLOAT'),
+            ('location_lng', 'location_lng FLOAT'),
+            ('location_county', 'location_county VARCHAR(100)'),
         ],
         'automation_tasks': [
             ('assigned_to_id', 'assigned_to_id INTEGER'),

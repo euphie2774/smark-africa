@@ -133,6 +133,26 @@
                     </div>
 
                     <div class="col-12">
+                        <label class="form-label fw-bold">Item Location</label>
+                        <div class="row g-2">
+                            <div class="col-md-6">
+                                <input name="location_label" class="form-control"
+                                       value="{{ product.location_label if product and product.location_label else '' }}"
+                                       placeholder="Where the item is, e.g. Ruiru warehouse">
+                            </div>
+                            <div class="col-md-3">
+                                <input type="number" step="any" name="location_lat" class="form-control" placeholder="Latitude"
+                                       value="{{ product.location_lat if product and product.location_lat is not none else '' }}">
+                            </div>
+                            <div class="col-md-3">
+                                <input type="number" step="any" name="location_lng" class="form-control" placeholder="Longitude"
+                                       value="{{ product.location_lng if product and product.location_lng is not none else '' }}">
+                            </div>
+                        </div>
+                        <div class="form-text">Shown as a small pin on the product card. Blank falls back to your storefront address.</div>
+                    </div>
+
+                    <div class="col-12">
                         <label class="form-label fw-bold">Product Images</label>
                         <div>
                             <input type="file" name="product_images" class="form-control" accept="image/png,image/jpeg,image/gif,image/webp" multiple>

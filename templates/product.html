@@ -68,6 +68,18 @@
         {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<span class="badge bg-success mb-2">Verified Seller</span>{% endif %}
 
         <h1 class="fw-bold">{{ product.name }}</h1>
+        {% if product.has_location %}
+        <p class="mb-1">
+            <i class="fas fa-location-dot text-danger me-1"></i>
+            <span class="text-muted">Ships from {{ product.location_display }}</span>
+            {% if product.location_lat is not none and product.location_lng is not none %}
+            <a class="small ms-1" target="_blank" rel="noopener"
+               href="https://www.openstreetmap.org/?mlat={{ product.location_lat }}&mlon={{ product.location_lng }}#map=15/{{ product.location_lat }}/{{ product.location_lng }}">
+                view on map
+            </a>
+            {% endif %}
+        </p>
+        {% endif %}
         <p class="text-muted">{{ product.short_description }}</p>
 
         <!-- Pricing -->

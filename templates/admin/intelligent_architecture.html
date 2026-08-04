@@ -203,7 +203,12 @@
 
         <div class="col-12">
             <div class="card border-0 shadow-sm">
-                <div class="card-header bg-white"><h5 class="mb-0">Storefront Applications</h5></div>
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Storefront Applications</h5>
+                    <a href="{{ url_for('admin_storefronts') }}" class="btn btn-sm btn-outline-secondary">
+                        Full approval queue
+                    </a>
+                </div>
                 <div class="card-body p-0 table-responsive">
                     <table class="table table-hover mb-0 align-middle">
                         <thead class="table-light"><tr><th>Business</th><th>Owner</th><th>Category</th><th>Address</th><th>Contact</th><th>Status</th><th>Review</th></tr></thead>
