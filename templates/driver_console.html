@@ -1,0 +1,328 @@
+{% extends "base.html" %}
+{% block title %}Driver Console - {{ super() }}{% endblock %}
+
+{% block head %}
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
+<style>
+    .ping-dot { width:12px; height:12px; border-radius:50%; display:inline-block; }
+    .ping-live { background:#198754; animation: pulse 1.6s infinite; }
+    .ping-off  { background:#adb5bd; }
+    .ping-err  { background:#dc3545; }
+    @keyframes pulse { 0%{opacity:1} 50%{opacity:.35} 100%{opacity:1} }
+    .job-card { border-left: 4px solid #0d6efd; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container py-3" style="max-width:640px;">
+
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h4 class="mb-0">{{ driver.display_name or (driver.user.username if driver.user else 'Driver') }}</h4>
+            <div class="text-muted small">
+                {{ driver.vehicle_type or 'vehicle' }}
+                {% if driver.vehicle_registration %} &middot; {{ driver.vehicle_registration }}{% endif %}
+            </div>
+        </div>
+        <div class="text-end">
+            <span class="ping-dot ping-off" id="pingDot"></span>
+            <div class="small text-muted" id="pingLabel">Sharing off</div>
+        </div>
+    </div>
+
+    <!-- Sharing control -->
+    <div class="card border-0 shadow-sm mb-3">
+        <div class="card-body">
+            <button id="shareBtn" class="btn btn-success btn-lg w-100" onclick="toggleSharing()">
+                <i class="fas fa-location-crosshairs me-2"></i>Start sharing my location
+            </button>
+            <div class="small text-muted mt-2" id="statusLine">
+                Keep this page open while you drive. Your position is sent every
+                {{ ping_seconds }} seconds and is only visible to dispatch and the customer
+                whose parcel you are carrying.
+            </div>
+            <div class="row text-center mt-3 g-2" id="fixStats" style="display:none;">
+                <div class="col-4">
+                    <div class="small text-muted">Accuracy</div>
+                    <div class="fw-semibold" id="statAccuracy">&mdash;</div>
+                </div>
+                <div class="col-4">
+                    <div class="small text-muted">Speed</div>
+                    <div class="fw-semibold" id="statSpeed">&mdash;</div>
+                </div>
+                <div class="col-4">
+                    <div class="small text-muted">Last sent</div>
+                    <div class="fw-semibold" id="statSent">&mdash;</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mb-3">
+        <div class="card-body p-0">
+            <div id="map" style="height:280px;border-radius:.5rem;"></div>
+        </div>
+    </div>
+
+    <!-- Jobs -->
+    <h6 class="text-uppercase text-muted small mb-2">
+        My deliveries <span class="badge bg-primary">{{ assignments | length }}</span>
+    </h6>
+
+    {% for a in assignments %}
+    <div class="card border-0 shadow-sm mb-3 job-card" data-assignment="{{ a.id }}">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start mb-2">
+                <div>
+                    <div class="fw-bold">{{ a.order.order_number if a.order else 'Order ' ~ a.order_id }}</div>
+                    <div class="small text-muted">{{ a.destination_label or 'Destination not set' }}</div>
+                </div>
+                <span class="badge bg-secondary" data-status="{{ a.id }}">
+                    {{ a.status.replace('_', ' ') }}
+                </span>
+            </div>
+
+            {% if a.order %}
+            <div class="small mb-2">
+                <i class="fas fa-location-dot me-1 text-danger"></i>
+                {{ a.order.shipping_address or '' }}
+                {% if a.order.shipping_city %}, {{ a.order.shipping_city }}{% endif %}
+                {% if a.order.customer_phone %}
+                    <div class="mt-1">
+                        <i class="fas fa-phone me-1 text-success"></i>
+                        <a href="tel:{{ a.order.customer_phone }}">{{ a.order.customer_phone }}</a>
+                    </div>
+                {% endif %}
+            </div>
+            {% endif %}
+
+            <div class="d-flex justify-content-between small text-muted mb-2">
+                <span>Remaining:
+                    <strong data-remaining="{{ a.id }}">
+                        {% if a.distance_remaining_km is not none %}{{ '%.1f'|format(a.distance_remaining_km) }} km{% else %}&mdash;{% endif %}
+                    </strong>
+                </span>
+                <span>ETA:
+                    <strong data-eta="{{ a.id }}">
+                        {% if a.eta_minutes is not none %}{{ a.eta_minutes | round | int }} min{% else %}&mdash;{% endif %}
+                    </strong>
+                </span>
+            </div>
+
+            <div class="d-flex gap-2 flex-wrap">
+                {% if a.destination_lat and a.destination_lng %}
+                <a class="btn btn-sm btn-outline-dark flex-grow-1"
+                   target="_blank" rel="noopener"
+                   href="https://www.openstreetmap.org/directions?to={{ a.destination_lat }},{{ a.destination_lng }}">
+                    <i class="fas fa-diamond-turn-right me-1"></i>Navigate
+                </a>
+                {% endif %}
+                <button class="btn btn-sm btn-info flex-grow-1"
+                        onclick="setStatus({{ a.id }}, 'picked_up')">Picked up</button>
+                <button class="btn btn-sm btn-primary flex-grow-1"
+                        onclick="setStatus({{ a.id }}, 'in_transit')">In transit</button>
+                <button class="btn btn-sm btn-success flex-grow-1"
+                        onclick="setStatus({{ a.id }}, 'delivered')">Delivered</button>
+                <button class="btn btn-sm btn-outline-danger"
+                        onclick="setStatus({{ a.id }}, 'failed')">Failed</button>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="card border-0 shadow-sm">
+        <div class="card-body text-center text-muted py-5">
+            <i class="fas fa-mug-hot fa-2x mb-3 d-block"></i>
+            No deliveries assigned right now.
+            <div class="small mt-2">Leave sharing on so dispatch can find you.</div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+const PING_URL   = {{ url_for('api_driver_ping', token=token) | tojson }};
+const STATUS_URL = {{ url_for('api_driver_status', token=token) | tojson }};
+const PING_MS    = {{ ping_seconds }} * 1000;
+const STYLE_URL  = {{ (map_style_url or '') | tojson }};
+const START = [
+    {{ driver.last_lng if driver.last_lng is not none else 36.817223 }},
+    {{ driver.last_lat if driver.last_lat is not none else -1.286389 }}
+];
+
+const RASTER_STYLE = {
+    version: 8,
+    sources: {
+        osm: {
+            type: 'raster',
+            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+            tileSize: 256,
+            attribution: '&copy; OpenStreetMap contributors'
+        }
+    },
+    layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+};
+
+let map = null, meMarker = null, watchId = null, timer = null, lastFix = null, sharing = false;
+
+function initMap() {
+    try {
+        map = new maplibregl.Map({
+            container: 'map', style: STYLE_URL || RASTER_STYLE, center: START, zoom: 13
+        });
+        map.addControl(new maplibregl.NavigationControl(), 'top-right');
+        {% for a in assignments %}
+        {% if a.destination_lat and a.destination_lng %}
+        new maplibregl.Marker({ color: '#dc3545' })
+            .setLngLat([{{ a.destination_lng }}, {{ a.destination_lat }}])
+            .setPopup(new maplibregl.Popup().setText({{ (a.destination_label or 'Destination') | tojson }}))
+            .addTo(map);
+        {% endif %}
+        {% endfor %}
+    } catch (err) {
+        document.getElementById('map').style.display = 'none';
+    }
+}
+
+function setDot(cls, label) {
+    const dot = document.getElementById('pingDot');
+    dot.className = 'ping-dot ' + cls;
+    document.getElementById('pingLabel').textContent = label;
+}
+
+function toggleSharing() {
+    sharing ? stopSharing() : startSharing();
+}
+
+function startSharing() {
+    if (!navigator.geolocation) {
+        setDot('ping-err', 'Unsupported');
+        document.getElementById('statusLine').textContent =
+            'This browser cannot share location. Try Chrome or Safari.';
+        return;
+    }
+    sharing = true;
+    document.getElementById('shareBtn').className = 'btn btn-outline-danger btn-lg w-100';
+    document.getElementById('shareBtn').innerHTML =
+        '<i class="fas fa-stop me-2"></i>Stop sharing';
+    document.getElementById('fixStats').style.display = '';
+    setDot('ping-live', 'Acquiring GPS');
+
+    watchId = navigator.geolocation.watchPosition(onFix, onGeoError, {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 20000
+    });
+    // watchPosition fires on movement, which can be never at a red light.
+    // The timer guarantees dispatch sees a heartbeat on a fixed cadence.
+    timer = setInterval(sendFix, PING_MS);
+}
+
+function stopSharing() {
+    sharing = false;
+    if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+    if (timer) { clearInterval(timer); timer = null; }
+    document.getElementById('shareBtn').className = 'btn btn-success btn-lg w-100';
+    document.getElementById('shareBtn').innerHTML =
+        '<i class="fas fa-location-crosshairs me-2"></i>Start sharing my location';
+    setDot('ping-off', 'Sharing off');
+}
+
+function onFix(position) {
+    lastFix = position;
+    const c = position.coords;
+    document.getElementById('statAccuracy').textContent =
+        c.accuracy ? Math.round(c.accuracy) + ' m' : '—';
+    document.getElementById('statSpeed').textContent =
+        c.speed != null ? Math.round(c.speed * 3.6) + ' km/h' : '—';
+
+    if (map) {
+        const at = [c.longitude, c.latitude];
+        if (meMarker) {
+            meMarker.setLngLat(at);
+        } else {
+            meMarker = new maplibregl.Marker({ color: '#198754' }).setLngLat(at).addTo(map);
+        }
+        map.easeTo({ center: at });
+    }
+    setDot('ping-live', 'Live');
+}
+
+function onGeoError(err) {
+    setDot('ping-err', 'Location blocked');
+    document.getElementById('statusLine').textContent =
+        'Location permission was denied or unavailable (' + err.message +
+        '). Allow location access for this site, then press start again.';
+    stopSharing();
+}
+
+async function sendFix() {
+    if (!lastFix) return;
+    const c = lastFix.coords;
+    try {
+        const resp = await fetch(PING_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                lat: c.latitude,
+                lng: c.longitude,
+                accuracy_m: c.accuracy,
+                speed_kph: c.speed != null ? c.speed * 3.6 : null,
+                heading: c.heading
+            })
+        });
+        const data = await resp.json();
+        if (!data.ok) { setDot('ping-err', data.error || 'Rejected'); return; }
+
+        document.getElementById('statSent').textContent = new Date().toLocaleTimeString();
+        setDot('ping-live', 'Live');
+
+        if (data.assignment) {
+            const a = data.assignment;
+            const eta = document.querySelector('[data-eta="' + a.id + '"]');
+            const rem = document.querySelector('[data-remaining="' + a.id + '"]');
+            if (eta) eta.textContent = a.eta_minutes != null ? Math.round(a.eta_minutes) + ' min' : '—';
+            if (rem) rem.textContent = a.distance_remaining_km != null
+                ? a.distance_remaining_km.toFixed(1) + ' km' : '—';
+        }
+    } catch (err) {
+        // Offline in a dead spot: keep watching, the next tick retries.
+        setDot('ping-err', 'No signal');
+    }
+}
+
+async function setStatus(assignmentId, status) {
+    const labels = { picked_up: 'picked up', in_transit: 'in transit',
+                     delivered: 'delivered', failed: 'failed' };
+    if (status === 'delivered' || status === 'failed') {
+        if (!confirm('Mark this delivery ' + labels[status] + '?')) return;
+    }
+    let note = null;
+    if (status === 'failed') {
+        note = prompt('What went wrong? (optional)') || null;
+    }
+    try {
+        const resp = await fetch(STATUS_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ assignment_id: assignmentId, status: status, note: note })
+        });
+        const data = await resp.json();
+        if (!data.ok) { alert(data.error || 'Could not update.'); return; }
+        const badge = document.querySelector('[data-status="' + assignmentId + '"]');
+        if (badge) badge.textContent = data.status.replace('_', ' ');
+        if (status === 'delivered' || status === 'failed') {
+            const card = document.querySelector('[data-assignment="' + assignmentId + '"]');
+            if (card) card.style.opacity = '.45';
+        }
+    } catch (err) {
+        alert('No connection. Try again when you have signal.');
+    }
+}
+
+document.addEventListener('DOMContentLoaded', initMap);
+window.addEventListener('beforeunload', () => { if (sharing) stopSharing(); });
+</script>
+{% endblock %}

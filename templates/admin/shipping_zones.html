@@ -1,0 +1,553 @@
+{% extends "base.html" %}
+{% block title %}Shipping Zones &amp; Rates - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-map-marked-alt me-2"></i>Shipping Zones &amp; Rates</h2>
+            <p class="text-muted mb-0">
+                Flat-fee zones price by destination county. Everything else is charged per kilometre
+                from the dispatch origin, with a minimum floor.
+            </p>
+        </div>
+        <div class="d-flex gap-2">
+            <a href="{{ url_for('admin_dispatch') }}" class="btn btn-outline-primary">
+                <i class="fas fa-truck-fast me-1"></i>Dispatch board
+            </a>
+            <a href="{{ url_for('admin_shipping') }}" class="btn btn-outline-secondary">
+                <i class="fas fa-ship me-1"></i>Carrier rates
+            </a>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3 col-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Origin</div>
+                    <div class="fw-semibold">{{ origin_label }}</div>
+                    <div class="text-muted small">{{ '%.4f'|format(origin_lat) }}, {{ '%.4f'|format(origin_lng) }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 col-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Active zones</div>
+                    <div class="fs-4 fw-bold">{{ zones | selectattr('is_active') | list | length }}</div>
+                    <div class="text-muted small">{{ zones | length }} total</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 col-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Routing engine</div>
+                    <div class="fw-semibold">{{ routing_provider }}</div>
+                    <div class="text-muted small">Geocoder: {{ geocoder }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 col-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body py-3">
+                    <div class="text-muted small text-uppercase">Uncovered counties</div>
+                    <div class="fs-4 fw-bold">{{ uncovered | length }}</div>
+                    <div class="text-muted small">Priced per kilometre</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Global defaults ------------------------------------------------- -->
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-white">
+            <h5 class="mb-0"><i class="fas fa-sliders me-2"></i>Global defaults</h5>
+            <small class="text-muted">Used whenever a matched zone leaves the equivalent field blank or zero.</small>
+        </div>
+        <div class="card-body">
+            <form method="POST" action="{{ url_for('admin_save_shipping_settings') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="row g-3">
+                    <div class="col-md-2 col-6">
+                        <label class="form-label small">Flat fee (KSh)</label>
+                        <input type="number" step="0.01" min="0" name="shipping_flat_fee"
+                               class="form-control" value="{{ ship_settings['shipping_flat_fee'] }}">
+                        <div class="form-text">Central region price</div>
+                    </div>
+                    <div class="col-md-2 col-6">
+                        <label class="form-label small">Rate per km (KSh)</label>
+                        <input type="number" step="0.01" min="0" name="shipping_per_km_rate"
+                               class="form-control" value="{{ ship_settings['shipping_per_km_rate'] }}">
+                        <div class="form-text">Outside flat zones</div>
+                    </div>
+                    <div class="col-md-2 col-6">
+                        <label class="form-label small">Minimum fee (KSh)</label>
+                        <input type="number" step="0.01" min="0" name="shipping_minimum_fee"
+                               class="form-control" value="{{ ship_settings['shipping_minimum_fee'] }}">
+                        <div class="form-text">Floor on every quote</div>
+                    </div>
+                    <div class="col-md-2 col-6">
+                        <label class="form-label small">Per kg surcharge</label>
+                        <input type="number" step="0.01" min="0" name="shipping_per_kg_rate"
+                               class="form-control" value="{{ ship_settings['shipping_per_kg_rate'] }}">
+                        <div class="form-text">0 = weight ignored</div>
+                    </div>
+                    <div class="col-md-2 col-6">
+                        <label class="form-label small">Free over (KSh)</label>
+                        <input type="number" step="0.01" min="0" name="shipping_free_over_amount"
+                               class="form-control" value="{{ ship_settings['shipping_free_over_amount'] }}">
+                        <div class="form-text">0 = never free</div>
+                    </div>
+                    <div class="col-md-2 col-6">
+                        <label class="form-label small">Intl. multiplier</label>
+                        <input type="number" step="0.05" min="0" name="shipping_international_multiplier"
+                               class="form-control" value="{{ ship_settings['shipping_international_multiplier'] }}">
+                        <div class="form-text">Outside Kenya</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small">Origin label</label>
+                        <input type="text" name="shipping_origin_label" class="form-control"
+                               value="{{ ship_settings['shipping_origin_label'] }}">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small">Origin latitude</label>
+                        <input type="number" step="0.000001" name="shipping_origin_lat"
+                               class="form-control" value="{{ ship_settings['shipping_origin_lat'] }}">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small">Origin longitude</label>
+                        <input type="number" step="0.000001" name="shipping_origin_lng"
+                               class="form-control" value="{{ ship_settings['shipping_origin_lng'] }}">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small">Driver ping (seconds)</label>
+                        <input type="number" step="1" min="5" name="driver_ping_seconds"
+                               class="form-control" value="{{ ship_settings['driver_ping_seconds'] }}">
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small">Max billable km</label>
+                        <input type="number" step="1" min="0" name="shipping_max_billable_km"
+                               class="form-control" value="{{ ship_settings['shipping_max_billable_km'] }}">
+                        <div class="form-text">Bad-geocode guard</div>
+                    </div>
+                    <div class="col-md-3 d-flex align-items-end">
+                        <button class="btn btn-primary w-100"><i class="fas fa-save me-1"></i>Save defaults</button>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <!-- Zone list ---------------------------------------------------- -->
+        <div class="col-xl-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0"><i class="fas fa-layer-group me-2"></i>Zones</h5>
+                    <small class="text-muted">Lowest priority number wins</small>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Zone</th>
+                                <th>Pricing</th>
+                                <th class="text-end">Priority</th>
+                                <th>Counties</th>
+                                <th class="text-end">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% for zone in zones %}
+                            <tr class="{{ '' if zone.is_active else 'opacity-50' }}">
+                                <td>
+                                    <div class="fw-semibold">{{ zone.name }}</div>
+                                    <div class="small text-muted">
+                                        {{ zone.country or 'Kenya' }} &middot;
+                                        {{ zone.estimated_days_min }}&ndash;{{ zone.estimated_days_max }} days
+                                        {% if not zone.is_active %}<span class="badge bg-secondary ms-1">inactive</span>{% endif %}
+                                    </div>
+                                </td>
+                                <td>
+                                    {% if zone.pricing_mode == 'flat' %}
+                                        <span class="badge bg-success">Flat</span>
+                                        KSh {{ '%.2f'|format(zone.flat_fee or 0) }}
+                                    {% else %}
+                                        <span class="badge bg-info text-dark">Per km</span>
+                                        KSh {{ '%.2f'|format(zone.per_km_rate or 0) }}/km
+                                    {% endif %}
+                                    {% if zone.per_kg_rate %}
+                                        <div class="small text-muted">+{{ '%.2f'|format(zone.per_kg_rate) }}/kg</div>
+                                    {% endif %}
+                                    {% if zone.minimum_fee %}
+                                        <div class="small text-muted">min {{ '%.0f'|format(zone.minimum_fee) }}</div>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end">{{ zone.priority }}</td>
+                                <td class="small">
+                                    {% set names = zone.county_list() %}
+                                    {% if names %}
+                                        {{ names[:4] | join(', ') }}{% if names | length > 4 %}
+                                            <span class="text-muted">+{{ names | length - 4 }} more</span>
+                                        {% endif %}
+                                    {% else %}
+                                        <span class="text-muted">Catch-all</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end text-nowrap">
+                                    <button class="btn btn-sm btn-outline-primary"
+                                            onclick='loadZone({{ zone.id }})' title="Edit">
+                                        <i class="fas fa-pen"></i>
+                                    </button>
+                                    <form method="POST" class="d-inline"
+                                          action="{{ url_for('admin_toggle_shipping_zone', zone_id=zone.id) }}">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button class="btn btn-sm btn-outline-secondary" title="Toggle">
+                                            <i class="fas fa-power-off"></i>
+                                        </button>
+                                    </form>
+                                    <form method="POST" class="d-inline"
+                                          action="{{ url_for('admin_delete_shipping_zone', zone_id=zone.id) }}"
+                                          onsubmit="return confirm('Delete zone {{ zone.name }}?');">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button class="btn btn-sm btn-outline-danger" title="Delete">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </form>
+                                </td>
+                            </tr>
+                        {% else %}
+                            <tr><td colspan="5" class="text-center text-muted py-4">No zones yet.</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% if uncovered %}
+                <div class="card-footer bg-white small">
+                    <strong>Per-kilometre counties:</strong>
+                    <span class="text-muted">{{ uncovered | join(', ') }}</span>
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Rate tester -->
+            <div class="card border-0 shadow-sm mt-4">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0"><i class="fas fa-calculator me-2"></i>Quote tester</h5>
+                    <small class="text-muted">Check a price before customers see it.</small>
+                </div>
+                <div class="card-body">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-4">
+                            <label class="form-label small">Destination</label>
+                            <input id="testDestination" class="form-control" placeholder="e.g. Kisumu" value="Nakuru">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">County</label>
+                            <input id="testCounty" class="form-control" placeholder="optional">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Weight (kg)</label>
+                            <input id="testWeight" type="number" step="0.1" min="0" class="form-control" value="1">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Order (KSh)</label>
+                            <input id="testOrder" type="number" step="1" min="0" class="form-control" value="0">
+                        </div>
+                        <div class="col-md-2">
+                            <button class="btn btn-dark w-100" onclick="runQuote()">Quote</button>
+                        </div>
+                    </div>
+                    <div id="quoteResult" class="mt-3"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Zone editor -------------------------------------------------- -->
+        <div class="col-xl-5">
+            <div class="card border-0 shadow-sm sticky-lg-top" style="top:1rem;">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0"><i class="fas fa-pen-to-square me-2"></i><span id="editorTitle">New zone</span></h5>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="resetZoneForm()">Clear</button>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('admin_save_shipping_zone') }}" id="zoneForm">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="zone_id" id="zone_id" value="">
+
+                        <div class="mb-3">
+                            <label class="form-label">Zone name *</label>
+                            <input type="text" name="name" id="f_name" class="form-control" required
+                                   placeholder="e.g. Central Region">
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">Pricing mode</label>
+                            <div class="btn-group w-100" role="group">
+                                <input type="radio" class="btn-check" name="pricing_mode" id="mode_flat"
+                                       value="flat" checked onchange="syncMode()">
+                                <label class="btn btn-outline-success" for="mode_flat">Flat fee</label>
+                                <input type="radio" class="btn-check" name="pricing_mode" id="mode_km"
+                                       value="per_km" onchange="syncMode()">
+                                <label class="btn btn-outline-info" for="mode_km">Per kilometre</label>
+                            </div>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-6" id="wrap_flat">
+                                <label class="form-label small">Flat fee (KSh)</label>
+                                <input type="number" step="0.01" min="0" name="flat_fee" id="f_flat_fee"
+                                       class="form-control" value="120">
+                            </div>
+                            <div class="col-6" id="wrap_km">
+                                <label class="form-label small">Rate per km (KSh)</label>
+                                <input type="number" step="0.01" min="0" name="per_km_rate" id="f_per_km_rate"
+                                       class="form-control" value="3">
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label small">Minimum fee</label>
+                                <input type="number" step="0.01" min="0" name="minimum_fee" id="f_minimum_fee"
+                                       class="form-control" value="0">
+                                <div class="form-text">0 uses the global floor</div>
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label small">Per kg surcharge</label>
+                                <input type="number" step="0.01" min="0" name="per_kg_rate" id="f_per_kg_rate"
+                                       class="form-control" value="0">
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label small">Free over (KSh)</label>
+                                <input type="number" step="0.01" min="0" name="free_over_amount"
+                                       id="f_free_over_amount" class="form-control" value="0">
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label small">Priority</label>
+                                <input type="number" step="1" min="0" name="priority" id="f_priority"
+                                       class="form-control" value="100">
+                                <div class="form-text">Lower matches first</div>
+                            </div>
+                            <div class="col-4">
+                                <label class="form-label small">Min days</label>
+                                <input type="number" min="0" name="estimated_days_min"
+                                       id="f_estimated_days_min" class="form-control" value="1">
+                            </div>
+                            <div class="col-4">
+                                <label class="form-label small">Max days</label>
+                                <input type="number" min="0" name="estimated_days_max"
+                                       id="f_estimated_days_max" class="form-control" value="3">
+                            </div>
+                            <div class="col-4">
+                                <label class="form-label small">Country</label>
+                                <input type="text" name="country" id="f_country" class="form-control" value="Kenya">
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <label class="form-label mb-0">Counties in this zone</label>
+                                <div>
+                                    <button type="button" class="btn btn-sm btn-link p-0 me-2"
+                                            onclick="selectCentral()">Central preset</button>
+                                    <button type="button" class="btn btn-sm btn-link p-0"
+                                            onclick="clearCounties()">None</button>
+                                </div>
+                            </div>
+                            <div class="border rounded p-2 mt-1" style="max-height:220px;overflow-y:auto;">
+                                <div class="row g-1">
+                                {% for county in counties %}
+                                    <div class="col-6">
+                                        <div class="form-check">
+                                            <input class="form-check-input county-box" type="checkbox"
+                                                   name="counties" value="{{ county }}"
+                                                   id="county_{{ loop.index }}">
+                                            <label class="form-check-label small" for="county_{{ loop.index }}">
+                                                {{ county }}
+                                            </label>
+                                        </div>
+                                    </div>
+                                {% endfor %}
+                                </div>
+                            </div>
+                            <div class="form-text">Leave empty for a catch-all zone (use a high priority number).</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label small">Internal notes</label>
+                            <textarea name="notes" id="f_notes" class="form-control" rows="2"></textarea>
+                        </div>
+
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" name="is_active"
+                                   id="f_is_active" value="1" checked>
+                            <label class="form-check-label" for="f_is_active">Active</label>
+                        </div>
+
+                        <button class="btn btn-primary w-100"><i class="fas fa-save me-1"></i>Save zone</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recent quotes ---------------------------------------------------- -->
+    <div class="card border-0 shadow-sm mt-4">
+        <div class="card-header bg-white">
+            <h5 class="mb-0"><i class="fas fa-receipt me-2"></i>Recent quotes</h5>
+            <small class="text-muted">What customers were actually charged, newest first.</small>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>When</th><th>Destination</th><th>Zone</th>
+                        <th class="text-end">Distance</th><th class="text-end">Fee</th><th>Engine</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for q in recent_quotes %}
+                    <tr>
+                        <td class="small text-muted">{{ q.created_at.strftime('%d %b %H:%M') if q.created_at else '-' }}</td>
+                        <td class="small">{{ q.destination_label or q.destination_county or '-' }}</td>
+                        <td class="small">{{ q.zone.name if q.zone else 'Per km' }}</td>
+                        <td class="text-end small">
+                            {% if q.distance_km %}{{ '%.1f'|format(q.distance_km) }} km{% else %}-{% endif %}
+                        </td>
+                        <td class="text-end fw-semibold">KSh {{ '%.2f'|format(q.total_fee or 0) }}</td>
+                        <td class="small text-muted">{{ q.routing_provider or '-' }}</td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="6" class="text-center text-muted py-4">No quotes recorded yet.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const ZONE_DATA = {
+{% for zone in zones %}
+    {{ zone.id }}: {
+        name: {{ (zone.name or '') | tojson }},
+        pricing_mode: {{ (zone.pricing_mode or 'per_km') | tojson }},
+        flat_fee: {{ zone.flat_fee or 0 }},
+        per_km_rate: {{ zone.per_km_rate or 0 }},
+        minimum_fee: {{ zone.minimum_fee or 0 }},
+        per_kg_rate: {{ zone.per_kg_rate or 0 }},
+        free_over_amount: {{ zone.free_over_amount or 0 }},
+        priority: {{ zone.priority or 100 }},
+        estimated_days_min: {{ zone.estimated_days_min or 1 }},
+        estimated_days_max: {{ zone.estimated_days_max or 3 }},
+        country: {{ (zone.country or 'Kenya') | tojson }},
+        notes: {{ (zone.notes or '') | tojson }},
+        is_active: {{ 'true' if zone.is_active else 'false' }},
+        counties: {{ zone.county_list() | tojson }}
+    }{{ ',' if not loop.last }}
+{% endfor %}
+};
+const CENTRAL_PRESET = ["Nairobi", "Kiambu", "Murang'a", "Nyeri", "Kirinyaga", "Nyandarua"];
+
+function syncMode() {
+    const flat = document.getElementById('mode_flat').checked;
+    document.getElementById('wrap_flat').style.opacity = flat ? '1' : '0.4';
+    document.getElementById('wrap_km').style.opacity = flat ? '0.4' : '1';
+}
+
+function clearCounties() {
+    document.querySelectorAll('.county-box').forEach(box => { box.checked = false; });
+}
+
+function setCounties(names) {
+    const wanted = new Set((names || []).map(n => n.toLowerCase()));
+    document.querySelectorAll('.county-box').forEach(box => {
+        box.checked = wanted.has(box.value.toLowerCase());
+    });
+}
+
+function selectCentral() { setCounties(CENTRAL_PRESET); }
+
+function resetZoneForm() {
+    document.getElementById('zoneForm').reset();
+    document.getElementById('zone_id').value = '';
+    document.getElementById('editorTitle').textContent = 'New zone';
+    clearCounties();
+    syncMode();
+}
+
+function loadZone(id) {
+    const zone = ZONE_DATA[id];
+    if (!zone) return;
+    document.getElementById('zone_id').value = id;
+    document.getElementById('editorTitle').textContent = 'Editing: ' + zone.name;
+    document.getElementById('f_name').value = zone.name;
+    document.getElementById('mode_flat').checked = zone.pricing_mode === 'flat';
+    document.getElementById('mode_km').checked = zone.pricing_mode !== 'flat';
+    document.getElementById('f_flat_fee').value = zone.flat_fee;
+    document.getElementById('f_per_km_rate').value = zone.per_km_rate;
+    document.getElementById('f_minimum_fee').value = zone.minimum_fee;
+    document.getElementById('f_per_kg_rate').value = zone.per_kg_rate;
+    document.getElementById('f_free_over_amount').value = zone.free_over_amount;
+    document.getElementById('f_priority').value = zone.priority;
+    document.getElementById('f_estimated_days_min').value = zone.estimated_days_min;
+    document.getElementById('f_estimated_days_max').value = zone.estimated_days_max;
+    document.getElementById('f_country').value = zone.country;
+    document.getElementById('f_notes').value = zone.notes;
+    document.getElementById('f_is_active').checked = zone.is_active;
+    setCounties(zone.counties);
+    syncMode();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function runQuote() {
+    const box = document.getElementById('quoteResult');
+    box.innerHTML = '<div class="text-muted small">Calculating&hellip;</div>';
+    try {
+        const resp = await fetch('{{ url_for("api_shipping_quote") }}', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token() }}' },
+            body: JSON.stringify({
+                city: document.getElementById('testDestination').value,
+                county: document.getElementById('testCounty').value,
+                weight_kg: parseFloat(document.getElementById('testWeight').value) || 0,
+                order_value: parseFloat(document.getElementById('testOrder').value) || 0
+            })
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            box.innerHTML = '<div class="alert alert-warning mb-0 py-2 small">' +
+                (data.error || 'Quote failed.') + '</div>';
+            return;
+        }
+        const rows = [
+            ['Matched zone', data.zone_name || 'Per-kilometre default'],
+            ['Pricing mode', data.pricing_mode || '-'],
+            ['Resolved as', data.destination_label || '-'],
+            ['County', data.destination_county || '(not matched)'],
+            ['Road distance', data.distance_km ? data.distance_km.toFixed(1) + ' km' : 'n/a'],
+            ['Base / flat fee', 'KSh ' + Number(data.base_amount || 0).toFixed(2)],
+            ['Distance charge', 'KSh ' + Number(data.distance_amount || 0).toFixed(2)],
+            ['Weight charge', 'KSh ' + Number(data.weight_amount || 0).toFixed(2)],
+            ['Minimum floor', 'KSh ' + Number(data.minimum_fee || 0).toFixed(2)],
+            ['Multiplier', 'x' + Number(data.multiplier || 1)],
+            ['Drive time', data.duration_minutes ? Math.round(data.duration_minutes) + ' min' : '-'],
+            ['Geocoded', data.geocoded ? 'yes' : 'no &mdash; fell back to the floor'],
+            ['Routing engine', (data.routing_provider || '-') + (data.is_estimate ? ' (estimate)' : '')]
+        ].map(r => '<tr><td class="text-muted small">' + r[0] + '</td><td class="small">' + r[1] + '</td></tr>').join('');
+        box.innerHTML =
+            '<div class="alert alert-success py-2 mb-2"><strong>KSh ' +
+            Number(data.total_amount || 0).toFixed(2) + '</strong></div>' +
+            (data.explanation ? '<p class="small text-muted">' + data.explanation + '</p>' : '') +
+            '<table class="table table-sm mb-0">' + rows + '</table>';
+    } catch (err) {
+        box.innerHTML = '<div class="alert alert-danger mb-0 py-2 small">' + err + '</div>';
+    }
+}
+
+document.addEventListener('DOMContentLoaded', syncMode);
+</script>
+{% endblock %}

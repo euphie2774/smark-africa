@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Track Order - {{ super() }}{% endblock %}
 
+{% block head %}
+{% if assignment %}
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
+{% endif %}
+{% endblock %}
+
 {% block content %}
 <div class="container py-5">
     <div class="row justify-content-center">
@@ -47,10 +53,50 @@
                             <p class="mb-1"><strong>Delivery:</strong> {{ (order.delivery_method or 'doorstep').replace('_', ' ')|title }}</p>
                             {% if order.pickup_station %}<p class="mb-1"><strong>Pickup:</strong> {{ order.pickup_station }}</p>{% endif %}
                             {% if eta_minutes %}
-                            <div class="alert alert-info py-2 mt-2 mb-0"><i class="fas fa-location-dot me-1"></i> Driver is approximately {{ eta_minutes }} minutes away.</div>
+                            <div class="alert alert-info py-2 mt-2 mb-0">
+                                <i class="fas fa-location-dot me-1"></i>
+                                Driver is approximately <span id="etaText">{{ eta_minutes }}</span> minutes away.
+                            </div>
                             {% endif %}
                         </div>
                     </div>
+
+                    {% if assignment %}
+                    <!-- Live delivery map -->
+                    <div class="card border-0 bg-light mb-4">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h5 class="mb-0"><i class="fas fa-map-location-dot me-2"></i>Live delivery</h5>
+                                <span class="badge bg-secondary" id="liveBadge">Waiting for driver</span>
+                            </div>
+                            <div id="trackMap" style="height:320px;border-radius:.5rem;"></div>
+                            <div class="row text-center mt-3 g-2">
+                                <div class="col-4">
+                                    <div class="small text-muted">Destination</div>
+                                    <div class="fw-semibold small">{{ assignment.destination_label or 'Your address' }}</div>
+                                </div>
+                                <div class="col-4">
+                                    <div class="small text-muted">Distance left</div>
+                                    <div class="fw-semibold" id="distLeft">
+                                        {% if assignment.distance_remaining_km is not none %}
+                                            {{ '%.1f'|format(assignment.distance_remaining_km) }} km
+                                        {% else %}&mdash;{% endif %}
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <div class="small text-muted">Stage</div>
+                                    <div class="fw-semibold" id="stageText">
+                                        {{ assignment.status.replace('_', ' ')|title }}
+                                    </div>
+                                </div>
+                            </div>
+                            <p class="small text-muted mb-0 mt-2">
+                                The map shows the driver's position once they have picked up your parcel
+                                and switched on location sharing.
+                            </p>
+                        </div>
+                    </div>
+                    {% endif %}
 
                     <!-- Tracking Timeline -->
                     {% if tracking_updates %}
@@ -126,4 +172,106 @@
     position: relative;
 }
 </style>
+{% endblock %}
+
+{% block scripts %}
+{% if assignment %}
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+const TRACK_URL = {{ url_for('api_track_order', order_number=order.order_number) | tojson }};
+const STYLE_URL = {{ (map_style_url or '') | tojson }};
+const DEST = [
+    {{ assignment.destination_lng if assignment.destination_lng is not none else origin_lng }},
+    {{ assignment.destination_lat if assignment.destination_lat is not none else origin_lat }}
+];
+
+const RASTER_STYLE = {
+    version: 8,
+    sources: {
+        osm: {
+            type: 'raster',
+            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+            tileSize: 256,
+            attribution: '&copy; OpenStreetMap contributors'
+        }
+    },
+    layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+};
+
+let map = null, driverMarker = null, centredOnDriver = false;
+
+function initMap() {
+    try {
+        map = new maplibregl.Map({
+            container: 'trackMap', style: STYLE_URL || RASTER_STYLE, center: DEST, zoom: 12
+        });
+        map.addControl(new maplibregl.NavigationControl(), 'top-right');
+        new maplibregl.Marker({ color: '#dc3545' })
+            .setLngLat(DEST)
+            .setPopup(new maplibregl.Popup().setText('Delivery address'))
+            .addTo(map);
+    } catch (err) {
+        const el = document.getElementById('trackMap');
+        if (el) el.innerHTML =
+            '<div class="text-muted text-center py-5">Map unavailable right now.</div>';
+    }
+}
+
+async function refresh() {
+    try {
+        const resp = await fetch(TRACK_URL);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const badge = document.getElementById('liveBadge');
+
+        if (data.eta_minutes != null) {
+            const eta = document.getElementById('etaText');
+            if (eta) eta.textContent = Math.round(data.eta_minutes);
+        }
+        if (data.distance_remaining_km != null) {
+            document.getElementById('distLeft').textContent =
+                data.distance_remaining_km.toFixed(1) + ' km';
+        }
+        if (data.delivery_status) {
+            document.getElementById('stageText').textContent =
+                data.delivery_status.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+        }
+
+        if (data.driver && data.driver.lat != null && map) {
+            const at = [data.driver.lng, data.driver.lat];
+            if (driverMarker) {
+                driverMarker.setLngLat(at);
+            } else {
+                driverMarker = new maplibregl.Marker({ color: '#198754' })
+                    .setLngLat(at)
+                    .setPopup(new maplibregl.Popup().setText(
+                        'Your ' + (data.driver.vehicle_type || 'driver')))
+                    .addTo(map);
+            }
+            // Frame both pins the first time the driver appears, then leave the
+            // viewport alone so a customer can pan without it snapping back.
+            if (!centredOnDriver) {
+                centredOnDriver = true;
+                const bounds = new maplibregl.LngLatBounds(at, at).extend(DEST);
+                map.fitBounds(bounds, { padding: 60, maxZoom: 14 });
+            }
+            badge.className = 'badge bg-success';
+            badge.textContent = 'Driver on the move';
+        } else if (badge) {
+            badge.className = 'badge bg-secondary';
+            badge.textContent = data.delivery_status === 'assigned'
+                ? 'Preparing your parcel' : 'Waiting for driver';
+        }
+    } catch (err) {
+        /* transient - the next tick retries */
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    initMap();
+    refresh();
+    setInterval(refresh, 20000);
+});
+</script>
+{% endif %}
 {% endblock %}

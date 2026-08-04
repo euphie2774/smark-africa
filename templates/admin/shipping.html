@@ -5,6 +5,20 @@
 <div class="container py-4">
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h2><i class="fas fa-ship me-2"></i>Shipping Rates</h2>
+        <div class="d-flex gap-2">
+            <a href="{{ url_for('admin_shipping_zones') }}" class="btn btn-outline-primary">
+                <i class="fas fa-map-marked-alt me-1"></i>Zones &amp; distance pricing
+            </a>
+            <a href="{{ url_for('admin_dispatch') }}" class="btn btn-outline-secondary">
+                <i class="fas fa-truck-fast me-1"></i>Dispatch board
+            </a>
+        </div>
+    </div>
+    <div class="alert alert-info small">
+        <i class="fas fa-circle-info me-1"></i>
+        These are the named carrier options shown at checkout. The actual delivery fee
+        comes from <a href="{{ url_for('admin_shipping_zones') }}">Zones &amp; distance pricing</a>
+        &mdash; flat KSh 120 for the central region, per-kilometre elsewhere.
     </div>
 
     <div class="row g-4">

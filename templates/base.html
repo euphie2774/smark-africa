@@ -13,6 +13,7 @@
     <meta name="description" content="{{ settings.get('site_description', 'shop smarter, live better') }}">
     <meta name="keywords" content="{{ settings.get('site_keywords', 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products') }}">
     <meta name="csrf-token" content="{{ csrf_token() if csrf_token else '' }}">
+    {% block head %}{% endblock %}
 </head>
 <body>
     <!-- Navigation -->

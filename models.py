@@ -1490,3 +1490,178 @@ class PlatformRevenue(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     payer = db.relationship('User', lazy=True)
+
+
+# ============================================================================
+# SHIPPING ZONES, QUOTES & DRIVER TRACKING
+# ============================================================================
+
+class ShippingZone(db.Model):
+    """A named delivery zone with its own pricing rule.
+
+    Flat zones (e.g. Central at KSh 120) match on county name. Anything not
+    matched by an active zone falls through to per-km pricing. Admin-editable
+    so competitive rates can change without a deploy.
+    """
+    __tablename__ = 'shipping_zones'
+    __table_args__ = (
+        db.Index('ix_shipping_zones_active_priority', 'is_active', 'priority'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False, unique=True)
+    pricing_mode = db.Column(db.String(20), default='flat')  # flat, per_km
+    flat_fee = db.Column(db.Float, default=120.0)
+    per_km_rate = db.Column(db.Float, default=3.0)
+    minimum_fee = db.Column(db.Float, default=120.0)
+    per_kg_rate = db.Column(db.Float, default=0.0)       # surcharge, 0 = inert
+    free_over_amount = db.Column(db.Float, default=0.0)  # 0 = never free
+    country = db.Column(db.String(100), default='Kenya')
+    counties = db.Column(db.Text)  # comma-separated county names
+    estimated_days_min = db.Column(db.Integer, default=1)
+    estimated_days_max = db.Column(db.Integer, default=3)
+    priority = db.Column(db.Integer, default=100)  # lower wins when several match
+    is_active = db.Column(db.Boolean, default=True)
+    notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def county_list(self):
+        return [c.strip() for c in (self.counties or '').split(',') if c.strip()]
+
+    def covers_county(self, county):
+        if not county:
+            return False
+        target = county.strip().lower()
+        return any(c.lower() == target for c in self.county_list())
+
+
+class ShippingQuote(db.Model):
+    """Audit trail of every quote issued.
+
+    Kept so a customer dispute can be answered with the exact inputs and rule
+    that produced a price, and so pricing changes can be analysed over time.
+    """
+    __tablename__ = 'shipping_quotes'
+    __table_args__ = (
+        db.Index('ix_shipping_quotes_created', 'created_at'),
+        db.Index('ix_shipping_quotes_order', 'order_id'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    zone_id = db.Column(db.Integer, db.ForeignKey('shipping_zones.id'), nullable=True)
+
+    origin_label = db.Column(db.String(240))
+    origin_lat = db.Column(db.Float)
+    origin_lng = db.Column(db.Float)
+    destination_label = db.Column(db.String(240))
+    destination_lat = db.Column(db.Float)
+    destination_lng = db.Column(db.Float)
+    destination_county = db.Column(db.String(120))
+    destination_country = db.Column(db.String(100), default='Kenya')
+
+    distance_km = db.Column(db.Float, default=0.0)
+    duration_minutes = db.Column(db.Float)
+    weight_kg = db.Column(db.Float, default=0.0)
+
+    pricing_mode = db.Column(db.String(20))  # flat, per_km
+    base_amount = db.Column(db.Float, default=0.0)
+    distance_amount = db.Column(db.Float, default=0.0)
+    weight_amount = db.Column(db.Float, default=0.0)
+    total_amount = db.Column(db.Float, default=0.0)
+
+    # Which provider produced the distance, and whether it was a real route.
+    routing_provider = db.Column(db.String(60))
+    is_estimate = db.Column(db.Boolean, default=True)
+    explanation = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    zone = db.relationship('ShippingZone', lazy=True)
+
+
+class DriverProfile(db.Model):
+    """A delivery driver, linked to a user account for login."""
+    __tablename__ = 'driver_profiles'
+    __table_args__ = (
+        db.Index('ix_driver_profiles_status', 'status'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, unique=True)
+    display_name = db.Column(db.String(160))
+    phone = db.Column(db.String(30))
+    vehicle_type = db.Column(db.String(40), default='motorbike')
+    vehicle_registration = db.Column(db.String(40))
+    carrier_partner_id = db.Column(db.Integer, db.ForeignKey('carrier_partners.id'), nullable=True)
+    status = db.Column(db.String(30), default='offline')  # offline, available, on_delivery
+    is_active = db.Column(db.Boolean, default=True)
+
+    # Denormalised latest position so the dispatch map is one cheap query.
+    last_lat = db.Column(db.Float)
+    last_lng = db.Column(db.Float)
+    last_ping_at = db.Column(db.DateTime)
+    last_accuracy_m = db.Column(db.Float)
+
+    # Token the driver phone posts with; rotatable without touching login.
+    tracking_token = db.Column(db.String(64), unique=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', lazy=True, foreign_keys=[user_id])
+    carrier_partner = db.relationship('CarrierPartner', lazy=True)
+
+    @property
+    def has_fix(self):
+        return self.last_lat is not None and self.last_lng is not None
+
+
+class DriverLocationPing(db.Model):
+    """Raw GPS breadcrumb from a driver phone.
+
+    Retained for route replay and delivery-time analysis; prune on a schedule
+    since this table grows fastest of anything in the system.
+    """
+    __tablename__ = 'driver_location_pings'
+    __table_args__ = (
+        db.Index('ix_driver_pings_driver_created', 'driver_id', 'created_at'),
+        db.Index('ix_driver_pings_order_created', 'order_id', 'created_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    driver_id = db.Column(db.Integer, db.ForeignKey('driver_profiles.id'), nullable=False)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)
+    lat = db.Column(db.Float, nullable=False)
+    lng = db.Column(db.Float, nullable=False)
+    accuracy_m = db.Column(db.Float)
+    speed_kph = db.Column(db.Float)
+    heading = db.Column(db.Float)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    driver = db.relationship('DriverProfile', lazy=True)
+
+
+class DeliveryAssignment(db.Model):
+    """Links an order to the driver carrying it."""
+    __tablename__ = 'delivery_assignments'
+    __table_args__ = (
+        db.Index('ix_delivery_assignments_driver_status', 'driver_id', 'status'),
+        db.Index('ix_delivery_assignments_order', 'order_id'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False)
+    driver_id = db.Column(db.Integer, db.ForeignKey('driver_profiles.id'), nullable=False)
+    # assigned, picked_up, in_transit, delivered, failed
+    status = db.Column(db.String(30), default='assigned')
+    assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
+    picked_up_at = db.Column(db.DateTime)
+    delivered_at = db.Column(db.DateTime)
+
+    # Destination snapshot so ETA survives an edit to the order address.
+    destination_lat = db.Column(db.Float)
+    destination_lng = db.Column(db.Float)
+    destination_label = db.Column(db.String(240))
+
+    eta_minutes = db.Column(db.Float)
+    eta_updated_at = db.Column(db.DateTime)
+    distance_remaining_km = db.Column(db.Float)
+    notes = db.Column(db.Text)
+
+    order = db.relationship('Order', lazy=True, backref='delivery_assignments')
+    driver = db.relationship('DriverProfile', lazy=True, backref='assignments')

@@ -48,7 +48,11 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     ShoppingCardTransaction, KYCIdentityVerification, CardAuthorizationRequest, Raffle, RaffleTicket, \
     CoinTransaction, CoinDailyCheckIn, Event, \
     PromotedListing, AffiliateLink, AffiliateConversion, SellerSubscription, SponsoredBanner, \
-    EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue, AuditLog
+    EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue, AuditLog, \
+    ShippingZone, ShippingQuote, DriverProfile, DriverLocationPing, DeliveryAssignment
+
+from geo import GeoPoint, get_router, get_geocoder
+from geo.cache import cached_route, cached_geocode, cached_reverse
 
 # Import security utilities
 from validators import (RegisterSchema, LoginSchema, ProductSchema, ReviewSchema,
@@ -1601,19 +1605,277 @@ def country_is_supported_for_sales(country):
 
 
 def estimate_shipping_cost(country, state, city, weight_kg):
+    """Legacy signature kept for existing callers.
+
+    Delegates to the zone/distance engine and returns just the amount. New code
+    should call quote_shipping() directly to get the full breakdown.
+    """
+    quote = quote_shipping(
+        country=country,
+        county=state,
+        city=city,
+        weight_kg=weight_kg,
+        persist=False,
+    )
+    return quote['total_amount']
+
+
+# --- Shipping fee engine -------------------------------------------------
+#
+# Pricing rules, all admin-editable:
+#   1. If the destination county falls in an active flat zone -> that flat fee
+#      (KSh 120 for Central by default).
+#   2. Otherwise -> per-km rate (KSh 3/km) x distance, floored at the minimum
+#      fee so a short out-of-zone hop is not priced at almost nothing.
+#   3. Plus an optional per-kg surcharge, which defaults to 0 and is therefore
+#      inert until an admin sets it.
+#
+# Defaults live in Setting so they can be tuned for competitive rates without
+# a deploy. SHIPPING_DEFAULTS is the seed/fallback if a Setting is missing.
+
+SHIPPING_DEFAULTS = {
+    'shipping_flat_fee': '120',
+    'shipping_per_km_rate': '3',
+    'shipping_minimum_fee': '120',
+    'shipping_per_kg_rate': '0',
+    'shipping_origin_label': 'Nairobi',
+    'shipping_origin_lat': '-1.286389',
+    'shipping_origin_lng': '36.817223',
+    'shipping_international_multiplier': '1.0',
+    'shipping_free_over_amount': '0',
+    'shipping_max_billable_km': '6000',
+    'driver_ping_seconds': '20',
+}
+
+CENTRAL_ZONE_COUNTIES = "Nairobi, Kiambu, Murang'a, Nyeri, Kirinyaga, Nyandarua"
+
+
+def shipping_setting_float(key, default=None):
+    """Read a numeric shipping Setting, falling back to the seeded default."""
+    fallback = SHIPPING_DEFAULTS.get(key, '0') if default is None else str(default)
+    raw = Setting.get(key, fallback)
+    try:
+        return float(str(raw).strip() or fallback)
+    except (TypeError, ValueError):
+        try:
+            return float(fallback)
+        except (TypeError, ValueError):
+            return 0.0
+
+
+def shipping_origin_point():
+    """Dispatch origin used as the distance anchor."""
+    lat = shipping_setting_float('shipping_origin_lat')
+    lng = shipping_setting_float('shipping_origin_lng')
+    label = Setting.get('shipping_origin_label', SHIPPING_DEFAULTS['shipping_origin_label'])
+    point = GeoPoint(lat, lng)
+    return (point if point.is_valid() else GeoPoint(-1.286389, 36.817223)), label
+
+
+def match_shipping_zone(county, country='Kenya'):
+    """Lowest-priority active zone covering this county, if any."""
+    if not county:
+        return None
+    try:
+        zones = ShippingZone.query.filter_by(is_active=True).order_by(
+            ShippingZone.priority.asc(), ShippingZone.id.asc()
+        ).all()
+    except SQLAlchemyError:
+        # Table may not exist yet on a database that has not run the schema
+        # pass; pricing must still work.
+        db.session.rollback()
+        return None
+    target_country = (country or 'Kenya').strip().lower()
+    for zone in zones:
+        zone_country = (zone.country or 'Kenya').strip().lower()
+        if zone_country and zone_country != target_country:
+            continue
+        if zone.covers_county(county):
+            return zone
+    return None
+
+
+def resolve_destination(country=None, county=None, city=None, address=None, lat=None, lng=None):
+    """Work out a destination point + county from whatever the caller supplied.
+
+    Accepts explicit coordinates (driver/map picker), or free text which is run
+    through the configured geocoder. Returns (GeoPoint|None, county, label).
+    """
     country = country or 'Kenya'
-    weight = max(0, weight_kg or 0)
-    if country == 'Kenya':
-        if state == 'Nairobi' and city and 'drop station' in city.lower():
-            return round(100 + (weight * 300), 2)
-        return round(weight * 300, 2)
-    base_by_country = {
-        'Uganda': 900, 'Tanzania': 1100, 'Rwanda': 1300,
-        'Nigeria': 4200, 'South Africa': 4800, 'China': 8500, 'Turkey': 7800,
-        'United Kingdom': 1900, 'United States': 2250, 'UAE': 1650, 'India': 1500,
+
+    if lat is not None and lng is not None:
+        try:
+            point = GeoPoint(float(lat), float(lng))
+        except (TypeError, ValueError):
+            point = None
+        if point and point.is_valid():
+            resolved_county = county
+            if not resolved_county:
+                hit = cached_reverse(cache, point)
+                resolved_county = hit.county if hit.found else None
+            label = address or city or (resolved_county or '') or f'{point.lat:.4f}, {point.lng:.4f}'
+            return point, resolved_county, label
+
+    # Most specific text first so "Karen, Nairobi" beats bare "Nairobi".
+    for candidate in [address, city, county, country]:
+        if not (candidate or '').strip():
+            continue
+        hit = cached_geocode(cache, candidate, country)
+        if hit.found:
+            return hit.point, (county or hit.county), (address or city or candidate)
+
+    return None, county, (address or city or county or country)
+
+
+def quote_shipping(country=None, county=None, city=None, address=None,
+                   lat=None, lng=None, weight_kg=0.0, order_value=0.0,
+                   order_id=None, user_id=None, persist=False):
+    """Price a delivery and explain how the number was reached.
+
+    Returns a dict with the amount plus every input and intermediate value, so
+    the UI can show a breakdown and support can audit a disputed charge.
+    """
+    country = (country or 'Kenya').strip() or 'Kenya'
+    try:
+        weight = max(0.0, float(weight_kg or 0))
+    except (TypeError, ValueError):
+        weight = 0.0
+    try:
+        value = max(0.0, float(order_value or 0))
+    except (TypeError, ValueError):
+        value = 0.0
+
+    origin_point, origin_label = shipping_origin_point()
+    dest_point, dest_county, dest_label = resolve_destination(
+        country=country, county=county, city=city, address=address, lat=lat, lng=lng
+    )
+
+    per_kg_rate = shipping_setting_float('shipping_per_kg_rate')
+    minimum_fee = shipping_setting_float('shipping_minimum_fee')
+    free_over = shipping_setting_float('shipping_free_over_amount')
+
+    zone = match_shipping_zone(dest_county, country)
+
+    distance_km = 0.0
+    duration_minutes = None
+    routing_provider = 'none'
+    is_estimate = True
+    if dest_point and dest_point.is_valid():
+        route = cached_route(cache, origin_point, dest_point)
+        distance_km = route.rounded_km()
+        duration_minutes = route.duration_minutes
+        routing_provider = route.provider
+        is_estimate = route.is_estimate
+
+    # Guard against a bad geocode producing an absurd bill.
+    max_km = shipping_setting_float('shipping_max_billable_km')
+    if max_km > 0:
+        distance_km = min(distance_km, max_km)
+
+    notes = []
+    # A zone rate of 0/None means "not set for this zone" and falls back to the
+    # global setting. Zones seed with 0, so without this an admin who sets the
+    # global per-kg rate would see it silently ignored on every zone.
+    def zone_rate(attr, global_value):
+        if zone is None:
+            return global_value
+        value = getattr(zone, attr, None)
+        return float(value) if value else global_value
+
+    if zone and (zone.pricing_mode or 'flat') == 'flat':
+        pricing_mode = 'flat'
+        base_amount = float(zone.flat_fee or 0)
+        distance_amount = 0.0
+        weight_amount = round(weight * zone_rate('per_kg_rate', per_kg_rate), 2)
+        floor = float(zone.minimum_fee or 0)
+        notes.append(f'Zone "{zone.name}" flat fee for {dest_county or country}.')
+    else:
+        pricing_mode = 'per_km'
+        per_km = zone_rate('per_km_rate', shipping_setting_float('shipping_per_km_rate'))
+        base_amount = 0.0
+        distance_amount = round(distance_km * per_km, 2)
+        weight_amount = round(weight * zone_rate('per_kg_rate', per_kg_rate), 2)
+        floor = zone_rate('minimum_fee', minimum_fee)
+        if zone:
+            notes.append(f'Zone "{zone.name}" per-km pricing at KSh {per_km:g}/km.')
+        else:
+            notes.append(f'Distance pricing at KSh {per_km:g}/km over {distance_km:g} km.')
+        if dest_point is None:
+            notes.append('Destination could not be geocoded; minimum fee applied.')
+
+    # International corridors can carry a multiplier on top of the per-km math.
+    multiplier = 1.0
+    if country.strip().lower() != 'kenya':
+        multiplier = shipping_setting_float('shipping_international_multiplier') or 1.0
+        if multiplier != 1.0:
+            notes.append(f'International multiplier x{multiplier:g} for {country}.')
+
+    subtotal = (base_amount + distance_amount + weight_amount) * multiplier
+    total = max(subtotal, floor)
+    if total > subtotal:
+        notes.append(f'Raised to the minimum fee of KSh {floor:g}.')
+
+    zone_free_over = zone.free_over_amount if (zone and zone.free_over_amount) else free_over
+    if zone_free_over and value >= float(zone_free_over) > 0:
+        total = 0.0
+        notes.append(f'Free delivery: order value reached KSh {float(zone_free_over):g}.')
+
+    total = round(max(0.0, total), 2)
+
+    result = {
+        'total_amount': total,
+        'currency': 'KSh',
+        'pricing_mode': pricing_mode,
+        'zone_id': zone.id if zone else None,
+        'zone_name': zone.name if zone else None,
+        'base_amount': round(base_amount, 2),
+        'distance_amount': round(distance_amount, 2),
+        'weight_amount': round(weight_amount, 2),
+        'minimum_fee': round(floor, 2),
+        'multiplier': multiplier,
+        'distance_km': round(distance_km, 2),
+        'duration_minutes': round(duration_minutes, 1) if duration_minutes else None,
+        'weight_kg': weight,
+        'origin_label': origin_label,
+        'origin_lat': origin_point.lat,
+        'origin_lng': origin_point.lng,
+        'destination_label': dest_label,
+        'destination_county': dest_county,
+        'destination_country': country,
+        'destination_lat': dest_point.lat if dest_point else None,
+        'destination_lng': dest_point.lng if dest_point else None,
+        'routing_provider': routing_provider,
+        'is_estimate': is_estimate,
+        'geocoded': dest_point is not None,
+        'estimated_days_min': zone.estimated_days_min if zone else None,
+        'estimated_days_max': zone.estimated_days_max if zone else None,
+        'explanation': ' '.join(notes),
     }
-    base = base_by_country.get(country, 5500)
-    return round(base + (weight * base), 2)
+
+    if persist:
+        try:
+            db.session.add(ShippingQuote(
+                order_id=order_id, user_id=user_id, zone_id=result['zone_id'],
+                origin_label=origin_label,
+                origin_lat=origin_point.lat, origin_lng=origin_point.lng,
+                destination_label=(dest_label or '')[:240],
+                destination_lat=result['destination_lat'], destination_lng=result['destination_lng'],
+                destination_county=(dest_county or '')[:120] or None,
+                destination_country=country[:100],
+                distance_km=result['distance_km'], duration_minutes=result['duration_minutes'],
+                weight_kg=weight, pricing_mode=pricing_mode,
+                base_amount=result['base_amount'], distance_amount=result['distance_amount'],
+                weight_amount=result['weight_amount'], total_amount=total,
+                routing_provider=routing_provider[:60], is_estimate=is_estimate,
+                explanation=result['explanation'],
+            ))
+            db.session.commit()
+        except SQLAlchemyError:
+            # An audit-trail write must never cost the customer their quote.
+            db.session.rollback()
+            app.logger.warning('Could not persist shipping quote', exc_info=True)
+
+    return result
 
 
 def get_daraja_token():
@@ -6247,12 +6509,23 @@ def track_order(order_id):
     if order.user_id != current_user.id and not current_user.is_admin:
         abort(403)
     eta_minutes = order.estimated_minutes_to_destination
-    if order.shipping_status and order.shipping_status.lower() in ['out for delivery', 'in transit'] and eta_minutes is None:
+    assignment = active_assignment_for_order(order.id)
+    if assignment and assignment.eta_minutes is not None:
+        # A live driver fix beats any stored guess.
+        eta_minutes = int(assignment.eta_minutes)
+    elif order.shipping_status and order.shipping_status.lower() in ['out for delivery', 'in transit'] and eta_minutes is None:
         eta_minutes = 12 if order.shipping_status.lower() == 'out for delivery' else 45
+
+    origin_point, origin_label = shipping_origin_point()
     return render_template('track_order.html',
                            order=order,
                            tracking_updates=order.tracking_updates,
-                           eta_minutes=eta_minutes)
+                           eta_minutes=eta_minutes,
+                           assignment=assignment,
+                           origin_lat=origin_point.lat,
+                           origin_lng=origin_point.lng,
+                           origin_label=origin_label,
+                           map_style_url=map_style_url())
 
 
 @app.route('/api/download/<int:order_id>/<int:product_id>')
@@ -6384,20 +6657,75 @@ def api_stats():
 
 @app.route('/api/shipping-cost', methods=['POST'])
 def api_shipping_cost():
-    """Calculate shipping cost for checkout"""
+    """Calculate shipping cost for checkout."""
     data = request.get_json() or {}
-    rate_id = data.get('shipping_rate_id')
-    weight = float(data.get('weight_kg', 0))
+    weight = float(data.get('weight_kg', 0) or 0)
     country = data.get('country')
     state = data.get('state')
     city = data.get('city')
     if not country_is_supported_for_sales(country):
         return jsonify({'shipping_cost': 0, 'available': False, 'message': LAUNCH_SOON_MESSAGE})
-    if country or state or city:
-        cost = estimate_shipping_cost(country, state, city, weight)
-    else:
-        cost = calculate_shipping_cost(rate_id, weight)
-    return jsonify({'shipping_cost': cost})
+
+    quote = quote_shipping(
+        country=country,
+        county=state,
+        city=city,
+        address=data.get('address'),
+        lat=data.get('lat'),
+        lng=data.get('lng'),
+        weight_kg=weight,
+        order_value=float(data.get('order_value', 0) or 0),
+        user_id=current_user.id if current_user.is_authenticated else None,
+        persist=False,
+    )
+    # shipping_cost is kept for existing checkout JS; breakdown is additive.
+    return jsonify({
+        'shipping_cost': quote['total_amount'],
+        'available': True,
+        'breakdown': quote,
+    })
+
+
+@app.route('/api/shipping/quote', methods=['POST'])
+@limiter.limit('60 per minute')
+def api_shipping_quote():
+    """Full quote with breakdown, used by the admin calculator and checkout map."""
+    data = request.get_json() or {}
+    quote = quote_shipping(
+        country=data.get('country') or 'Kenya',
+        county=data.get('county') or data.get('state'),
+        city=data.get('city'),
+        address=data.get('address'),
+        lat=data.get('lat'),
+        lng=data.get('lng'),
+        weight_kg=float(data.get('weight_kg', 0) or 0),
+        order_value=float(data.get('order_value', 0) or 0),
+        user_id=current_user.id if current_user.is_authenticated else None,
+        persist=bool(data.get('persist')),
+    )
+    return jsonify(quote)
+
+
+@app.route('/api/geo/search')
+@limiter.limit('60 per minute')
+def api_geo_search():
+    """Address autocomplete backed by the configured geocoder."""
+    query = (request.args.get('q') or '').strip()
+    country = (request.args.get('country') or 'Kenya').strip()
+    if len(query) < 2:
+        return jsonify({'results': []})
+    hit = cached_geocode(cache, query, country)
+    if not hit.found:
+        return jsonify({'results': []})
+    return jsonify({'results': [{
+        'label': hit.label,
+        'lat': hit.point.lat,
+        'lng': hit.point.lng,
+        'county': hit.county,
+        'country': hit.country,
+        'confidence': hit.confidence,
+        'provider': hit.provider,
+    }]})
 
 
 @app.route('/support', methods=['GET', 'POST'])
@@ -10047,6 +10375,560 @@ def admin_delete_shipping(sid):
     return redirect(url_for('admin_shipping'))
 
 
+# --- Shipping zones, dispatch & driver tracking ---
+
+KENYA_COUNTIES = [
+    'Baringo', 'Bomet', 'Bungoma', 'Busia', 'Elgeyo-Marakwet', 'Embu', 'Garissa', 'Homa Bay',
+    'Isiolo', 'Kajiado', 'Kakamega', 'Kericho', 'Kiambu', 'Kilifi', 'Kirinyaga', 'Kisii',
+    'Kisumu', 'Kitui', 'Kwale', 'Laikipia', 'Lamu', 'Machakos', 'Makueni', 'Mandera',
+    'Marsabit', 'Meru', 'Migori', 'Mombasa', "Murang'a", 'Nairobi', 'Nakuru', 'Nandi',
+    'Narok', 'Nyamira', 'Nyandarua', 'Nyeri', 'Samburu', 'Siaya', 'Taita-Taveta', 'Tana River',
+    'Tharaka-Nithi', 'Trans Nzoia', 'Turkana', 'Uasin Gishu', 'Vihiga', 'Wajir', 'West Pokot',
+]
+
+
+@app.route('/admin/shipping/zones')
+@login_required
+@admin_required
+def admin_shipping_zones():
+    zones = ShippingZone.query.order_by(ShippingZone.priority.asc(), ShippingZone.name.asc()).all()
+    assigned = {c.lower() for z in zones if z.is_active for c in z.county_list()}
+    recent_quotes = ShippingQuote.query.order_by(ShippingQuote.created_at.desc()).limit(25).all()
+    origin_point, origin_label = shipping_origin_point()
+    return render_template(
+        'admin/shipping_zones.html',
+        zones=zones,
+        counties=KENYA_COUNTIES,
+        # Counties no active zone covers - these fall through to per-km pricing.
+        uncovered=[c for c in KENYA_COUNTIES if c.lower() not in assigned],
+        recent_quotes=recent_quotes,
+        # Not named `settings`: that would shadow the global settings dict
+        # base.html uses for the meta tags.
+        ship_settings={key: Setting.get(key, value) for key, value in SHIPPING_DEFAULTS.items()},
+        origin_label=origin_label,
+        origin_lat=origin_point.lat,
+        origin_lng=origin_point.lng,
+        routing_provider=get_router().name,
+        geocoder=get_geocoder().name,
+    )
+
+
+@app.route('/admin/shipping/zones/save', methods=['POST'])
+@login_required
+@admin_required
+def admin_save_shipping_zone():
+    zone_id = (request.form.get('zone_id') or '').strip()
+    name = (request.form.get('name') or '').strip()
+    if not name:
+        flash('Zone name is required.', 'danger')
+        return redirect(url_for('admin_shipping_zones'))
+
+    zone = ShippingZone.query.get(int(zone_id)) if zone_id.isdigit() else None
+    if zone is None:
+        clash = ShippingZone.query.filter(func.lower(ShippingZone.name) == name.lower()).first()
+        if clash:
+            flash(f'A zone named "{name}" already exists.', 'danger')
+            return redirect(url_for('admin_shipping_zones'))
+        zone = ShippingZone()
+        db.session.add(zone)
+
+    selected = request.form.getlist('counties')
+    zone.name = name
+    zone.pricing_mode = 'flat' if request.form.get('pricing_mode') == 'flat' else 'per_km'
+    zone.flat_fee = form_float('flat_fee', 0, minimum=0)
+    zone.per_km_rate = form_float('per_km_rate', 0, minimum=0)
+    zone.minimum_fee = form_float('minimum_fee', 0, minimum=0)
+    zone.per_kg_rate = form_float('per_kg_rate', 0, minimum=0)
+    zone.free_over_amount = form_float('free_over_amount', 0, minimum=0)
+    zone.country = (request.form.get('country') or 'Kenya').strip() or 'Kenya'
+    zone.counties = ', '.join(selected) if selected else (request.form.get('counties') or '').strip()
+    zone.estimated_days_min = int(form_float('estimated_days_min', 1, minimum=0))
+    zone.estimated_days_max = int(form_float('estimated_days_max', 3, minimum=0))
+    zone.priority = int(form_float('priority', 100, minimum=0))
+    zone.is_active = form_bool('is_active')
+    zone.notes = (request.form.get('notes') or '').strip()
+
+    db.session.commit()
+    log_admin_action('shipping_zone_saved', 'shipping_zone', zone.id, {'name': zone.name})
+    flash(f'Zone "{zone.name}" saved.', 'success')
+    return redirect(url_for('admin_shipping_zones'))
+
+
+@app.route('/admin/shipping/zones/<int:zone_id>/toggle', methods=['POST'])
+@login_required
+@admin_required
+def admin_toggle_shipping_zone(zone_id):
+    zone = ShippingZone.query.get_or_404(zone_id)
+    zone.is_active = not zone.is_active
+    db.session.commit()
+    flash(f'Zone "{zone.name}" {"activated" if zone.is_active else "deactivated"}.', 'success')
+    return redirect(url_for('admin_shipping_zones'))
+
+
+@app.route('/admin/shipping/zones/<int:zone_id>/delete', methods=['POST'])
+@login_required
+@admin_required
+def admin_delete_shipping_zone(zone_id):
+    zone = ShippingZone.query.get_or_404(zone_id)
+    name = zone.name
+    # Quotes reference the zone for audit; null the link rather than cascade.
+    ShippingQuote.query.filter_by(zone_id=zone.id).update({'zone_id': None})
+    db.session.delete(zone)
+    db.session.commit()
+    log_admin_action('shipping_zone_deleted', 'shipping_zone', zone_id, {'name': name})
+    flash(f'Zone "{name}" deleted.', 'success')
+    return redirect(url_for('admin_shipping_zones'))
+
+
+@app.route('/admin/shipping/settings', methods=['POST'])
+@login_required
+@admin_required
+def admin_save_shipping_settings():
+    for key in SHIPPING_DEFAULTS:
+        if key in request.form:
+            Setting.set(key, (request.form.get(key) or '').strip() or SHIPPING_DEFAULTS[key])
+    db.session.commit()
+    log_admin_action('shipping_settings_saved', 'setting', None, {})
+    flash('Shipping defaults updated.', 'success')
+    return redirect(url_for('admin_shipping_zones'))
+
+
+# --- Driver dispatch & live tracking ---
+
+DRIVER_STALE_MINUTES = 10  # no ping for this long => treat the fix as stale
+
+
+def driver_ping_is_fresh(driver, minutes=DRIVER_STALE_MINUTES):
+    if not (driver and driver.last_ping_at):
+        return False
+    return (utcnow() - driver.last_ping_at) <= timedelta(minutes=minutes)
+
+
+def driver_payload(driver):
+    return {
+        'id': driver.id,
+        'name': driver.display_name or (driver.user.username if driver.user else f'Driver {driver.id}'),
+        'phone': driver.phone,
+        'vehicle_type': driver.vehicle_type,
+        'vehicle_registration': driver.vehicle_registration,
+        'status': driver.status,
+        'lat': driver.last_lat,
+        'lng': driver.last_lng,
+        'accuracy_m': driver.last_accuracy_m,
+        'last_ping_at': driver.last_ping_at.isoformat() if driver.last_ping_at else None,
+        'is_fresh': driver_ping_is_fresh(driver),
+        'has_fix': driver.has_fix,
+    }
+
+
+def active_assignment_for_order(order_id):
+    return DeliveryAssignment.query.filter(
+        DeliveryAssignment.order_id == order_id,
+        DeliveryAssignment.status.in_(['assigned', 'picked_up', 'in_transit'])
+    ).order_by(DeliveryAssignment.assigned_at.desc()).first()
+
+
+def recalculate_assignment_eta(assignment, driver=None):
+    """Refresh remaining distance/ETA from the driver's latest fix."""
+    driver = driver or assignment.driver
+    if not (driver and driver.has_fix):
+        return assignment
+    if assignment.destination_lat is None or assignment.destination_lng is None:
+        return assignment
+
+    route = cached_route(
+        cache,
+        GeoPoint(driver.last_lat, driver.last_lng),
+        GeoPoint(assignment.destination_lat, assignment.destination_lng),
+    )
+    assignment.distance_remaining_km = route.rounded_km()
+    assignment.eta_minutes = round(route.duration_minutes, 1) if route.duration_minutes else None
+    assignment.eta_updated_at = utcnow()
+
+    # Mirror onto the order so the customer tracking page stays a single read.
+    order = assignment.order
+    if order and assignment.eta_minutes is not None:
+        order.estimated_minutes_to_destination = int(assignment.eta_minutes)
+    return assignment
+
+
+@app.route('/admin/dispatch')
+@login_required
+@admin_required
+def admin_dispatch():
+    drivers = DriverProfile.query.filter_by(is_active=True).order_by(DriverProfile.display_name.asc()).all()
+    assignments = DeliveryAssignment.query.filter(
+        DeliveryAssignment.status.in_(['assigned', 'picked_up', 'in_transit'])
+    ).order_by(DeliveryAssignment.assigned_at.desc()).all()
+    pending_orders = Order.query.filter(
+        Order.payment_status == 'completed',
+        Order.shipping_status.in_(['pending', 'processing'])
+    ).order_by(Order.created_at.desc()).limit(50).all()
+    origin_point, origin_label = shipping_origin_point()
+    return render_template(
+        'admin/dispatch.html',
+        drivers=drivers,
+        assignments=assignments,
+        pending_orders=pending_orders,
+        origin_lat=origin_point.lat,
+        origin_lng=origin_point.lng,
+        origin_label=origin_label,
+        map_style_url=map_style_url(),
+    )
+
+
+@app.route('/admin/dispatch/drivers/save', methods=['POST'])
+@login_required
+@admin_required
+def admin_save_driver():
+    driver_id = (request.form.get('driver_id') or '').strip()
+    driver = DriverProfile.query.get(int(driver_id)) if driver_id.isdigit() else None
+
+    if driver is None:
+        username = (request.form.get('username') or '').strip()
+        user = User.query.filter(func.lower(User.username) == username.lower()).first() if username else None
+        if not user:
+            flash(f'No user account found for "{username}". Create the account first.', 'danger')
+            return redirect(url_for('admin_dispatch'))
+        if DriverProfile.query.filter_by(user_id=user.id).first():
+            flash(f'{user.username} already has a driver profile.', 'warning')
+            return redirect(url_for('admin_dispatch'))
+        driver = DriverProfile(user_id=user.id, tracking_token=secrets.token_urlsafe(32)[:64])
+        db.session.add(driver)
+
+    driver.display_name = (request.form.get('display_name') or '').strip() or driver.display_name
+    driver.phone = (request.form.get('phone') or '').strip()
+    driver.vehicle_type = (request.form.get('vehicle_type') or 'motorbike').strip()
+    driver.vehicle_registration = (request.form.get('vehicle_registration') or '').strip()
+    driver.is_active = form_bool('is_active')
+    db.session.commit()
+    log_admin_action('driver_saved', 'driver_profile', driver.id, {'name': driver.display_name})
+    flash('Driver saved.', 'success')
+    return redirect(url_for('admin_dispatch'))
+
+
+@app.route('/admin/dispatch/drivers/<int:driver_id>/rotate-token', methods=['POST'])
+@login_required
+@admin_required
+def admin_rotate_driver_token(driver_id):
+    driver = DriverProfile.query.get_or_404(driver_id)
+    driver.tracking_token = secrets.token_urlsafe(32)[:64]
+    db.session.commit()
+    log_admin_action('driver_token_rotated', 'driver_profile', driver.id, {})
+    flash('Tracking link regenerated. Send the driver their new link.', 'success')
+    return redirect(url_for('admin_dispatch'))
+
+
+@app.route('/admin/dispatch/assign', methods=['POST'])
+@login_required
+@admin_required
+def admin_assign_delivery():
+    order_id = int(form_float('order_id', 0))
+    driver_id = int(form_float('driver_id', 0))
+    order = Order.query.get_or_404(order_id)
+    driver = DriverProfile.query.get_or_404(driver_id)
+
+    existing = active_assignment_for_order(order.id)
+    if existing:
+        flash(f'Order {order.order_number} is already with {existing.driver.display_name or "a driver"}.', 'warning')
+        return redirect(url_for('admin_dispatch'))
+
+    # Snapshot the destination so a later address edit cannot break the ETA.
+    dest_point, dest_county, dest_label = resolve_destination(
+        country=order.shipping_country,
+        county=order.shipping_state,
+        city=order.shipping_city,
+        address=order.shipping_address,
+    )
+    assignment = DeliveryAssignment(
+        order_id=order.id,
+        driver_id=driver.id,
+        status='assigned',
+        destination_lat=dest_point.lat if dest_point else None,
+        destination_lng=dest_point.lng if dest_point else None,
+        destination_label=(dest_label or '')[:240],
+    )
+    db.session.add(assignment)
+    driver.status = 'on_delivery'
+    order.shipping_status = 'processing'
+    db.session.add(TrackingUpdate(
+        order_id=order.id, status='Assigned to driver',
+        location=dest_label, description=f'Assigned to {driver.display_name or driver.id}.'
+    ))
+    db.session.commit()
+    recalculate_assignment_eta(assignment, driver)
+    db.session.commit()
+    log_admin_action('delivery_assigned', 'delivery_assignment', assignment.id,
+                     {'order': order.order_number, 'driver': driver.id})
+    flash(f'Order {order.order_number} assigned.', 'success')
+    return redirect(url_for('admin_dispatch'))
+
+
+@app.route('/admin/dispatch/assignments/<int:assignment_id>/status', methods=['POST'])
+@login_required
+@admin_required
+def admin_update_assignment_status(assignment_id):
+    assignment = DeliveryAssignment.query.get_or_404(assignment_id)
+    new_status = (request.form.get('status') or '').strip()
+    if new_status not in {'assigned', 'picked_up', 'in_transit', 'delivered', 'failed'}:
+        flash('Unknown delivery status.', 'danger')
+        return redirect(url_for('admin_dispatch'))
+    apply_assignment_status(assignment, new_status)
+    db.session.commit()
+    flash(f'Delivery marked {new_status.replace("_", " ")}.', 'success')
+    return redirect(url_for('admin_dispatch'))
+
+
+def apply_assignment_status(assignment, new_status, note=None):
+    """Move an assignment through its lifecycle and mirror onto the order."""
+    assignment.status = new_status
+    order = assignment.order
+    now = utcnow()
+
+    if new_status == 'picked_up' and not assignment.picked_up_at:
+        assignment.picked_up_at = now
+    if new_status == 'delivered':
+        assignment.delivered_at = now
+        assignment.eta_minutes = 0
+        assignment.distance_remaining_km = 0
+
+    status_map = {
+        'assigned': 'processing',
+        'picked_up': 'shipped',
+        'in_transit': 'in transit',
+        'delivered': 'delivered',
+        'failed': 'processing',
+    }
+    if order:
+        order.shipping_status = status_map.get(new_status, order.shipping_status)
+        if new_status == 'delivered':
+            order.status = 'completed'
+            order.estimated_minutes_to_destination = 0
+
+    if assignment.driver:
+        assignment.driver.status = 'available' if new_status in {'delivered', 'failed'} else 'on_delivery'
+
+    db.session.add(TrackingUpdate(
+        order_id=assignment.order_id,
+        status=new_status.replace('_', ' ').title(),
+        location=assignment.destination_label,
+        description=note or f'Delivery {new_status.replace("_", " ")}.',
+    ))
+    return assignment
+
+
+@app.route('/api/dispatch/drivers')
+@login_required
+@admin_required
+def api_dispatch_drivers():
+    """Live driver positions for the dispatch map."""
+    drivers = DriverProfile.query.filter_by(is_active=True).all()
+    payload = []
+    for driver in drivers:
+        item = driver_payload(driver)
+        active = DeliveryAssignment.query.filter(
+            DeliveryAssignment.driver_id == driver.id,
+            DeliveryAssignment.status.in_(['assigned', 'picked_up', 'in_transit'])
+        ).first()
+        if active:
+            item['assignment'] = {
+                'id': active.id,
+                'order_id': active.order_id,
+                'order_number': active.order.order_number if active.order else None,
+                'status': active.status,
+                'eta_minutes': active.eta_minutes,
+                'distance_remaining_km': active.distance_remaining_km,
+                'destination_label': active.destination_label,
+                'destination_lat': active.destination_lat,
+                'destination_lng': active.destination_lng,
+            }
+        payload.append(item)
+    return jsonify({'drivers': payload, 'server_time': utcnow().isoformat()})
+
+
+def map_style_url():
+    """MapLibre style URL.
+
+    Defaults to the OSM raster style bundled below, which needs no API key.
+    Point MAP_STYLE_URL at a vector tile provider for production polish.
+    """
+    return (os.environ.get('MAP_STYLE_URL') or Setting.get('map_style_url', '') or '').strip()
+
+
+def driver_for_token(token):
+    if not (token or '').strip():
+        return None
+    return DriverProfile.query.filter_by(tracking_token=token.strip(), is_active=True).first()
+
+
+@app.route('/driver/<token>')
+def driver_console(token):
+    """Mobile page a driver keeps open; posts GPS on an interval.
+
+    Token-addressed rather than login-gated so a driver can open the link on
+    any phone without an app install. The token is rotatable from the admin.
+    """
+    driver = driver_for_token(token)
+    if not driver:
+        abort(404)
+    assignments = DeliveryAssignment.query.filter(
+        DeliveryAssignment.driver_id == driver.id,
+        DeliveryAssignment.status.in_(['assigned', 'picked_up', 'in_transit'])
+    ).order_by(DeliveryAssignment.assigned_at.asc()).all()
+    return render_template(
+        'driver_console.html',
+        driver=driver,
+        assignments=assignments,
+        token=token,
+        map_style_url=map_style_url(),
+        ping_seconds=int(shipping_setting_float('driver_ping_seconds', 20) or 20),
+    )
+
+
+@app.route('/api/driver/<token>/ping', methods=['POST'])
+@limiter.limit('120 per minute')
+@csrf.exempt
+def api_driver_ping(token):
+    """Ingest a GPS fix from a driver's phone.
+
+    CSRF-exempt because the driver page authenticates with the bearer-style
+    token in the URL rather than a session cookie.
+    """
+    driver = driver_for_token(token)
+    if not driver:
+        return jsonify({'ok': False, 'error': 'unknown driver'}), 404
+
+    data = request.get_json(silent=True) or {}
+    try:
+        lat = float(data.get('lat'))
+        lng = float(data.get('lng'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'lat and lng are required'}), 400
+
+    point = GeoPoint(lat, lng)
+    if not point.is_valid():
+        return jsonify({'ok': False, 'error': 'coordinates out of range'}), 400
+
+    def _num(name):
+        try:
+            value = data.get(name)
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    accuracy = _num('accuracy_m')
+    active = DeliveryAssignment.query.filter(
+        DeliveryAssignment.driver_id == driver.id,
+        DeliveryAssignment.status.in_(['assigned', 'picked_up', 'in_transit'])
+    ).order_by(DeliveryAssignment.assigned_at.asc()).first()
+
+    driver.last_lat = lat
+    driver.last_lng = lng
+    driver.last_accuracy_m = accuracy
+    driver.last_ping_at = utcnow()
+    # Derive availability from live work rather than trusting the stored value,
+    # which drifts if an assignment is created outside the dispatch flow.
+    driver.status = 'on_delivery' if active else 'available'
+
+    db.session.add(DriverLocationPing(
+        driver_id=driver.id,
+        order_id=active.order_id if active else None,
+        lat=lat, lng=lng, accuracy_m=accuracy,
+        speed_kph=_num('speed_kph'), heading=_num('heading'),
+    ))
+
+    response = {'ok': True, 'recorded_at': driver.last_ping_at.isoformat()}
+    if active:
+        recalculate_assignment_eta(active, driver)
+        response['assignment'] = {
+            'id': active.id,
+            'order_number': active.order.order_number if active.order else None,
+            'eta_minutes': active.eta_minutes,
+            'distance_remaining_km': active.distance_remaining_km,
+            'status': active.status,
+        }
+    db.session.commit()
+    return jsonify(response)
+
+
+@app.route('/api/driver/<token>/status', methods=['POST'])
+@limiter.limit('60 per minute')
+@csrf.exempt
+def api_driver_status(token):
+    """Driver marks a delivery picked up / in transit / delivered."""
+    driver = driver_for_token(token)
+    if not driver:
+        return jsonify({'ok': False, 'error': 'unknown driver'}), 404
+
+    data = request.get_json(silent=True) or {}
+    new_status = (data.get('status') or '').strip()
+    if new_status not in {'picked_up', 'in_transit', 'delivered', 'failed'}:
+        return jsonify({'ok': False, 'error': 'unsupported status'}), 400
+
+    assignment = DeliveryAssignment.query.filter_by(
+        id=int(data.get('assignment_id') or 0), driver_id=driver.id
+    ).first()
+    if not assignment:
+        return jsonify({'ok': False, 'error': 'assignment not found'}), 404
+
+    apply_assignment_status(assignment, new_status, note=(data.get('note') or '').strip() or None)
+    db.session.commit()
+    return jsonify({'ok': True, 'status': assignment.status})
+
+
+@app.route('/api/track/<order_number>')
+@limiter.limit('60 per minute')
+def api_track_order(order_number):
+    """Public live position + ETA for the customer tracking map.
+
+    The order number is the only credential, so it is rate limited to make
+    enumeration impractical and the payload carries no personal data about
+    the driver beyond a coarse position and vehicle type.
+    """
+    order = Order.query.filter_by(order_number=order_number).first()
+    if not order:
+        return jsonify({'ok': False, 'error': 'order not found'}), 404
+
+    assignment = active_assignment_for_order(order.id)
+    payload = {
+        'ok': True,
+        'order_number': order.order_number,
+        'shipping_status': order.shipping_status,
+        'destination_label': None,
+        'destination_lat': None,
+        'destination_lng': None,
+        'driver': None,
+        'eta_minutes': order.estimated_minutes_to_destination,
+        'updates': [{
+            'status': u.status,
+            'location': u.location,
+            'description': u.description,
+            'created_at': u.created_at.isoformat() if u.created_at else None,
+        } for u in (order.tracking_updates or [])[:12]],
+    }
+
+    if assignment:
+        payload.update({
+            'destination_label': assignment.destination_label,
+            'destination_lat': assignment.destination_lat,
+            'destination_lng': assignment.destination_lng,
+            'eta_minutes': assignment.eta_minutes,
+            'distance_remaining_km': assignment.distance_remaining_km,
+            'delivery_status': assignment.status,
+        })
+        driver = assignment.driver
+        # Only expose a live position while the parcel is actually moving, and
+        # only a coarse fix - never the driver's phone number or identity.
+        if driver and driver.has_fix and driver_ping_is_fresh(driver) and assignment.status in {'picked_up', 'in_transit'}:
+            payload['driver'] = {
+                'lat': driver.last_lat,
+                'lng': driver.last_lng,
+                'vehicle_type': driver.vehicle_type,
+                'last_ping_at': driver.last_ping_at.isoformat() if driver.last_ping_at else None,
+            }
+    return jsonify(payload)
+
+
 # --- Phase Two Marketplace Operations ---
 
 @app.route('/seller/apply', methods=['GET', 'POST'])
@@ -12162,6 +13044,14 @@ def ensure_phase_two_schema():
         ('ix_shopping_cards_user_status', 'shopping_cards', 'user_id, status', False),
         ('ix_card_transactions_card_created', 'shopping_card_transactions', 'card_id, created_at', False),
         ('ix_kyc_user_status_created', 'kyc_identity_verifications', 'user_id, status, created_at', False),
+        ('ix_shipping_zones_active_priority', 'shipping_zones', 'is_active, priority', False),
+        ('ix_shipping_quotes_created', 'shipping_quotes', 'created_at', False),
+        ('ix_shipping_quotes_order', 'shipping_quotes', 'order_id', False),
+        ('ix_driver_profiles_status', 'driver_profiles', 'status', False),
+        ('ix_driver_pings_driver_created', 'driver_location_pings', 'driver_id, created_at', False),
+        ('ix_driver_pings_order_created', 'driver_location_pings', 'order_id, created_at', False),
+        ('ix_delivery_assignments_driver_status', 'delivery_assignments', 'driver_id, status', False),
+        ('ix_delivery_assignments_order', 'delivery_assignments', 'order_id', False),
     ]
     for name, table, columns_sql, unique in index_specs:
         ensure_index(name, table, columns_sql, unique)
@@ -12490,6 +13380,54 @@ def seed_carrier_partners():
     ]
     for data in partners:
         upsert_carrier_partner(data)
+
+
+def seed_shipping_zones():
+    """Seed pricing defaults and the Central flat-rate zone.
+
+    Only fills in Settings that are missing, so an admin who has tuned a rate
+    keeps their value across restarts.
+    """
+    for key, value in SHIPPING_DEFAULTS.items():
+        if Setting.get(key, None) in (None, ''):
+            Setting.set(key, value)
+
+    if ShippingZone.query.count() > 0:
+        return
+
+    db.session.add(ShippingZone(
+        name='Central Region',
+        pricing_mode='flat',
+        flat_fee=120.0,
+        per_km_rate=3.0,
+        minimum_fee=120.0,
+        per_kg_rate=0.0,
+        country='Kenya',
+        counties=CENTRAL_ZONE_COUNTIES,
+        estimated_days_min=1,
+        estimated_days_max=2,
+        priority=10,
+        is_active=True,
+        notes='Flat KSh 120 delivery across the Central region and Nairobi.',
+    ))
+    # Explicit catch-all so the per-km rule is visible and editable in the UI
+    # rather than being an invisible code default.
+    db.session.add(ShippingZone(
+        name='Rest of Kenya',
+        pricing_mode='per_km',
+        flat_fee=0.0,
+        per_km_rate=3.0,
+        minimum_fee=120.0,
+        per_kg_rate=0.0,
+        country='Kenya',
+        counties='',
+        estimated_days_min=2,
+        estimated_days_max=5,
+        priority=900,
+        is_active=True,
+        notes='KSh 3 per km beyond the Central region, with a KSh 120 floor.',
+    ))
+    db.session.commit()
 
 
 def seed_shipping_rates():
@@ -12823,6 +13761,7 @@ def init_database():
     seed_marketplace_supplier_catalog()
     seed_carrier_partners()
     seed_shipping_rates()
+    seed_shipping_zones()
     ensure_architecture_defaults()
 
     db.session.commit()

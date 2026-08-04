@@ -1,0 +1,434 @@
+{% extends "base.html" %}
+{% block title %}Dispatch &amp; Live Tracking - {{ super() }}{% endblock %}
+
+{% block head %}
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-truck-fast me-2"></i>Dispatch &amp; Live Tracking</h2>
+            <p class="text-muted mb-0">
+                Assign paid orders to drivers and watch positions update as their phones report in.
+            </p>
+        </div>
+        <div class="d-flex gap-2 align-items-center">
+            <span class="badge bg-light text-dark border" id="refreshStamp">&mdash;</span>
+            <a href="{{ url_for('admin_shipping_zones') }}" class="btn btn-outline-primary">
+                <i class="fas fa-map-marked-alt me-1"></i>Zones &amp; rates
+            </a>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <!-- Map ---------------------------------------------------------- -->
+        <div class="col-xl-8">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body p-0 position-relative">
+                    <div id="map" style="height:520px;border-radius:.5rem;"></div>
+                    <div id="mapFallback" class="d-none p-4 text-center text-muted" style="height:520px;">
+                        <i class="fas fa-map fa-2x mb-3 d-block"></i>
+                        Map tiles unavailable. Driver coordinates are still listed below.
+                    </div>
+                </div>
+                <div class="card-footer bg-white small text-muted d-flex flex-wrap gap-3">
+                    <span><i class="fas fa-warehouse me-1"></i>{{ origin_label }} (origin)</span>
+                    <span><i class="fas fa-circle text-success me-1"></i>Live fix</span>
+                    <span><i class="fas fa-circle text-secondary me-1"></i>Stale (no ping in 10 min)</span>
+                </div>
+            </div>
+
+            <!-- Active deliveries -->
+            <div class="card border-0 shadow-sm mt-4">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0"><i class="fas fa-route me-2"></i>Active deliveries
+                        <span class="badge bg-primary ms-1">{{ assignments | length }}</span>
+                    </h5>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Order</th><th>Driver</th><th>Destination</th>
+                                <th class="text-end">Remaining</th><th class="text-end">ETA</th>
+                                <th>Status</th><th class="text-end">Move to</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% for a in assignments %}
+                            <tr>
+                                <td>
+                                    <a href="{{ url_for('admin_order_detail', order_id=a.order_id) }}"
+                                       class="fw-semibold text-decoration-none">
+                                        {{ a.order.order_number if a.order else a.order_id }}
+                                    </a>
+                                    <div class="small text-muted">
+                                        {{ a.assigned_at.strftime('%d %b %H:%M') if a.assigned_at else '' }}
+                                    </div>
+                                </td>
+                                <td>
+                                    <div>{{ a.driver.display_name if a.driver else '-' }}</div>
+                                    <div class="small text-muted">{{ a.driver.vehicle_registration or a.driver.vehicle_type if a.driver else '' }}</div>
+                                </td>
+                                <td class="small">{{ a.destination_label or 'Unknown' }}</td>
+                                <td class="text-end small">
+                                    {% if a.distance_remaining_km is not none %}
+                                        {{ '%.1f'|format(a.distance_remaining_km) }} km
+                                    {% else %}<span class="text-muted">&mdash;</span>{% endif %}
+                                </td>
+                                <td class="text-end small">
+                                    {% if a.eta_minutes is not none %}
+                                        <span class="fw-semibold">{{ a.eta_minutes | round | int }} min</span>
+                                    {% else %}<span class="text-muted">&mdash;</span>{% endif %}
+                                </td>
+                                <td>
+                                    <span class="badge bg-{{ {'assigned':'secondary','picked_up':'info','in_transit':'primary'}.get(a.status, 'light') }}">
+                                        {{ a.status.replace('_', ' ') }}
+                                    </span>
+                                </td>
+                                <td class="text-end text-nowrap">
+                                    {% for next_status, label, style in [
+                                        ('picked_up', 'Picked up', 'info'),
+                                        ('in_transit', 'In transit', 'primary'),
+                                        ('delivered', 'Delivered', 'success'),
+                                        ('failed', 'Failed', 'danger')] %}
+                                        {% if a.status != next_status %}
+                                        <form method="POST" class="d-inline"
+                                              action="{{ url_for('admin_update_assignment_status', assignment_id=a.id) }}">
+                                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                            <input type="hidden" name="status" value="{{ next_status }}">
+                                            <button class="btn btn-sm btn-outline-{{ style }}">{{ label }}</button>
+                                        </form>
+                                        {% endif %}
+                                    {% endfor %}
+                                </td>
+                            </tr>
+                        {% else %}
+                            <tr><td colspan="7" class="text-center text-muted py-4">Nothing out for delivery.</td></tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Assign -->
+            <div class="card border-0 shadow-sm mt-4">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0"><i class="fas fa-people-carry-box me-2"></i>Assign an order</h5>
+                    <small class="text-muted">Paid orders awaiting dispatch.</small>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('admin_assign_delivery') }}" class="row g-2 align-items-end">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <div class="col-md-6">
+                            <label class="form-label small">Order</label>
+                            <select name="order_id" class="form-select" required>
+                                <option value="">Select an order&hellip;</option>
+                                {% for o in pending_orders %}
+                                <option value="{{ o.id }}">
+                                    {{ o.order_number }} &mdash;
+                                    {{ o.shipping_city or o.shipping_state or 'no city' }}
+                                    ({{ o.shipping_status }})
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Driver</label>
+                            <select name="driver_id" class="form-select" required>
+                                <option value="">Select a driver&hellip;</option>
+                                {% for d in drivers %}
+                                <option value="{{ d.id }}">
+                                    {{ d.display_name or d.id }}
+                                    ({{ d.status.replace('_', ' ') }}{{ ' - ' ~ d.vehicle_type if d.vehicle_type }})
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <button class="btn btn-primary w-100"><i class="fas fa-paper-plane me-1"></i>Assign</button>
+                        </div>
+                    </form>
+                    {% if not pending_orders %}
+                        <p class="text-muted small mb-0 mt-2">No paid orders are waiting for a driver.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Drivers ------------------------------------------------------ -->
+        <div class="col-xl-4">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0"><i class="fas fa-id-badge me-2"></i>Drivers</h5>
+                    <button class="btn btn-sm btn-outline-primary" data-bs-toggle="collapse"
+                            data-bs-target="#driverForm">
+                        <i class="fas fa-plus"></i> Add
+                    </button>
+                </div>
+
+                <div class="collapse" id="driverForm">
+                    <div class="card-body border-bottom bg-light">
+                        <form method="POST" action="{{ url_for('admin_save_driver') }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input type="hidden" name="driver_id" id="d_driver_id" value="">
+                            <div class="mb-2" id="usernameWrap">
+                                <label class="form-label small">Existing username *</label>
+                                <input type="text" name="username" id="d_username" class="form-control form-control-sm"
+                                       placeholder="The driver's account username">
+                                <div class="form-text">Create the user account first, then link it here.</div>
+                            </div>
+                            <div class="row g-2">
+                                <div class="col-12">
+                                    <label class="form-label small">Display name</label>
+                                    <input type="text" name="display_name" id="d_display_name"
+                                           class="form-control form-control-sm">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label small">Phone</label>
+                                    <input type="text" name="phone" id="d_phone" class="form-control form-control-sm">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label small">Vehicle</label>
+                                    <select name="vehicle_type" id="d_vehicle_type" class="form-select form-select-sm">
+                                        <option value="motorbike">Motorbike</option>
+                                        <option value="tuktuk">Tuk-tuk</option>
+                                        <option value="car">Car</option>
+                                        <option value="van">Van</option>
+                                        <option value="truck">Truck</option>
+                                    </select>
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label small">Registration</label>
+                                    <input type="text" name="vehicle_registration" id="d_vehicle_registration"
+                                           class="form-control form-control-sm" placeholder="KDA 123A">
+                                </div>
+                            </div>
+                            <div class="form-check form-switch my-2">
+                                <input class="form-check-input" type="checkbox" name="is_active"
+                                       id="d_is_active" value="1" checked>
+                                <label class="form-check-label small" for="d_is_active">Active</label>
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-sm btn-primary flex-grow-1">Save driver</button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary"
+                                        onclick="resetDriverForm()">Clear</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="list-group list-group-flush" id="driverList">
+                {% for d in drivers %}
+                    <div class="list-group-item" data-driver="{{ d.id }}">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <div class="fw-semibold">
+                                    <span class="status-dot" data-dot="{{ d.id }}">&#9679;</span>
+                                    {{ d.display_name or (d.user.username if d.user else 'Driver ' ~ d.id) }}
+                                </div>
+                                <div class="small text-muted">
+                                    {{ d.vehicle_type or 'vehicle' }}
+                                    {% if d.vehicle_registration %} &middot; {{ d.vehicle_registration }}{% endif %}
+                                    {% if d.phone %} &middot; {{ d.phone }}{% endif %}
+                                </div>
+                                <div class="small" data-fix="{{ d.id }}">
+                                    {% if d.has_fix %}
+                                        {{ '%.4f'|format(d.last_lat) }}, {{ '%.4f'|format(d.last_lng) }}
+                                    {% else %}
+                                        <span class="text-muted">No location yet</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <span class="badge bg-{{ 'success' if d.status == 'available' else ('primary' if d.status == 'on_delivery' else 'secondary') }}">
+                                {{ d.status.replace('_', ' ') }}
+                            </span>
+                        </div>
+
+                        <div class="input-group input-group-sm mt-2">
+                            <input type="text" class="form-control font-monospace" readonly
+                                   id="link_{{ d.id }}"
+                                   value="{{ url_for('driver_console', token=d.tracking_token, _external=True) }}">
+                            <button class="btn btn-outline-secondary" type="button"
+                                    onclick="copyLink({{ d.id }})" title="Copy driver link">
+                                <i class="fas fa-copy"></i>
+                            </button>
+                            <button class="btn btn-outline-primary" type="button"
+                                    onclick='editDriver({{ d.id }})' title="Edit">
+                                <i class="fas fa-pen"></i>
+                            </button>
+                        </div>
+                        <form method="POST" class="mt-1"
+                              action="{{ url_for('admin_rotate_driver_token', driver_id=d.id) }}"
+                              onsubmit="return confirm('Regenerate the link? The old one stops working immediately.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-link text-danger p-0 small">
+                                <i class="fas fa-rotate me-1"></i>Regenerate link
+                            </button>
+                        </form>
+                    </div>
+                {% else %}
+                    <div class="list-group-item text-center text-muted py-4">
+                        No drivers yet. Add one to start dispatching.
+                    </div>
+                {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+const ORIGIN = [{{ origin_lng }}, {{ origin_lat }}];
+const STYLE_URL = {{ (map_style_url or '') | tojson }};
+const DRIVER_DATA = {
+{% for d in drivers %}
+    {{ d.id }}: {
+        display_name: {{ (d.display_name or '') | tojson }},
+        phone: {{ (d.phone or '') | tojson }},
+        vehicle_type: {{ (d.vehicle_type or 'motorbike') | tojson }},
+        vehicle_registration: {{ (d.vehicle_registration or '') | tojson }},
+        is_active: {{ 'true' if d.is_active else 'false' }}
+    }{{ ',' if not loop.last }}
+{% endfor %}
+};
+
+// No API key needed: raw OSM raster tiles. Point MAP_STYLE_URL at a vector
+// provider for a nicer basemap without touching this template.
+const RASTER_STYLE = {
+    version: 8,
+    sources: {
+        osm: {
+            type: 'raster',
+            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+            tileSize: 256,
+            attribution: '&copy; OpenStreetMap contributors'
+        }
+    },
+    layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+};
+
+let map = null;
+let markers = {};
+
+function initMap() {
+    try {
+        map = new maplibregl.Map({
+            container: 'map',
+            style: STYLE_URL || RASTER_STYLE,
+            center: ORIGIN,
+            zoom: 9
+        });
+        map.addControl(new maplibregl.NavigationControl(), 'top-right');
+        const depot = document.createElement('div');
+        depot.innerHTML = '<i class="fas fa-warehouse" style="color:#b8860b;font-size:20px;"></i>';
+        new maplibregl.Marker({ element: depot }).setLngLat(ORIGIN)
+            .setPopup(new maplibregl.Popup().setText({{ origin_label | tojson }}))
+            .addTo(map);
+    } catch (err) {
+        document.getElementById('map').classList.add('d-none');
+        document.getElementById('mapFallback').classList.remove('d-none');
+    }
+}
+
+function markerElement(driver) {
+    const el = document.createElement('div');
+    el.style.cssText =
+        'width:30px;height:30px;border-radius:50%;display:flex;align-items:center;' +
+        'justify-content:center;color:#fff;font-size:13px;box-shadow:0 0 0 3px rgba(0,0,0,.15);' +
+        'background:' + (driver.is_fresh ? '#198754' : '#6c757d') + ';';
+    const icons = { motorbike: 'motorcycle', car: 'car', van: 'van-shuttle', truck: 'truck', tuktuk: 'taxi' };
+    el.innerHTML = '<i class="fas fa-' + (icons[driver.vehicle_type] || 'truck') + '"></i>';
+    return el;
+}
+
+function popupHtml(driver) {
+    const eta = driver.assignment && driver.assignment.eta_minutes != null
+        ? Math.round(driver.assignment.eta_minutes) + ' min out'
+        : 'No active ETA';
+    const order = driver.assignment ? driver.assignment.order_number : 'Idle';
+    return '<strong>' + driver.name + '</strong><br>' +
+           '<span style="color:#666">' + order + ' &middot; ' + eta + '</span><br>' +
+           '<small>' + (driver.is_fresh ? 'Live' : 'Stale fix') + '</small>';
+}
+
+async function refreshDrivers() {
+    try {
+        const resp = await fetch('{{ url_for("api_dispatch_drivers") }}');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        (data.drivers || []).forEach(driver => {
+            const dot = document.querySelector('[data-dot="' + driver.id + '"]');
+            if (dot) dot.style.color = driver.is_fresh ? '#198754' : '#adb5bd';
+
+            const fix = document.querySelector('[data-fix="' + driver.id + '"]');
+            if (fix && driver.lat != null) {
+                const stamp = driver.last_ping_at
+                    ? new Date(driver.last_ping_at + 'Z').toLocaleTimeString()
+                    : '';
+                fix.innerHTML = driver.lat.toFixed(4) + ', ' + driver.lng.toFixed(4) +
+                    ' <span class="text-muted">' + stamp + '</span>';
+            }
+
+            if (!map || driver.lat == null || driver.lng == null) return;
+            const position = [driver.lng, driver.lat];
+            if (markers[driver.id]) {
+                markers[driver.id].setLngLat(position);
+                markers[driver.id].getPopup().setHTML(popupHtml(driver));
+                markers[driver.id].getElement().style.background = driver.is_fresh ? '#198754' : '#6c757d';
+            } else {
+                markers[driver.id] = new maplibregl.Marker({ element: markerElement(driver) })
+                    .setLngLat(position)
+                    .setPopup(new maplibregl.Popup().setHTML(popupHtml(driver)))
+                    .addTo(map);
+            }
+        });
+        document.getElementById('refreshStamp').textContent =
+            'Updated ' + new Date().toLocaleTimeString();
+    } catch (err) {
+        /* transient network blip - the next tick retries */
+    }
+}
+
+function copyLink(id) {
+    const field = document.getElementById('link_' + id);
+    field.select();
+    navigator.clipboard.writeText(field.value);
+}
+
+function resetDriverForm() {
+    document.getElementById('d_driver_id').value = '';
+    document.getElementById('d_username').value = '';
+    document.getElementById('usernameWrap').style.display = '';
+    ['d_display_name', 'd_phone', 'd_vehicle_registration'].forEach(
+        id => { document.getElementById(id).value = ''; });
+    document.getElementById('d_is_active').checked = true;
+}
+
+function editDriver(id) {
+    const driver = DRIVER_DATA[id];
+    if (!driver) return;
+    document.getElementById('d_driver_id').value = id;
+    // Username only matters when creating; editing is keyed on driver_id.
+    document.getElementById('usernameWrap').style.display = 'none';
+    document.getElementById('d_display_name').value = driver.display_name;
+    document.getElementById('d_phone').value = driver.phone;
+    document.getElementById('d_vehicle_type').value = driver.vehicle_type;
+    document.getElementById('d_vehicle_registration').value = driver.vehicle_registration;
+    document.getElementById('d_is_active').checked = driver.is_active;
+    new bootstrap.Collapse(document.getElementById('driverForm'), { toggle: false }).show();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    initMap();
+    refreshDrivers();
+    setInterval(refreshDrivers, 15000);
+});
+</script>
+{% endblock %}
