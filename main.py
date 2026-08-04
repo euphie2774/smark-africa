@@ -20,6 +20,7 @@ from flask_talisman import Talisman
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash
 from sqlalchemy import func, extract, and_, or_, text, case, inspect as sa_inspect
+from sqlalchemy.orm import joinedload
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 try:
@@ -4130,7 +4131,7 @@ def invalidate_product_cache():
     """Invalidate product search caches without clearing unrelated global caches."""
     if cache:
         cache.set('product_search_cache_version', uuid.uuid4().hex, timeout=86400)
-        cache.delete('hot_sale_pop_product')
+        cache.delete('hot_sale_pop_product_id')
 
 
 def cached_product_search_ids(search='', category_slug='', product_type='', sort='newest'):
@@ -5188,12 +5189,19 @@ def _get_cached_settings():
 
 
 def _get_cached_platform_ads():
-    """Get platform ads with caching."""
-    cache_key = 'platform_ads_list'
-    if cache:
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return cached
+    """Get platform ads with caching.
+
+    Only the ids are cached. Caching the ORM objects themselves meant that once
+    the loading session closed they came back detached, and base.html - which
+    every page extends - lazy-loads ad.product, so the whole site raised
+    DetachedInstanceError until the entry expired. Re-reading by id is an
+    indexed lookup, and the expensive part (the scan and the launched-together
+    grouping) is still cached.
+    """
+    cache_key = 'platform_ads_ids'
+    cached_ids = cache.get(cache_key) if cache else None
+    if cached_ids is not None:
+        return _load_platform_ads(cached_ids)
     try:
         active_ads = AdCampaign.query.filter(
             AdCampaign.status == 'active',
@@ -5207,23 +5215,40 @@ def _get_cached_platform_ads():
                 abs((active_ads[0].created_at - ad.created_at).total_seconds()) <= 5
             ]
             platform_ads = launched_together if len(launched_together) > 1 else [platform_ad]
-            result = (platform_ad, platform_ads)
+            ids = [ad.id for ad in platform_ads]
         else:
-            result = (None, [])
+            ids = []
     except Exception:
-        result = (None, [])
+        ids = []
     if cache:
-        cache.set(cache_key, result, timeout=60)
-    return result
+        cache.set(cache_key, ids, timeout=60)
+    return _load_platform_ads(ids)
+
+
+def _load_platform_ads(ids):
+    """Re-read cached ad ids as session-bound objects, product eagerly loaded."""
+    if not ids:
+        return (None, [])
+    try:
+        ads = AdCampaign.query.options(joinedload(AdCampaign.product)).filter(
+            AdCampaign.id.in_(ids)).all()
+    except Exception:
+        return (None, [])
+    order = {ad_id: position for position, ad_id in enumerate(ids)}
+    ads.sort(key=lambda ad: order.get(ad.id, len(order)))
+    return (ads[0], ads) if ads else (None, [])
 
 
 def _get_cached_hot_sale():
-    """Get hot sale product with caching."""
-    cache_key = 'hot_sale_pop_product'
-    if cache:
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return cached if cached != 'NONE' else None
+    """Get hot sale product with caching.
+
+    Caches the id rather than the instance, for the same reason as
+    _get_cached_platform_ads: a cached ORM object outlives its session.
+    """
+    cache_key = 'hot_sale_pop_product_id'
+    cached_id = cache.get(cache_key) if cache else None
+    if cached_id is not None:
+        return None if cached_id == 'NONE' else db.session.get(Product, cached_id)
     try:
         hot_sale_pop = Product.query.filter_by(is_active=True, is_hot_sale=True).order_by(
             Product.hot_sale_started_at.desc(),
@@ -5232,7 +5257,7 @@ def _get_cached_hot_sale():
     except Exception:
         hot_sale_pop = None
     if cache:
-        cache.set(cache_key, hot_sale_pop if hot_sale_pop else 'NONE', timeout=60)
+        cache.set(cache_key, hot_sale_pop.id if hot_sale_pop else 'NONE', timeout=60)
     return hot_sale_pop
 
 
@@ -9789,7 +9814,7 @@ def admin_add_product():
             app.logger.exception('Product create failed; retrying schema upgrade before returning admin form: %s', exc)
             try:
                 ensure_phase_two_schema()
-                Setting.set('phase_two_schema_version', '2026-07-29-product-create-schema-fix')
+                Setting.set('phase_two_schema_version', phase_two_schema_fingerprint())
             except Exception:
                 db.session.rollback()
                 app.logger.exception('Product create schema repair failed')
@@ -12370,8 +12395,8 @@ def admin_settings():
 
         if cache:
             cache.delete('global_settings_dict')
-            cache.delete('platform_ads_list')
-            cache.delete('hot_sale_pop_product')
+            cache.delete('platform_ads_ids')
+            cache.delete('hot_sale_pop_product_id')
         if didit_api_key() and didit_webhook_secret() and Setting.get('kyc_provider', 'inbuilt') == 'inbuilt':
             Setting.set('kyc_provider', 'didit')
 
@@ -13172,11 +13197,12 @@ def ensure_index(name, table, columns, unique=False):
         app.logger.warning('Could not create index %s on %s(%s)', name, table, columns, exc_info=True)
 
 
-def ensure_phase_two_schema():
-    """Add Phase Two columns to an existing database without Flask-Migrate.
+def phase_two_schema_spec():
+    """The columns and indexes every deployed database must end up with.
 
-    The DDL below is written in SQLite flavour and translated per dialect by
-    _translate_ddl, so this runs against SQLite and PostgreSQL alike.
+    Pure data, so it can be fingerprinted without touching the database. The
+    DDL is written in SQLite flavour and translated per dialect by
+    _translate_ddl, so it applies to SQLite and PostgreSQL alike.
     """
     columns = {
         'users': [
@@ -13366,9 +13392,6 @@ def ensure_phase_two_schema():
             ('device_status_note', 'device_status_note TEXT'),
         ],
     }
-    for table, table_columns in columns.items():
-        for column, ddl in table_columns:
-            ensure_column(table, column, ddl)
     index_specs = [
         ('ix_users_email_active', 'users', 'email, is_active', False),
         ('ix_users_phone', 'users', 'phone', False),
@@ -13399,6 +13422,35 @@ def ensure_phase_two_schema():
         ('ix_delivery_assignments_driver_status', 'delivery_assignments', 'driver_id, status', False),
         ('ix_delivery_assignments_order', 'delivery_assignments', 'order_id', False),
     ]
+    return columns, index_specs
+
+
+def phase_two_schema_fingerprint():
+    """Stable hash of the schema spec.
+
+    Using a hash instead of a hand-bumped version string means adding a column
+    to the spec is enough to make the next boot apply it. The previous scheme
+    required also remembering to edit the version constant, and forgetting that
+    shipped columns that existed on the model but never in the database.
+    """
+    columns, index_specs = phase_two_schema_spec()
+    payload = json.dumps({
+        'columns': {table: sorted(cols) for table, cols in sorted(columns.items())},
+        'indexes': sorted([list(spec) for spec in index_specs]),
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]
+
+
+def ensure_phase_two_schema():
+    """Add Phase Two columns and indexes to an existing database.
+
+    Safe to call repeatedly: each step checks for itself first, and a failed
+    step rolls back rather than poisoning the rest of the run.
+    """
+    columns, index_specs = phase_two_schema_spec()
+    for table, table_columns in columns.items():
+        for column, ddl in table_columns:
+            ensure_column(table, column, ddl)
     for name, table, columns_sql, unique in index_specs:
         ensure_index(name, table, columns_sql, unique)
 
@@ -13835,7 +13887,9 @@ def seed_shipping_rates():
 def init_database():
     """Initialize database with default admin user and settings"""
     db.create_all()
-    schema_version = '2026-07-30-pos-vat-raffle-ledger'
+    # Derived from the spec itself, so a new column can never be left unapplied
+    # because someone forgot to bump a version string.
+    schema_version = phase_two_schema_fingerprint()
     if Setting.get('phase_two_schema_version', '') != schema_version:
         ensure_phase_two_schema()
         Setting.set('phase_two_schema_version', schema_version)
