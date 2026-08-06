@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}{{ storefront.business_name }} - Storefront{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-4 gap-2">
+        <div>
+            <h1 class="fw-bold mb-1">{{ storefront.business_name }}</h1>
+            <p class="text-muted mb-0">
+                <span class="badge bg-success"><i class="fas fa-circle-check me-1"></i>Approved storefront</span>
+                {% if storefront.categories %}
+                <span class="small ms-2">{{ storefront.categories }}</span>
+                {% endif %}
+            </p>
+        </div>
+        <div class="d-flex gap-2">
+            <a href="{{ url_for('seller_products') }}" class="btn btn-gold">
+                <i class="fas fa-plus me-1"></i>List a product
+            </a>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small text-uppercase">Live listings</div>
+                    <div class="h3 mb-0">{{ stats.live }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small text-uppercase">Awaiting review</div>
+                    <div class="h3 mb-0">{{ stats.pending_review }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small text-uppercase">Total products</div>
+                    <div class="h3 mb-0">{{ stats.total }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">What my shop entails</h5></div>
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('storefront_apply') }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <div class="mb-3">
+                            <label for="about" class="form-label">Shop description</label>
+                            <textarea class="form-control" id="about" name="about" rows="5"
+                                      placeholder="Tell shoppers what you deal in, the brands you stock, and how you serve customers.">{{ storefront.about or '' }}</textarea>
+                            <div class="form-text">Shown to shoppers on your storefront page.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="specialties" class="form-label">What you stock</label>
+                            <input type="text" class="form-control" id="specialties" name="specialties"
+                                   value="{{ storefront.specialties or '' }}"
+                                   placeholder="e.g. Phone accessories, Laptops, Repairs">
+                            <div class="form-text">Separate items with commas.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="opening_hours" class="form-label">Opening hours</label>
+                            <input type="text" class="form-control" id="opening_hours" name="opening_hours"
+                                   value="{{ storefront.opening_hours or '' }}"
+                                   placeholder="e.g. Mon-Sat 8am - 6pm">
+                        </div>
+
+                        <hr>
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label for="contact_phone" class="form-label">Contact phone</label>
+                                <input type="text" class="form-control" id="contact_phone" name="contact_phone"
+                                       value="{{ storefront.contact_phone or '' }}">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="contact_email" class="form-label">Contact email</label>
+                                <input type="email" class="form-control" id="contact_email" name="contact_email"
+                                       value="{{ storefront.contact_email or '' }}">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="physical_address" class="form-label">Physical address</label>
+                                <input type="text" class="form-control" id="physical_address" name="physical_address"
+                                       value="{{ storefront.physical_address or '' }}">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="landmark" class="form-label">Landmark</label>
+                                <input type="text" class="form-control" id="landmark" name="landmark"
+                                       value="{{ storefront.landmark or '' }}">
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-gold mt-3">
+                            <i class="fas fa-save me-1"></i>Save shop details
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-5">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">My listings</h5>
+                    <a href="{{ url_for('seller_products') }}" class="btn btn-sm btn-outline-warning">Manage all</a>
+                </div>
+                <div class="list-group list-group-flush">
+                    {% for product in products %}
+                    <div class="list-group-item d-flex justify-content-between align-items-center">
+                        <div class="me-2">
+                            <div class="fw-semibold">{{ product.name }}</div>
+                            <div class="small text-muted">KES {{ '{:,.0f}'.format(product.selling_price or 0) }}</div>
+                        </div>
+                        {% if product.review_status != 'approved' %}
+                        <span class="badge bg-warning text-dark">Awaiting review</span>
+                        {% elif product.is_active %}
+                        <span class="badge bg-success">Live</span>
+                        {% else %}
+                        <span class="badge bg-secondary">Hidden</span>
+                        {% endif %}
+                    </div>
+                    {% else %}
+                    <div class="list-group-item text-center text-muted py-4">
+                        Nothing listed yet.
+                        <a href="{{ url_for('seller_products') }}">List your first product</a>.
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="card border-0 shadow-sm">
+                <div class="card-body small">
+                    <div class="text-muted text-uppercase mb-2">Storefront</div>
+                    <div><strong>Commission:</strong> {{ storefront.commission_percent or 10 }}%</div>
+                    {% if storefront.location_county %}
+                    <div><strong>County:</strong> {{ storefront.location_county }}</div>
+                    {% endif %}
+                    {% if storefront.created_at %}
+                    <div><strong>Opened:</strong> {{ storefront.created_at.strftime('%d %b %Y') }}</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

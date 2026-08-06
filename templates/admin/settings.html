@@ -129,6 +129,42 @@
                         <input type="text" name="daraja_callback_secret" class="form-control" value="{{ settings.daraja_callback_secret or '' }}" placeholder="Optional webhook signature secret">
                     </div>
                 </div>
+
+                {% if daraja_status %}
+                <hr>
+                <div class="row g-3 align-items-center">
+                    <div class="col-lg-8">
+                        {% if daraja_status.config_error %}
+                        <div class="alert alert-danger mb-2 py-2 small">
+                            <i class="fas fa-triangle-exclamation me-1"></i>{{ daraja_status.config_error }}.
+                            STK pushes will not be sent until this is completed.
+                        </div>
+                        {% elif daraja_status.pairing_error %}
+                        <div class="alert alert-warning mb-2 py-2 small">
+                            <i class="fas fa-triangle-exclamation me-1"></i>{{ daraja_status.pairing_error }}
+                        </div>
+                        {% endif %}
+                        {% if not daraja_status.callback_url %}
+                        <div class="alert alert-warning mb-2 py-2 small">
+                            <i class="fas fa-link-slash me-1"></i>No public App Base URL is set. Safaricom cannot deliver
+                            payment confirmations, so STK pushes will never complete.
+                        </div>
+                        {% endif %}
+                        <div class="small text-muted">
+                            Sending to <code>{{ daraja_status.host }}</code>
+                            as <strong>{{ daraja_status.env }}</strong>, shortcode <strong>{{ daraja_status.shortcode or 'not set' }}</strong>.
+                            {% if daraja_status.callback_url %}<br>Callback: <code>{{ daraja_status.callback_url }}</code>{% endif %}
+                            <br>Sandbox and production credentials are issued separately and are not interchangeable.
+                        </div>
+                    </div>
+                    <div class="col-lg-4 text-lg-end">
+                        <button type="submit" form="darajaTestForm" class="btn btn-outline-primary">
+                            <i class="fas fa-plug-circle-check me-1"></i>Test Daraja connection
+                        </button>
+                        <div class="form-text">Save first, then test the stored credentials.</div>
+                    </div>
+                </div>
+                {% endif %}
             </div>
         </div>
 
@@ -417,6 +453,12 @@
         <div class="text-end">
             <button type="submit" class="btn btn-success btn-lg px-5"><i class="fas fa-save me-2"></i> Save All Settings</button>
         </div>
+    </form>
+
+    <!-- Kept outside the settings form so the Daraja test cannot submit a half-filled form.
+         The button lives in the Daraja card and targets this form by id. -->
+    <form id="darajaTestForm" method="POST" action="{{ url_for('admin_test_daraja') }}" class="d-none">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
     </form>
 </div>
 {% endblock %}

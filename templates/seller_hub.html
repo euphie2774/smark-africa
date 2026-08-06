@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Seller - SMARKAFRICA{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-4 gap-2">
+        <div>
+            <h1 class="fw-bold mb-1">Seller</h1>
+            <p class="text-muted mb-0">
+                <span class="badge bg-success"><i class="fas fa-circle-check me-1"></i>Verified seller</span>
+                {% if current_user.verified_seller_at %}
+                <span class="small ms-2">Verified {{ current_user.verified_seller_at.strftime('%d %b %Y') }}</span>
+                {% endif %}
+            </p>
+        </div>
+        {% if storefront %}
+        <a href="{{ url_for('seller_products') }}" class="btn btn-gold">
+            <i class="fas fa-plus me-1"></i>List a product
+        </a>
+        {% endif %}
+    </div>
+
+    {% if storefront %}
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small text-uppercase">Live listings</div>
+                    <div class="h3 mb-0">{{ stats.live }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small text-uppercase">Awaiting review</div>
+                    <div class="h3 mb-0">{{ stats.pending_review }}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small text-uppercase">Total products</div>
+                    <div class="h3 mb-0">{{ stats.total }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="row g-4">
+        <div class="col-lg-8">
+            {% if storefront %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">My listings</h5>
+                    <a href="{{ url_for('seller_products') }}" class="btn btn-sm btn-outline-warning">Manage all</a>
+                </div>
+                <div class="card-body p-0 table-responsive">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead class="table-light">
+                            <tr><th>Product</th><th>Price</th><th>Stock</th><th>Status</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for product in products %}
+                            <tr>
+                                <td>
+                                    <a href="{{ url_for('seller_products', product_id=product.id) }}"
+                                       class="text-decoration-none fw-semibold">{{ product.name }}</a>
+                                </td>
+                                <td>KES {{ '{:,.0f}'.format(product.selling_price or 0) }}</td>
+                                <td>{{ product.stock if not product.is_digital else '-' }}</td>
+                                <td>
+                                    {% if product.review_status != 'approved' %}
+                                    <span class="badge bg-warning text-dark">Awaiting review</span>
+                                    {% elif product.is_active %}
+                                    <span class="badge bg-success">Live</span>
+                                    {% else %}
+                                    <span class="badge bg-secondary">Hidden</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="4" class="text-center text-muted py-4">
+                                    Nothing listed yet.
+                                    <a href="{{ url_for('seller_products') }}">List your first product</a>.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% elif pending_storefront %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="mb-2">Storefront under review</h5>
+                    <p class="text-muted">
+                        <strong>{{ pending_storefront.business_name }}</strong> is
+                        <span class="badge bg-secondary">{{ pending_storefront.status.replace('_', ' ') }}</span>.
+                        Product listing opens as soon as it is approved.
+                    </p>
+                    {% if pending_storefront.verification_notes %}
+                    <div class="alert alert-info small mb-3">{{ pending_storefront.verification_notes }}</div>
+                    {% endif %}
+                    <a href="{{ url_for('storefront_apply') }}" class="btn btn-outline-secondary">
+                        <i class="fas fa-store me-1"></i>View storefront details
+                    </a>
+                </div>
+            </div>
+            {% else %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="mb-2">Open your storefront</h5>
+                    <p class="text-muted">
+                        Your identity is verified. Register a storefront to start listing products
+                        under your own business name.
+                    </p>
+                    <a href="{{ url_for('storefront_apply') }}" class="btn btn-gold">
+                        <i class="fas fa-store me-1"></i>Apply for a storefront
+                    </a>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="col-lg-4">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Seller tools</h5></div>
+                <div class="list-group list-group-flush">
+                    {% if storefront %}
+                    <a class="list-group-item list-group-item-action" href="{{ url_for('seller_products') }}">
+                        <i class="fas fa-box me-2"></i>My products
+                    </a>
+                    {% endif %}
+                    <a class="list-group-item list-group-item-action" href="{{ url_for('storefront_apply') }}">
+                        <i class="fas fa-store me-2"></i>Storefront
+                    </a>
+                    <a class="list-group-item list-group-item-action" href="{{ url_for('seller_withdrawals') }}">
+                        <i class="fas fa-wallet me-2"></i>Earnings & withdrawals
+                    </a>
+                    <a class="list-group-item list-group-item-action" href="{{ url_for('seller_ads') }}">
+                        <i class="fas fa-bullhorn me-2"></i>Ads
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

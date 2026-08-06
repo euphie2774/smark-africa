@@ -744,6 +744,11 @@ class BusinessStorefront(db.Model):
     landmark = db.Column(db.String(180))
     contact_phone = db.Column(db.String(40))
     contact_email = db.Column(db.String(160))
+    # Filled in by the owner once the storefront is approved, so shoppers can
+    # see what the shop actually deals in.
+    about = db.Column(db.Text)
+    specialties = db.Column(db.String(500))
+    opening_hours = db.Column(db.String(200))
     commission_percent = db.Column(db.Float, default=10.0)
     status = db.Column(db.String(30), default='pending_review')
     verification_notes = db.Column(db.Text)

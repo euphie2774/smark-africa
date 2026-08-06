@@ -53,12 +53,20 @@
                     </li>
                     {% if auth_user.is_authenticated and not auth_user.is_admin and seller_signup_enabled %}
                     <li class="nav-item">
+                        {% if seller_nav.can_sell %}
+                        <a class="nav-link" href="{{ url_for('seller_apply') }}"><i class="fas fa-id-card me-1"></i>Seller</a>
+                        {% else %}
                         <a class="nav-link" href="{{ url_for('seller_apply') }}"><i class="fas fa-id-card me-1"></i>Become a Seller</a>
+                        {% endif %}
                     </li>
                     {% endif %}
                     {% if auth_user.is_authenticated %}
                     <li class="nav-item">
+                        {% if seller_nav.has_storefront %}
+                        <a class="nav-link" href="{{ url_for('seller_products') }}"><i class="fas fa-store me-1"></i>My Shop</a>
+                        {% else %}
                         <a class="nav-link" href="{{ url_for('storefront_apply') }}"><i class="fas fa-store me-1"></i>Storefront</a>
+                        {% endif %}
                     </li>
                     {% endif %}
                 </ul>
@@ -69,7 +77,16 @@
                     </li>
                     {% if auth_user.is_authenticated %}
                     <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('notifications') }}"><i class="fas fa-bell me-1"></i>Notifications</a>
+                        <a class="nav-link position-relative" href="{{ url_for('notifications') }}">
+                            <i class="fas fa-bell me-1"></i>Notifications
+                            {% if unread_notifications %}
+                            <span class="badge rounded-pill bg-danger position-absolute top-0 start-100 translate-middle" style="font-size: 0.6rem;"
+                                  title="{{ unread_notifications }} unread notification{{ '' if unread_notifications == 1 else 's' }}">
+                                {{ unread_notifications if unread_notifications < 100 else '99+' }}
+                                <span class="visually-hidden">unread notifications</span>
+                            </span>
+                            {% endif %}
+                        </a>
                     </li>
                     {% endif %}
                     <!-- Cart -->

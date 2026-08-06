@@ -871,16 +871,23 @@ def order_loyalty_points(order):
 
 def setting_value(key, default=''):
     value = Setting.get(key, None)
-    if value is None or value == '':
+    if value is None:
         return default
-    stale_values = {
+    # Credentials pasted from the Daraja portal routinely carry a trailing
+    # space or newline. Safaricom rejects those, so never store the padding.
+    if isinstance(value, str):
+        value = value.strip()
+    if value == '':
+        return default
+    # Only the literal placeholders shipped in the sample config are ignored.
+    # Anything that looks like a real credential is passed through to Safaricom
+    # so the admin sees Safaricom's own error instead of a silent fallback.
+    placeholders = {
         'YOUR_CONSUMER_KEY_HERE',
         'YOUR_CONSUMER_SECRET_HERE',
         'YOUR_PASSKEY_HERE',
-        '2UA9gRP6n9dejGWJDwinJekxAJYZ8ZYgyKm0bf4o7ytSnw6J',
-        'ZlbvyNyQy5kAZLHKAQJzkQAfGBHCcHyEQKKGlVURk68NhAMQDke9Osccluwx2KJx',
     }
-    if value in stale_values:
+    if value in placeholders:
         return default
     return value
 
@@ -905,6 +912,21 @@ def daraja_config_error():
     if not daraja_passkey():
         missing.append('passkey')
     return f'Daraja configuration is missing {", ".join(missing)}' if missing else ''
+
+
+def daraja_shortcode_pairing_error(env, shortcode):
+    """Catch the shortcode/environment mismatch that silently kills STK pushes.
+
+    174379 is Safaricom's sandbox test till and only ever works with sandbox
+    credentials; a real till only works in production. Mixing the two returns a
+    generic Daraja error, so it is worth naming the problem before we call out.
+    """
+    env = str(env or '').strip().lower()
+    shortcode = str(shortcode or '').strip()
+    if env == 'production' and shortcode == '174379':
+        return ('Shortcode 174379 is the Safaricom sandbox test till and cannot take live payments. '
+                'Enter your own production shortcode, or switch the environment back to sandbox.')
+    return ''
 
 
 def production_setup_pending(admin_user=None):
@@ -1879,27 +1901,57 @@ def quote_shipping(country=None, county=None, city=None, address=None,
     return result
 
 
-def get_daraja_token():
-    """Get OAuth token from Safaricom Daraja API"""
+def daraja_base_url(env=None):
+    """Safaricom host for the configured environment."""
+    env = (env if env is not None else setting_value('daraja_env', app.config['DARAJA_ENV']))
+    env = str(env or '').strip().lower()
+    return 'https://api.safaricom.co.ke' if env == 'production' else 'https://sandbox.safaricom.co.ke'
+
+
+def daraja_token_result():
+    """Fetch an OAuth token, returning why it failed instead of just None.
+
+    STK pushes were failing with a bare "Failed to get Daraja token", which
+    hides the difference between wrong credentials, the wrong environment, and
+    the network being blocked. Callers can now surface Safaricom's own reason.
+    """
     config_error = daraja_config_error()
     if config_error:
         app.logger.warning(config_error)
-        return None
+        return {'token': None, 'error': config_error}
 
     consumer_key = setting_value('daraja_consumer_key', app.config['DARAJA_CONSUMER_KEY'])
     consumer_secret = setting_value('daraja_consumer_secret', app.config['DARAJA_CONSUMER_SECRET'])
     env = setting_value('daraja_env', app.config['DARAJA_ENV'])
+    auth_url = f'{daraja_base_url(env)}/oauth/v1/generate?grant_type=client_credentials'
 
-    if env == 'production':
-        auth_url = "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
-    else:
-        auth_url = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
+    try:
+        resp = requests.get(auth_url, auth=(consumer_key, consumer_secret), timeout=20)
+    except requests.RequestException as exc:
+        app.logger.warning('Daraja token request could not reach Safaricom: %s', exc)
+        return {'token': None, 'error': f'Could not reach Safaricom ({exc}). Check the server internet connection.'}
 
-    resp = requests.get(auth_url, auth=(consumer_key, consumer_secret), timeout=20)
     if resp.status_code == 200:
-        return resp.json().get('access_token')
+        token = resp.json().get('access_token')
+        if token:
+            return {'token': token, 'error': ''}
+        return {'token': None, 'error': 'Safaricom returned no access token for these credentials.'}
+
     app.logger.warning('Daraja token request failed: %s %s', resp.status_code, resp.text)
-    return None
+    if resp.status_code in (400, 401, 403):
+        reason = (
+            f'Safaricom rejected the consumer key/secret for the {env or "sandbox"} environment '
+            f'(HTTP {resp.status_code}). Sandbox and production credentials are not interchangeable - '
+            'confirm the app on developer.safaricom.co.ke matches the environment selected here.'
+        )
+    else:
+        reason = f'Safaricom auth failed with HTTP {resp.status_code}.'
+    return {'token': None, 'error': reason}
+
+
+def get_daraja_token():
+    """Get OAuth token from Safaricom Daraja API"""
+    return daraja_token_result()['token']
 
 
 def stk_push(phone_number, amount, order_number, callback_url=None):
@@ -1909,22 +1961,29 @@ def stk_push(phone_number, amount, order_number, callback_url=None):
         if config_error:
             return {'success': False, 'error': config_error}
 
-        token = get_daraja_token()
+        token_result = daraja_token_result()
+        token = token_result['token']
         if not token:
-            return {'success': False, 'error': 'Failed to get Daraja token'}
+            return {'success': False, 'error': token_result['error'] or 'Failed to get Daraja token'}
 
         env = setting_value('daraja_env', app.config['DARAJA_ENV'])
-        if env == 'production':
-            api_url = "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
-        else:
-            api_url = "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest"
+        api_url = f'{daraja_base_url(env)}/mpesa/stkpush/v1/processrequest'
 
         shortcode = setting_value('daraja_shortcode', app.config['DARAJA_SHORTCODE'])
         passkey = daraja_passkey()
 
+        pairing_error = daraja_shortcode_pairing_error(env, shortcode)
+        if pairing_error:
+            return {'success': False, 'error': pairing_error}
+
         phone = valid_mpesa_msisdn(phone_number)
         if not phone:
             return {'success': False, 'error': 'Enter a valid Safaricom M-Pesa number such as 07XXXXXXXX or 2547XXXXXXXX.'}
+
+        # Daraja rejects sub-shilling amounts outright rather than explaining why.
+        amount_kes = int(round(float(amount or 0)))
+        if amount_kes < 1:
+            return {'success': False, 'error': 'M-Pesa cannot charge less than KES 1. Check the order total.'}
 
         app_base_url = Setting.get('app_base_url', '') or os.environ.get('APP_BASE_URL', '')
         callback_host = request.host_url if request else ''
@@ -1943,6 +2002,17 @@ def stk_push(phone_number, amount, order_number, callback_url=None):
             else:
                 callback_url = url_for('mpesa_callback', _external=True)
 
+        # Safaricom silently drops STK requests whose callback is not public
+        # HTTPS, which surfaces to the buyer as a push that never arrives.
+        if not callback_url.lower().startswith('https://'):
+            return {'success': False,
+                    'error': 'Daraja only accepts an HTTPS callback URL. Set the App Base URL in admin '
+                             f'settings to your public https:// domain (currently resolving to {callback_url}).'}
+        if any(host in callback_url for host in ('localhost', '127.0.0.1')):
+            return {'success': False,
+                    'error': 'The Daraja callback URL points at localhost, which Safaricom cannot reach. '
+                             'Set the App Base URL in admin settings to a public https:// domain or tunnel.'}
+
         headers = {
             'Authorization': f'Bearer {token}',
             'Content-Type': 'application/json'
@@ -1953,7 +2023,7 @@ def stk_push(phone_number, amount, order_number, callback_url=None):
             'Password': password,
             'Timestamp': timestamp,
             'TransactionType': 'CustomerPayBillOnline',
-            'Amount': round(amount),
+            'Amount': amount_kes,
             'PartyA': phone,
             'PartyB': shortcode,
             'PhoneNumber': phone,
@@ -1969,7 +2039,6 @@ def stk_push(phone_number, amount, order_number, callback_url=None):
             data = {'raw_response': resp.text}
 
         if data.get('ResponseCode') == '0':
-            app.logger.warning('STK push rejected for %s: %s', order_number, data)
             return {
                 'success': True,
                 'checkout_request_id': data.get('CheckoutRequestID'),
@@ -1977,6 +2046,7 @@ def stk_push(phone_number, amount, order_number, callback_url=None):
                 'response': data
             }
         else:
+            app.logger.warning('STK push rejected for %s: %s', order_number, data)
             error_message = (
                 data.get('errorMessage')
                 or data.get('ResponseDescription')
@@ -2005,10 +2075,7 @@ def check_payment_status(checkout_request_id):
             return None
 
         env = setting_value('daraja_env', app.config['DARAJA_ENV'])
-        if env == 'production':
-            api_url = "https://api.safaricom.co.ke/mpesa/stkpushquery/v1/query"
-        else:
-            api_url = "https://sandbox.safaricom.co.ke/mpesa/stkpushquery/v1/query"
+        api_url = f'{daraja_base_url(env)}/mpesa/stkpushquery/v1/query'
 
         shortcode = setting_value('daraja_shortcode', app.config['DARAJA_SHORTCODE'])
         passkey = daraja_passkey()
@@ -5261,6 +5328,43 @@ def _get_cached_hot_sale():
     return hot_sale_pop
 
 
+def unread_notification_count(user=None):
+    """Unread notification total for the navbar badge.
+
+    Counted rather than loaded: the badge only needs the number, and the
+    ix_customer_notifications_user_read_created index covers this exactly.
+    """
+    user = user or current_user
+    if not user or not getattr(user, 'is_authenticated', False):
+        return 0
+    try:
+        return CustomerNotification.query.filter_by(user_id=user.id, is_read=False).count()
+    except Exception:
+        # A badge is never worth failing a page render over.
+        return 0
+
+
+def seller_nav_state(user=None):
+    """What the seller/storefront nav links should say for this user.
+
+    Verified sellers should not keep seeing a "Become a Seller" prompt, so the
+    label and target both follow how far through the funnel the user actually is.
+    """
+    user = user or current_user
+    state = {'can_sell': False, 'has_storefront': False, 'storefront_pending': False}
+    if not user or not getattr(user, 'is_authenticated', False):
+        return state
+    try:
+        state['can_sell'] = user_can_sell(user)
+        state['has_storefront'] = user_has_storefront(user)
+        if state['can_sell'] and not state['has_storefront']:
+            state['storefront_pending'] = BusinessStorefront.query.filter_by(
+                owner_id=user.id).first() is not None
+    except Exception:
+        return state
+    return state
+
+
 @app.context_processor
 def inject_globals():
     """Inject settings and utility vars into all templates"""
@@ -5283,11 +5387,15 @@ def inject_globals():
             platform_ads=platform_ads,
             hot_sale_pop=hot_sale_pop,
             seller_signup_enabled=s.get('seller_signup_enabled', '0') == '1',
+            unread_notifications=unread_notification_count(),
+            seller_nav=seller_nav_state(),
             country_phone_codes=COUNTRY_PHONE_CODES
         )
     except Exception:
         return dict(settings={}, auth_user={'is_authenticated': False, 'is_admin': False, 'admin_level': '', 'username': ''}, now=datetime.utcnow(), platform_ad=None, platform_ads=[],
-                    hot_sale_pop=None, seller_signup_enabled=False, country_phone_codes=COUNTRY_PHONE_CODES)
+                    hot_sale_pop=None, seller_signup_enabled=False, unread_notifications=0,
+                    seller_nav={'can_sell': False, 'has_storefront': False, 'storefront_pending': False},
+                    country_phone_codes=COUNTRY_PHONE_CODES)
 # ---------- Error Handlers ----------
 @app.errorhandler(404)
 def not_found(e):
@@ -7005,12 +7113,67 @@ def review_storefront(storefront, status, notes=None):
     return storefront
 
 
+def storefront_manage_view(storefront):
+    """Listing page for an approved storefront.
+
+    Replaces the application form: the owner describes what the shop deals in
+    and works from their live product list instead of re-submitting details.
+    """
+    if request.method == 'POST':
+        storefront.about = (request.form.get('about', '') or '').strip()[:4000]
+        storefront.specialties = (request.form.get('specialties', '') or '').strip()[:500]
+        storefront.opening_hours = (request.form.get('opening_hours', '') or '').strip()[:200]
+
+        contact_phone = normalize_mpesa_phone(request.form.get('contact_phone', storefront.contact_phone or ''))
+        contact_email = normalize_email(request.form.get('contact_email', storefront.contact_email or ''))
+        if contact_phone:
+            storefront.contact_phone = contact_phone
+        if contact_email:
+            storefront.contact_email = contact_email
+
+        address = (request.form.get('physical_address', '') or '').strip()
+        landmark = (request.form.get('landmark', '') or '').strip()
+        # Re-pin only when the address actually moved; geocoding is a network call.
+        address_changed = address and address != (storefront.physical_address or '')
+        if address:
+            storefront.physical_address = address
+        if landmark:
+            storefront.landmark = landmark
+        if address_changed:
+            geocode_storefront(storefront)
+
+        db.session.commit()
+        flash('Shop details updated.', 'success')
+        return redirect(url_for('storefront_apply'))
+
+    products = Product.query.filter_by(seller_id=storefront.owner_id).order_by(
+        Product.created_at.desc()).limit(12).all()
+    stats = {
+        'total': Product.query.filter_by(seller_id=storefront.owner_id).count(),
+        'live': Product.query.filter_by(
+            seller_id=storefront.owner_id, is_active=True, review_status='approved').count(),
+        'pending_review': Product.query.filter(
+            Product.seller_id == storefront.owner_id,
+            Product.review_status != 'approved').count(),
+    }
+    categories = Category.query.filter_by(is_active=True).order_by(Category.name).all()
+    return render_template('storefront_manage.html', storefront=storefront,
+                           products=products, stats=stats, categories=categories)
+
+
 @app.route('/storefront/apply', methods=['GET', 'POST'])
 @login_required
 def storefront_apply():
     if not user_can_sell(current_user):
         flash('Complete seller verification first. Storefronts are for verified businesses that want wider product visibility.', 'warning')
         return redirect(url_for('seller_apply'))
+
+    # An approved storefront has already cleared review, so this page stops
+    # being an application form and becomes the shop's own listing page.
+    approved = seller_storefront(current_user)
+    if approved:
+        return storefront_manage_view(approved)
+
     if request.method == 'POST':
         business_name = request.form.get('business_name', '').strip()
         category_id = request.form.get('category_id', type=int)
@@ -11150,6 +11313,41 @@ def api_track_order(order_number):
 
 # --- Phase Two Marketplace Operations ---
 
+def seller_hub_view():
+    """The landing page a verified seller gets in place of the KYC form.
+
+    Shows what they can do next rather than re-asking for documents: their
+    storefront state, their live listings, and the shortcuts to sell.
+    """
+    storefront = seller_storefront(current_user)
+    pending_storefront = None
+    if not storefront:
+        pending_storefront = BusinessStorefront.query.filter_by(
+            owner_id=current_user.id
+        ).order_by(BusinessStorefront.created_at.desc()).first()
+
+    products = Product.query.filter_by(seller_id=current_user.id).order_by(
+        Product.created_at.desc()).limit(12).all()
+    total_products = Product.query.filter_by(seller_id=current_user.id).count()
+    live_products = Product.query.filter_by(
+        seller_id=current_user.id, is_active=True, review_status='approved').count()
+    pending_review = Product.query.filter(
+        Product.seller_id == current_user.id,
+        Product.review_status != 'approved').count()
+
+    return render_template(
+        'seller_hub.html',
+        storefront=storefront,
+        pending_storefront=pending_storefront,
+        products=products,
+        stats={
+            'total': total_products,
+            'live': live_products,
+            'pending_review': pending_review,
+        },
+    )
+
+
 @app.route('/seller/apply', methods=['GET', 'POST'])
 @login_required
 def seller_apply():
@@ -11160,6 +11358,11 @@ def seller_apply():
     if current_user.is_admin:
         flash('Admins are already approved platform operators.', 'info')
         return redirect(url_for('admin_dashboard'))
+
+    # Verification is a one-time gate. Once it is passed the page becomes the
+    # seller's listing hub, so approved sellers never see the KYC form again.
+    if user_can_sell(current_user):
+        return seller_hub_view()
 
     latest = SellerVerification.query.filter_by(user_id=current_user.id).order_by(SellerVerification.created_at.desc()).first()
     kyc_provider = selected_kyc_provider()
@@ -12390,7 +12593,14 @@ def admin_settings():
             if key in mvp_only_keys and not current_user_is_mvp():
                 continue
             submitted_value = request.form.get(key)
-            value = default if submitted_value is None else submitted_value.strip()
+            if submitted_value is None:
+                # The field was not on the submitted form. Keep whatever is
+                # already stored rather than resetting it to the default -
+                # that silently wiped saved Daraja credentials.
+                existing = Setting.get(key, None)
+                value = default if existing is None else existing
+            else:
+                value = submitted_value.strip()
             Setting.set(key, value)
 
         if cache:
@@ -12401,17 +12611,83 @@ def admin_settings():
             Setting.set('kyc_provider', 'didit')
 
         daraja_message = daraja_config_error()
+        pairing_message = daraja_shortcode_pairing_error(
+            setting_value('daraja_env', app.config['DARAJA_ENV']),
+            setting_value('daraja_shortcode', app.config['DARAJA_SHORTCODE']))
         if daraja_message:
             flash(f'Settings saved. {daraja_message}. Daraja will activate as soon as those values are completed.', 'warning')
+        elif pairing_message:
+            flash(f'Settings saved. {pairing_message}', 'warning')
         else:
-            flash('Settings saved and active. Daraja credentials are complete for the selected environment.', 'success')
+            flash('Settings saved. Use "Test Daraja connection" to confirm Safaricom accepts these credentials.', 'success')
         return redirect(url_for('admin_settings'))
 
     settings = {}
     for s in Setting.query.all():
         settings[s.key] = s.value
 
-    return render_template('admin/settings.html', settings=settings)
+    return render_template('admin/settings.html', settings=settings,
+                           daraja_status=daraja_diagnostics())
+
+
+def daraja_diagnostics():
+    """A read-only snapshot of the Daraja setup for the settings screen.
+
+    Deliberately does not call Safaricom: rendering settings must stay fast.
+    The live check lives behind the explicit test button.
+    """
+    env = setting_value('daraja_env', app.config['DARAJA_ENV']) or 'sandbox'
+    shortcode = setting_value('daraja_shortcode', app.config['DARAJA_SHORTCODE'])
+    callback_base = Setting.get('app_base_url', '') or os.environ.get('APP_BASE_URL', '')
+    return {
+        'env': env,
+        'shortcode': shortcode,
+        'config_error': daraja_config_error(),
+        'pairing_error': daraja_shortcode_pairing_error(env, shortcode),
+        'callback_url': (callback_base.rstrip('/') + '/mpesa/callback') if callback_base else '',
+        'host': daraja_base_url(env),
+    }
+
+
+@app.route('/admin/settings/daraja/test', methods=['POST'])
+@login_required
+@admin_required
+@limiter.limit("10 per hour")
+def admin_test_daraja():
+    """Ask Safaricom to authenticate the saved credentials, and say what broke.
+
+    Admins had no way to tell a bad key from a wrong environment: a failed STK
+    push only ever surfaced at checkout, to the customer.
+    """
+    config_error = daraja_config_error()
+    if config_error:
+        flash(f'{config_error}. Fill those fields in and save before testing.', 'danger')
+        return redirect(url_for('admin_settings'))
+
+    env = setting_value('daraja_env', app.config['DARAJA_ENV']) or 'sandbox'
+    shortcode = setting_value('daraja_shortcode', app.config['DARAJA_SHORTCODE'])
+    result = daraja_token_result()
+
+    log_admin_action('daraja_connection_test', 'setting', None,
+                     {'env': env, 'ok': bool(result['token'])})
+
+    if not result['token']:
+        flash(f'Daraja test failed ({env}): {result["error"]}', 'danger')
+        return redirect(url_for('admin_settings'))
+
+    pairing_error = daraja_shortcode_pairing_error(env, shortcode)
+    if pairing_error:
+        flash(f'Credentials authenticated against {env}, but {pairing_error}', 'warning')
+        return redirect(url_for('admin_settings'))
+
+    callback_base = Setting.get('app_base_url', '') or os.environ.get('APP_BASE_URL', '')
+    if not callback_base:
+        flash(f'Credentials authenticated against {env}. Set a public App Base URL so Safaricom '
+              'can deliver payment callbacks, otherwise STK pushes will not confirm.', 'warning')
+        return redirect(url_for('admin_settings'))
+
+    flash(f'Daraja credentials authenticated successfully against {env} (shortcode {shortcode}).', 'success')
+    return redirect(url_for('admin_settings'))
 
 
 @app.route('/admin/settings/seller-signup', methods=['POST'])
@@ -13369,6 +13645,9 @@ def phase_two_schema_spec():
             ('landmark', 'landmark VARCHAR(180)'),
             ('contact_phone', 'contact_phone VARCHAR(40)'),
             ('contact_email', 'contact_email VARCHAR(160)'),
+            ('about', 'about TEXT'),
+            ('specialties', 'specialties VARCHAR(500)'),
+            ('opening_hours', 'opening_hours VARCHAR(200)'),
             ('location_lat', 'location_lat FLOAT'),
             ('location_lng', 'location_lng FLOAT'),
             ('location_county', 'location_county VARCHAR(100)'),
