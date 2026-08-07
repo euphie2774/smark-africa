@@ -68,12 +68,6 @@
                                    placeholder="e.g. Phone accessories, Laptops, Repairs">
                             <div class="form-text">Separate items with commas.</div>
                         </div>
-                        <div class="mb-3">
-                            <label for="opening_hours" class="form-label">Opening hours</label>
-                            <input type="text" class="form-control" id="opening_hours" name="opening_hours"
-                                   value="{{ storefront.opening_hours or '' }}"
-                                   placeholder="e.g. Mon-Sat 8am - 6pm">
-                        </div>
 
                         <hr>
                         <div class="row g-3">
@@ -133,6 +127,38 @@
                         <a href="{{ url_for('seller_products') }}">List your first product</a>.
                     </div>
                     {% endfor %}
+                </div>
+            </div>
+
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Followers</h5>
+                    <span class="badge bg-success">{{ follower_count }}</span>
+                </div>
+                <div class="card-body">
+                    {% if follower_count %}
+                    <p class="small text-muted">
+                        {{ follower_count }} shopper{{ 's' if follower_count != 1 }} follow{{ '' if follower_count != 1 else 's' }}
+                        your shop. Tell them about a deal or a clearance and it lands in their notifications.
+                    </p>
+                    {% else %}
+                    <p class="small text-muted">
+                        Nobody follows your shop yet. Shoppers get a follow button on each of your
+                        product pages &mdash; once they do, you can announce deals to them here.
+                    </p>
+                    {% endif %}
+                    <form method="POST" action="{{ url_for('storefront_apply') }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="action" value="announce"/>
+                        <label for="announcement" class="form-label">Announce a deal</label>
+                        <textarea class="form-control mb-2" id="announcement" name="announcement" rows="3"
+                                  maxlength="2000"
+                                  placeholder="e.g. Clearance on all phone cases this weekend, 30% off."></textarea>
+                        <button type="submit" class="btn btn-outline-warning btn-sm"
+                                {% if not follower_count %}disabled{% endif %}>
+                            <i class="fas fa-bullhorn me-1"></i>Send to followers
+                        </button>
+                    </form>
                 </div>
             </div>
 

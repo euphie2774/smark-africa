@@ -1,0 +1,359 @@
+{% extends "base.html" %}
+{% block title %}Social Ad Posting - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fab fa-instagram me-2"></i>Social Ad Posting</h2>
+            <div class="small text-muted">
+                Sellers buy campaigns on their own ads page and pay by M-Pesa there. Paid campaigns
+                show up here. Write the caption, copy it, post it on the platform, then record the link.
+            </div>
+        </div>
+        <a href="{{ url_for('admin_ads') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-bullhorn me-1"></i>Ads console
+        </a>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-5">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white">
+                    <h5 class="mb-0">
+                        {% if editing and editing.id %}Edit post #{{ editing.id }}
+                        {% elif editing %}Compose a post
+                        {% else %}Composer{% endif %}
+                    </h5>
+                </div>
+                <div class="card-body">
+                    {% if editing %}
+                    <form method="POST"
+                          action="{{ url_for('admin_social_ad_edit', post_id=editing.id) if editing.id else url_for('admin_social_ad_new', campaign_id=campaign.id if campaign else None) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+
+                        {% if campaign %}
+                        <div class="alert alert-light border small mb-3">
+                            <div><strong>Campaign #{{ campaign.id }}</strong>
+                                &mdash; {{ campaign.seller.username if campaign.seller else 'house ad' }}</div>
+                            <div class="text-muted">
+                                Paid: KSh {{ '{:,.2f}'.format(campaign.total_charged or 0) }}
+                                &middot; status <code>{{ campaign.status }}</code>
+                            </div>
+                            {% if not campaign_is_paid(campaign) %}
+                            <div class="text-danger mt-1">
+                                <i class="fas fa-triangle-exclamation me-1"></i>Not paid yet &mdash;
+                                you cannot record this as posted until it clears.
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% endif %}
+
+                        <label class="form-label">Platform</label>
+                        <select name="platform" class="form-select mb-3">
+                            {% for platform in platforms %}
+                            <option value="{{ platform }}"
+                                {% if editing.platform == platform %}selected{% endif %}>{{ platform|title }}</option>
+                            {% endfor %}
+                        </select>
+
+                        <label class="form-label">Product (optional)</label>
+                        <select name="product_id" class="form-select mb-3">
+                            <option value="">No specific product</option>
+                            {% for product in products %}
+                            <option value="{{ product.id }}"
+                                {% if editing.product_id == product.id %}selected{% endif %}>{{ product.name[:60] }}</option>
+                            {% endfor %}
+                        </select>
+
+                        <label class="form-label" for="caption">Caption *</label>
+                        <textarea class="form-control mb-1" id="caption" name="caption" rows="7"
+                                  maxlength="{{ caption_limit }}" required>{{ editing.caption or '' }}</textarea>
+                        <div class="form-text mb-3">
+                            <span id="caption-count">0</span> / {{ caption_limit }} characters
+                        </div>
+
+                        <label class="form-label" for="hashtags">Hashtags</label>
+                        <textarea class="form-control mb-1" id="hashtags" name="hashtags" rows="2"
+                                  maxlength="600"
+                                  placeholder="#smarkafrica #kenya #shopsmart">{{ editing.hashtags or '' }}</textarea>
+                        <div class="form-text mb-3">
+                            <span id="hashtag-count">0</span> / 30 hashtags
+                            <span id="hashtag-warning" class="text-danger d-none">
+                                &mdash; over the limit, trim the list.
+                            </span>
+                        </div>
+
+                        <label class="form-label">Creative URL</label>
+                        <input type="url" name="creative_url" class="form-control mb-3"
+                               value="{{ editing.creative_url or '' }}"
+                               placeholder="Image or video to upload with the post">
+
+                        <label class="form-label">Schedule for (optional)</label>
+                        <input type="datetime-local" name="scheduled_for" class="form-control mb-1"
+                               value="{{ editing.scheduled_for.strftime('%Y-%m-%dT%H:%M') if editing.scheduled_for else '' }}">
+                        <div class="form-text mb-3">
+                            A reminder for you, not an automatic post. Setting a time marks it scheduled.
+                        </div>
+
+                        <label class="form-label">Internal notes</label>
+                        <textarea name="notes" class="form-control mb-3" rows="2"
+                                  placeholder="Anything the next admin should know">{{ editing.notes or '' }}</textarea>
+
+                        <button type="submit" class="btn btn-success w-100">
+                            <i class="fas fa-save me-1"></i>{{ 'Save changes' if editing.id else 'Save draft' }}
+                        </button>
+                        <a href="{{ url_for('admin_social_ads') }}" class="btn btn-outline-secondary w-100 mt-2">Cancel</a>
+                    </form>
+
+                    <hr>
+                    <button type="button" class="btn btn-outline-primary w-100" id="copyCaption">
+                        <i class="fas fa-copy me-1"></i>Copy caption + hashtags
+                    </button>
+                    <div class="form-text text-center">Paste straight into the platform.</div>
+                    {% else %}
+                    <p class="text-muted mb-3">
+                        Pick a paid campaign from the queue, or start a house ad with no seller behind it.
+                    </p>
+                    <a href="{{ url_for('admin_social_ad_new') }}" class="btn btn-success w-100">
+                        <i class="fas fa-plus me-1"></i>New house post
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if editing %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h6 class="mb-0">Preview</h6></div>
+                <div class="card-body">
+                    <div class="border rounded-3 overflow-hidden" style="max-width:340px;">
+                        <div class="d-flex align-items-center gap-2 p-2 border-bottom">
+                            <div class="rounded-circle bg-warning" style="width:32px;height:32px;"></div>
+                            <strong class="small">smarkafrica</strong>
+                        </div>
+                        {% if editing.creative_url %}
+                        <img src="{{ editing.creative_url }}" alt="Ad creative"
+                             style="width:100%;aspect-ratio:1;object-fit:cover;">
+                        {% else %}
+                        <div class="bg-light d-flex align-items-center justify-content-center text-muted"
+                             style="width:100%;aspect-ratio:1;">No creative</div>
+                        {% endif %}
+                        <div class="p-2 small">
+                            <div id="preview-caption" style="white-space:pre-wrap;">{{ editing.caption or '' }}</div>
+                            <div class="text-primary mt-1" id="preview-hashtags">{{ editing.hashtags or '' }}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        <div class="col-xl-7">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Campaigns waiting for a post</h5>
+                    <span class="text-muted small">{{ awaiting|length }}</span>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Campaign</th>
+                                <th>Seller</th>
+                                <th>Paid</th>
+                                <th class="text-end">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in awaiting %}
+                            <tr>
+                                <td>
+                                    <div class="fw-semibold">#{{ item.id }} {{ item.platform }}</div>
+                                    <div class="small text-muted">
+                                        {{ (item.ad_copy or 'no copy supplied')[:70] }}
+                                    </div>
+                                </td>
+                                <td class="small">{{ item.seller.username if item.seller else '—' }}</td>
+                                <td>
+                                    {% if campaign_is_paid(item) %}
+                                    <span class="badge bg-success">
+                                        KSh {{ '{:,.0f}'.format(item.total_charged or 0) }}
+                                    </span>
+                                    {% else %}
+                                    <span class="badge bg-warning text-dark">Unpaid</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end">
+                                    {% if campaign_is_paid(item) %}
+                                    <a href="{{ url_for('admin_social_ad_new', campaign_id=item.id) }}"
+                                       class="btn btn-sm btn-success">
+                                        <i class="fas fa-pen-nib me-1"></i>Compose
+                                    </a>
+                                    {% else %}
+                                    <form method="POST" class="d-inline"
+                                          action="{{ url_for('admin_mark_ad_paid', ad_id=item.id) }}">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button class="btn btn-sm btn-outline-warning">Mark paid</button>
+                                    </form>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="4" class="text-center text-muted py-4">
+                                    No campaigns waiting. Sellers request these from their ads page.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white"><h5 class="mb-0">Posts</h5></div>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Post</th>
+                                <th>Status</th>
+                                <th>Live link</th>
+                                <th class="text-end">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for post in posts %}
+                            <tr>
+                                <td>
+                                    <div class="fw-semibold">
+                                        #{{ post.id }} {{ post.platform|title }}
+                                        {% if post.campaign_id %}
+                                        <span class="small text-muted">&middot; campaign #{{ post.campaign_id }}</span>
+                                        {% else %}
+                                        <span class="badge bg-secondary">House</span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="small text-muted">{{ (post.caption or '')[:70] }}</div>
+                                    {% if post.scheduled_for %}
+                                    <div class="small text-muted">
+                                        <i class="fas fa-clock me-1"></i>{{ post.scheduled_for.strftime('%d %b %Y %H:%M') }}
+                                    </div>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if post.status == 'posted' %}
+                                    <span class="badge bg-success">Posted</span>
+                                    {% elif post.status == 'scheduled' %}
+                                    <span class="badge bg-info text-dark">Scheduled</span>
+                                    {% elif post.status == 'archived' %}
+                                    <span class="badge bg-secondary">Archived</span>
+                                    {% else %}
+                                    <span class="badge bg-warning text-dark">Draft</span>
+                                    {% endif %}
+                                </td>
+                                <td class="small">
+                                    {% if post.posted_url %}
+                                    <a href="{{ post.posted_url }}" target="_blank" rel="noopener">View post</a>
+                                    <div class="text-muted">{{ post.posted_at.strftime('%d %b %Y') if post.posted_at }}</div>
+                                    {% else %}
+                                    <span class="text-muted">—</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end">
+                                    <a href="{{ url_for('admin_social_ad_edit', post_id=post.id) }}"
+                                       class="btn btn-sm btn-outline-primary mb-1"><i class="fas fa-pen"></i></a>
+                                    {% if post.status != 'archived' %}
+                                    <form method="POST" class="d-inline"
+                                          action="{{ url_for('admin_social_ad_archive', post_id=post.id) }}">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button class="btn btn-sm btn-outline-secondary mb-1"
+                                                title="Archive"><i class="fas fa-box-archive"></i></button>
+                                    </form>
+                                    {% endif %}
+                                    {% if post.status != 'posted' %}
+                                        {% if campaign_is_paid(post.campaign) %}
+                                        <form method="POST" class="d-flex gap-1 mt-1"
+                                              action="{{ url_for('admin_social_ad_mark_posted', post_id=post.id) }}">
+                                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                            <input type="url" name="posted_url" class="form-control form-control-sm"
+                                                   placeholder="https://instagram.com/p/..." required>
+                                            <button class="btn btn-sm btn-success text-nowrap">Mark posted</button>
+                                        </form>
+                                        {% else %}
+                                        <div class="small text-danger mt-1">
+                                            Campaign unpaid &mdash;
+                                            <form method="POST" class="d-inline"
+                                                  action="{{ url_for('admin_mark_ad_paid', ad_id=post.campaign_id) }}">
+                                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                                <button class="btn btn-link btn-sm p-0 align-baseline">mark paid</button>
+                                            </form>
+                                        </div>
+                                        {% endif %}
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% else %}
+                            <tr>
+                                <td colspan="4" class="text-center text-muted py-5">
+                                    <i class="fab fa-instagram fa-2x mb-2 d-block"></i>
+                                    Nothing composed yet.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+(function () {
+    const caption = document.getElementById('caption');
+    const hashtags = document.getElementById('hashtags');
+    if (!caption) return;
+
+    const captionCount = document.getElementById('caption-count');
+    const hashtagCount = document.getElementById('hashtag-count');
+    const hashtagWarning = document.getElementById('hashtag-warning');
+    const previewCaption = document.getElementById('preview-caption');
+    const previewHashtags = document.getElementById('preview-hashtags');
+    const limit = {{ caption_limit }};
+
+    const refresh = () => {
+        const text = caption.value || '';
+        captionCount.textContent = text.length;
+        captionCount.classList.toggle('text-danger', text.length > limit);
+        if (previewCaption) previewCaption.textContent = text;
+
+        const tags = (hashtags.value || '').match(/#\w+/g) || [];
+        hashtagCount.textContent = tags.length;
+        hashtagCount.classList.toggle('text-danger', tags.length > 30);
+        hashtagWarning.classList.toggle('d-none', tags.length <= 30);
+        if (previewHashtags) previewHashtags.textContent = hashtags.value || '';
+    };
+
+    caption.addEventListener('input', refresh);
+    hashtags.addEventListener('input', refresh);
+    refresh();
+
+    document.getElementById('copyCaption')?.addEventListener('click', async function () {
+        const payload = [caption.value || '', hashtags.value || ''].filter(Boolean).join('\n\n');
+        try {
+            await navigator.clipboard.writeText(payload);
+            this.innerHTML = '<i class="fas fa-check me-1"></i>Copied';
+            setTimeout(() => {
+                this.innerHTML = '<i class="fas fa-copy me-1"></i>Copy caption + hashtags';
+            }, 2000);
+        } catch (err) {
+            alert('Could not copy automatically. Select the caption and copy it manually.');
+        }
+    });
+})();
+</script>
+{% endblock %}

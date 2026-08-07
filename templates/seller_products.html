@@ -131,6 +131,20 @@
                             pin on the product card.
                         </div>
 
+                        <label class="form-label" for="excluded_countries">Countries you cannot deliver to</label>
+                        <select class="form-select" id="excluded_countries" name="excluded_countries"
+                                multiple size="6">
+                            {% for country in excludable_countries %}
+                            <option value="{{ country }}"
+                                    {% if country in selected_exclusions %}selected{% endif %}>{{ country }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text mb-3">
+                            Optional. Hold Ctrl (or Cmd) to pick more than one. Anywhere in Kenya stays
+                            deliverable &mdash; you can only rule out countries outside Kenya. Buyers see
+                            this only if their own delivery country is on the list.
+                        </div>
+
                         <div class="form-check mb-3">
                             <input class="form-check-input" type="checkbox" name="is_active" id="is_active"
                                    value="1" {% if not product or product.is_active %}checked{% endif %}>

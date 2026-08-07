@@ -50,7 +50,8 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     CoinTransaction, CoinDailyCheckIn, Event, \
     PromotedListing, AffiliateLink, AffiliateConversion, SellerSubscription, SponsoredBanner, \
     EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue, AuditLog, \
-    ShippingZone, ShippingQuote, DriverProfile, DriverLocationPing, DeliveryAssignment
+    ShippingZone, ShippingQuote, DriverProfile, DriverLocationPing, DeliveryAssignment, \
+    StorefrontFollow, SocialAdPost
 
 from geo import GeoPoint, get_router, get_geocoder
 from geo.cache import cached_route, cached_geocode, cached_reverse
@@ -892,9 +893,39 @@ def setting_value(key, default=''):
     return value
 
 
+# Safaricom publishes this passkey for the sandbox test till (174379); the
+# sandbox portal itself shows the passkey field as "N/A". It is a public test
+# constant, not a secret, and it is the only way to run a sandbox STK push.
+DARAJA_SANDBOX_PASSKEY = 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919'
+
+
+def daraja_env_name():
+    return str(setting_value('daraja_env', app.config['DARAJA_ENV']) or 'sandbox').strip().lower()
+
+
+def daraja_using_sandbox_default_passkey():
+    """True when the sandbox fallback below is what's actually being used."""
+    if daraja_env_name() == 'production':
+        return False
+    stored = str(setting_value('daraja_passkey', app.config['DARAJA_PASSKEY'])).strip()
+    return stored == '' or stored.upper() == 'N/A'
+
+
 def daraja_passkey():
-    passkey = setting_value('daraja_passkey', app.config['DARAJA_PASSKEY'])
-    return '' if str(passkey).strip().upper() == 'N/A' else str(passkey)
+    """The passkey to sign the STK request with.
+
+    The sandbox portal hands out consumer key and secret but lists the passkey
+    as "N/A". Treating that as missing blocked the STK push before it was ever
+    sent, so in sandbox we fall back to Safaricom's published test passkey.
+    Production still fails loudly: quietly signing live requests with a sandbox
+    passkey would only produce a confusing rejection from Safaricom.
+    """
+    passkey = str(setting_value('daraja_passkey', app.config['DARAJA_PASSKEY'])).strip()
+    if passkey.upper() == 'N/A':
+        passkey = ''
+    if not passkey and daraja_env_name() != 'production':
+        return DARAJA_SANDBOX_PASSKEY
+    return passkey
 
 
 def daraja_timestamp():
@@ -968,6 +999,94 @@ def allowed_file(filename):
     return bool(filename and is_safe_file(filename, 'image'))
 
 
+# ---------- Cloudinary image hosting ----------
+# static/uploads is wiped on every redeploy, so anything saved there stops
+# resolving. When Cloudinary credentials exist, new uploads go there instead and
+# the returned URL is stored in the same image_url column. Existing local URLs
+# are left alone and keep serving.
+def cloudinary_credentials():
+    return {
+        'cloud_name': str(setting_value('cloudinary_cloud_name', app.config.get('CLOUDINARY_CLOUD_NAME', '')) or '').strip(),
+        'api_key': str(setting_value('cloudinary_api_key', app.config.get('CLOUDINARY_API_KEY', '')) or '').strip(),
+        'api_secret': str(setting_value('cloudinary_api_secret', app.config.get('CLOUDINARY_API_SECRET', '')) or '').strip(),
+    }
+
+
+def cloudinary_enabled():
+    """True only when the library is installed and all three keys are present."""
+    creds = cloudinary_credentials()
+    if not all(creds.values()):
+        return False
+    try:
+        import cloudinary  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+# Cloudinary URLs are public to anyone holding the link. Only folders whose
+# contents are already public may go there. Paid digital goods stay local because
+# their download route checks for a purchase first, and KYC documents and selfies
+# stay local because they are identity documents.
+CLOUDINARY_PUBLIC_FOLDERS = {'products', 'banners', 'services', 'inspo'}
+
+
+def cloudinary_allowed_for(subfolder):
+    return cloudinary_enabled() and str(subfolder or '') in CLOUDINARY_PUBLIC_FOLDERS
+
+
+def cloudinary_client():
+    """Configured cloudinary module, or None when it cannot be used."""
+    if not cloudinary_enabled():
+        return None
+    import cloudinary
+    creds = cloudinary_credentials()
+    cloudinary.config(secure=True, **creds)
+    return cloudinary
+
+
+def upload_to_cloudinary(source, folder='products', public_id=None):
+    """Upload a file, path, or bytes and return the secure URL.
+
+    Returns None on any failure so callers fall back to local storage: a broken
+    image host should never stop a seller from listing a product.
+    """
+    client = cloudinary_client()
+    if client is None:
+        return None
+    try:
+        import cloudinary.uploader
+        result = cloudinary.uploader.upload(
+            source,
+            folder=f'smarkafrica/{folder}',
+            public_id=public_id,
+            resource_type='auto',
+            overwrite=False,
+        )
+        url = result.get('secure_url') or result.get('url')
+        return url or None
+    except Exception:
+        app.logger.warning('Cloudinary upload failed; falling back to local storage', exc_info=True)
+        return None
+
+
+def cloudinary_status():
+    """Diagnostics for the admin settings panel."""
+    creds = cloudinary_credentials()
+    try:
+        import cloudinary  # noqa: F401
+        installed = True
+    except ImportError:
+        installed = False
+    return {
+        'installed': installed,
+        'cloud_name': creds['cloud_name'],
+        'has_key': bool(creds['api_key']),
+        'has_secret': bool(creds['api_secret']),
+        'enabled': cloudinary_enabled(),
+    }
+
+
 def save_uploaded_file(file, subfolder='products'):
     """
     Save uploaded file and return the URL path
@@ -1000,6 +1119,13 @@ def save_uploaded_file(file, subfolder='products'):
     if not target_path:
         raise ValueError('Invalid target path')
 
+    if cloudinary_allowed_for(subfolder):
+        file.stream.seek(0)
+        hosted = upload_to_cloudinary(file, folder=subfolder)
+        if hosted:
+            return hosted
+        file.stream.seek(0)
+
     file.save(target_path)
     return url_for('static', filename=f'uploads/{subfolder}/{unique_name}')
 
@@ -1022,10 +1148,13 @@ def save_product_image(file):
         with Image.open(file.stream) as image:
             image.verify()
         file.stream.seek(0)
+        # Compress into memory first so the same validated bytes can go either to
+        # Cloudinary or to disk without doing the work twice.
+        compressed = BytesIO()
         with Image.open(file.stream) as image:
             image = ImageOps.exif_transpose(image).convert('RGB')
             image.thumbnail((1600, 1600))
-            image.save(target_path, 'JPEG', quality=82, optimize=True)
+            image.save(compressed, 'JPEG', quality=82, optimize=True)
     except ImportError:
         app.logger.warning('Pillow is not installed; saving product image without compression')
         file.stream.seek(0)
@@ -1033,6 +1162,17 @@ def save_product_image(file):
     except Exception as exc:
         app.logger.exception('Product image validation/compression failed')
         raise ValueError('Upload a valid PNG, JPG, GIF, or WebP product image.') from exc
+
+    if cloudinary_allowed_for('products'):
+        compressed.seek(0)
+        hosted = upload_to_cloudinary(
+            compressed, folder='products', public_id=os.path.splitext(unique_name)[0])
+        if hosted:
+            return hosted
+
+    compressed.seek(0)
+    with open(target_path, 'wb') as handle:
+        handle.write(compressed.read())
     return url_for('static', filename=f'uploads/products/{unique_name}')
 
 
@@ -1625,6 +1765,60 @@ def country_is_supported_for_sales(country):
         return True
     configured = {item.strip() for item in allowed.split(',') if item.strip()}
     return (country or 'Kenya') in (configured or {'Kenya'})
+
+
+# Sellers may refuse international destinations, never domestic ones. Keeping
+# Kenya out of the excludable set here means no county can ever be blocked,
+# whatever the form posts.
+def excludable_countries():
+    """Countries a seller is allowed to refuse delivery to."""
+    return [country for country in checkout_address_book() if country != 'Kenya']
+
+
+def product_excluded_countries(product):
+    """The seller's no-delivery list, tolerant of legacy or corrupt values."""
+    raw = getattr(product, 'excluded_countries', None)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if isinstance(item, str)]
+
+
+def parse_excluded_countries(values):
+    """Validate submitted exclusions, dropping Kenya and anything unknown."""
+    allowed = set(excludable_countries())
+    cleaned = []
+    for value in values or []:
+        name = str(value or '').strip()
+        if name in allowed and name not in cleaned:
+            cleaned.append(name)
+    return cleaned
+
+
+def serialize_excluded_countries(values):
+    """JSON for the column, or None when nothing is excluded."""
+    cleaned = parse_excluded_countries(values)
+    return json.dumps(cleaned) if cleaned else None
+
+
+def product_delivery_blocked(product, country):
+    """True when this product cannot be delivered to the given country."""
+    name = str(country or '').strip()
+    if not name or name == 'Kenya':
+        return False
+    return name in product_excluded_countries(product)
+
+
+# The admin product form re-renders from several validation paths, so it reads the
+# country list and a product's current exclusions straight from Jinja instead of
+# relying on every one of those paths to pass them through.
+app.jinja_env.globals['excludable_countries'] = excludable_countries
+app.jinja_env.globals['product_excluded_countries'] = product_excluded_countries
 
 
 def estimate_shipping_cost(country, state, city, weight_kg):
@@ -5570,6 +5764,58 @@ def follow_category(category_id):
     return redirect(request.referrer or url_for('shop', category=category.slug))
 
 
+@app.route('/storefront/<int:storefront_id>/follow', methods=['POST'])
+@login_required
+def follow_storefront(storefront_id):
+    """Toggle following a shop, so its deals reach this shopper."""
+    storefront = BusinessStorefront.query.get_or_404(storefront_id)
+    existing = StorefrontFollow.query.filter_by(
+        user_id=current_user.id, storefront_id=storefront.id).first()
+    if existing:
+        db.session.delete(existing)
+        flash(f'You stopped following {storefront.business_name}.', 'info')
+    else:
+        db.session.add(StorefrontFollow(user_id=current_user.id, storefront_id=storefront.id))
+        flash(f'You are now following {storefront.business_name}. '
+              'We will let you know about their deals and clearances.', 'success')
+    db.session.commit()
+    return redirect(request.referrer or url_for('home'))
+
+
+def storefront_follower_count(storefront):
+    if not storefront:
+        return 0
+    try:
+        return StorefrontFollow.query.filter_by(storefront_id=storefront.id).count()
+    except Exception:
+        return 0
+
+
+def notify_storefront_followers(storefront, title, body, product_id=None):
+    """Send one notification per follower. Returns how many were reached.
+
+    The shop owner is skipped: a seller following their own shop should not be
+    pinged by their own announcement.
+    """
+    if not storefront:
+        return 0
+    follows = StorefrontFollow.query.filter_by(storefront_id=storefront.id).all()
+    sent = 0
+    for follow in follows:
+        if follow.user_id == storefront.owner_id:
+            continue
+        db.session.add(CustomerNotification(
+            user_id=follow.user_id,
+            product_id=product_id,
+            title=title[:180],
+            body=body,
+            notification_type='storefront',
+            is_read=False,
+        ))
+        sent += 1
+    return sent
+
+
 @app.route('/product/<int:product_id>/price-alert', methods=['POST'])
 @login_required
 def product_price_alert(product_id):
@@ -5636,10 +5882,16 @@ def product_page(slug):
     reviews = Review.query.filter_by(product_id=product.id, is_visible=True).order_by(Review.created_at.desc()).all()
     has_reviewed = False
     is_following_category = False
+    is_following_storefront = False
+    storefront = BusinessStorefront.query.filter_by(
+        owner_id=product.seller_id, status='approved').first() if product.seller_id else None
     if current_user.is_authenticated:
         has_reviewed = Review.query.filter_by(user_id=current_user.id, product_id=product.id).first() is not None
         if product.category_id:
             is_following_category = CategoryFollow.query.filter_by(user_id=current_user.id, category_id=product.category_id).first() is not None
+        if storefront:
+            is_following_storefront = StorefrontFollow.query.filter_by(
+                user_id=current_user.id, storefront_id=storefront.id).first() is not None
     related = Product.query.filter(
         Product.category_id == product.category_id,
         Product.id != product.id,
@@ -5655,12 +5907,22 @@ def product_page(slug):
             pass
 
     bnpl_policy = BNPLProductPolicy.query.filter_by(product_id=product.id, is_enabled=True).first()
+
+    # The seller's no-delivery list stays invisible unless it actually affects
+    # this shopper, so nobody is shown restrictions that do not apply to them.
+    buyer_country = getattr(current_user, 'country', None) if current_user.is_authenticated else None
+    delivery_blocked = product_delivery_blocked(product, buyer_country)
+
     return render_template('product.html',
                            product=product,
                            reviews=reviews,
                            related=related,
                            has_reviewed=has_reviewed,
                            is_following_category=is_following_category,
+                           is_following_storefront=is_following_storefront,
+                           storefront=storefront,
+                           delivery_blocked=delivery_blocked,
+                           buyer_country=buyer_country,
                            gallery_images=gallery_images,
                            media_kind=product_media_kind(product),
                            is_music_product=is_music_category(product.category),
@@ -6162,6 +6424,17 @@ def checkout():
 
         if not country_is_supported_for_sales(shipping_country):
             flash(LAUNCH_SOON_MESSAGE, 'info')
+            return redirect(url_for('checkout'))
+
+        # Catch a delivery address in a country the seller refuses, even when it
+        # differs from the country on the buyer's profile.
+        blocked = [item.product.name for item in cart_items
+                   if item.product and product_delivery_blocked(item.product, shipping_country)]
+        if blocked:
+            names = ', '.join(f'"{name}"' for name in blocked[:3])
+            more = f' and {len(blocked) - 3} more' if len(blocked) > 3 else ''
+            flash(f'The seller of {names}{more} does not deliver to {shipping_country}. '
+                  'Remove those items or choose a different delivery country.', 'danger')
             return redirect(url_for('checkout'))
 
         # Calculate totals
@@ -7120,9 +7393,25 @@ def storefront_manage_view(storefront):
     and works from their live product list instead of re-submitting details.
     """
     if request.method == 'POST':
+        # Two forms post here: the shop details and the deal announcement.
+        if request.form.get('action') == 'announce':
+            message = (request.form.get('announcement', '') or '').strip()
+            if not message:
+                flash('Write the deal or clearance you want followers to hear about.', 'danger')
+            elif storefront_follower_count(storefront) == 0:
+                flash('No one follows your shop yet, so there is nobody to notify.', 'info')
+            else:
+                reached = notify_storefront_followers(
+                    storefront,
+                    f'{storefront.business_name}: new deal',
+                    message[:2000],
+                )
+                db.session.commit()
+                flash(f'Announcement sent to {reached} follower{"" if reached == 1 else "s"}.', 'success')
+            return redirect(url_for('storefront_apply'))
+
         storefront.about = (request.form.get('about', '') or '').strip()[:4000]
         storefront.specialties = (request.form.get('specialties', '') or '').strip()[:500]
-        storefront.opening_hours = (request.form.get('opening_hours', '') or '').strip()[:200]
 
         contact_phone = normalize_mpesa_phone(request.form.get('contact_phone', storefront.contact_phone or ''))
         contact_email = normalize_email(request.form.get('contact_email', storefront.contact_email or ''))
@@ -7158,7 +7447,8 @@ def storefront_manage_view(storefront):
     }
     categories = Category.query.filter_by(is_active=True).order_by(Category.name).all()
     return render_template('storefront_manage.html', storefront=storefront,
-                           products=products, stats=stats, categories=categories)
+                           products=products, stats=stats, categories=categories,
+                           follower_count=storefront_follower_count(storefront))
 
 
 @app.route('/storefront/apply', methods=['GET', 'POST'])
@@ -9933,6 +10223,9 @@ def admin_add_product():
             lng=request.form.get('location_lng', type=float),
         )
 
+        product.excluded_countries = serialize_excluded_countries(
+            request.form.getlist('excluded_countries'))
+
         # Handle image upload
         product_images = uploaded_product_images()
         if product_images:
@@ -10040,6 +10333,8 @@ def admin_edit_product(pid):
             lat=request.form.get('location_lat', type=float),
             lng=request.form.get('location_lng', type=float),
         )
+        product.excluded_countries = serialize_excluded_countries(
+            request.form.getlist('excluded_countries'))
         product.vat_applicable = form_bool('vat_applicable')
         product.vat_rate = form_float('vat_rate', product.vat_rate or (16 if product.vat_applicable else 0), minimum=0, maximum=100) if product.vat_applicable else 0
         product.product_condition = request.form.get('product_condition', product.product_condition or 'new')
@@ -11692,6 +11987,11 @@ def save_seller_product(product, storefront, is_new):
         lat=request.form.get('location_lat', type=float),
         lng=request.form.get('location_lng', type=float),
     )
+
+    # Kenya is filtered out inside the parser, so a tampered form still cannot
+    # block a domestic county.
+    product.excluded_countries = serialize_excluded_countries(
+        request.form.getlist('excluded_countries'))
     return None
 
 
@@ -11711,6 +12011,7 @@ def seller_products(product_id=None):
     if request.method == 'POST':
         is_new = product is None
         target = product or Product(seller_id=current_user.id, commission_percent=15.0)
+        old_discount = float(target.discount_percent or 0) if not is_new else 0.0
         error = save_seller_product(target, storefront, is_new)
         if error:
             flash(error, 'danger')
@@ -11732,6 +12033,19 @@ def seller_products(product_id=None):
                     flash(f'"{target.name}" updated.', 'success')
                 if target.review_status != 'approved':
                     flash('This condition needs an admin check before it appears in the shop.', 'info')
+
+                # When discount goes from zero to positive, followers hear about it.
+                new_discount = float(target.discount_percent or 0)
+                if old_discount == 0 and new_discount > 0 and target.is_active:
+                    reached = notify_storefront_followers(
+                        storefront,
+                        f'Price drop: {target.name}',
+                        f'{target.name} is now {int(new_discount)}% off.',
+                        product_id=target.id,
+                    )
+                    if reached:
+                        flash(f'{reached} follower{"" if reached == 1 else "s"} notified of the discount.', 'info')
+
                 return redirect(url_for('seller_products'))
 
     products = Product.query.filter_by(seller_id=current_user.id).order_by(
@@ -11739,7 +12053,9 @@ def seller_products(product_id=None):
     categories = Category.query.filter_by(is_active=True).order_by(Category.name.asc()).all()
     return render_template('seller_products.html', storefront=storefront, products=products,
                            categories=categories, product=product,
-                           conditions=SELLER_PRODUCT_CONDITIONS)
+                           conditions=SELLER_PRODUCT_CONDITIONS,
+                           excludable_countries=excludable_countries(),
+                           selected_exclusions=product_excluded_countries(product) if product else [])
 
 
 @app.route('/seller/products/<int:product_id>/toggle', methods=['POST'])
@@ -11959,6 +12275,212 @@ def admin_remove_ad_product(ad_id):
     db.session.commit()
     flash('Product removed from ad.', 'success')
     return redirect(url_for('admin_ads'))
+
+
+# ---------- Social media ad posting (admin only) ----------
+# Sellers buy a campaign through /seller/ads and pay by M-Pesa there. Admins turn
+# a paid campaign into a real Instagram post here and record the live URL. There
+# is no Graph API call: posting is done by hand from the composer below, which is
+# why the caption is offered ready to copy.
+SOCIAL_AD_PLATFORMS = ['instagram', 'facebook', 'tiktok', 'x', 'linkedin']
+SOCIAL_AD_CAPTION_LIMIT = 2200
+SOCIAL_AD_PAID_STATUSES = ['pending_approval', 'active', 'approved', 'completed']
+
+
+def social_ad_campaign_is_paid(campaign):
+    """True when a campaign has cleared payment and may be posted.
+
+    House ads created by an admin carry no charge, so they count as paid.
+    """
+    if campaign is None:
+        return True
+    if float(campaign.total_charged or 0) <= 0:
+        return True
+    return str(campaign.status or '') in SOCIAL_AD_PAID_STATUSES
+
+
+def social_ad_hashtag_count(value):
+    return len([tag for tag in re.findall(r'#\w+', value or '')])
+
+
+def apply_social_ad_form(post):
+    """Read the composer onto a post. Returns an error string or None."""
+    platform = (request.form.get('platform', 'instagram') or 'instagram').strip().lower()
+    if platform not in SOCIAL_AD_PLATFORMS:
+        platform = 'instagram'
+    caption = (request.form.get('caption', '') or '').strip()
+    if not caption:
+        return 'Write a caption before saving.'
+    if len(caption) > SOCIAL_AD_CAPTION_LIMIT:
+        return f'Instagram captions cap at {SOCIAL_AD_CAPTION_LIMIT} characters. Yours is {len(caption)}.'
+
+    hashtags = (request.form.get('hashtags', '') or '').strip()[:600]
+    if social_ad_hashtag_count(hashtags) > 30:
+        return 'Instagram allows at most 30 hashtags. Trim the list.'
+
+    scheduled_raw = (request.form.get('scheduled_for', '') or '').strip()
+    scheduled_for = None
+    if scheduled_raw:
+        try:
+            scheduled_for = datetime.strptime(scheduled_raw, '%Y-%m-%dT%H:%M')
+        except ValueError:
+            return 'Use the date picker for the schedule, or leave it blank.'
+
+    status = (request.form.get('status', 'draft') or 'draft').strip()
+    if status not in ['draft', 'scheduled']:
+        status = 'draft'
+    if scheduled_for and status == 'draft':
+        status = 'scheduled'
+
+    post.platform = platform
+    post.caption = caption
+    post.hashtags = hashtags
+    post.creative_url = (request.form.get('creative_url', '') or '').strip()[:500]
+    post.scheduled_for = scheduled_for
+    post.notes = (request.form.get('notes', '') or '').strip()[:2000]
+    post.product_id = request.form.get('product_id', type=int)
+    if post.status not in ['posted', 'archived']:
+        post.status = status
+    return None
+
+
+def social_ad_queue_context(editing=None):
+    """Everything the queue screen renders."""
+    posts = SocialAdPost.query.order_by(SocialAdPost.created_at.desc()).limit(100).all()
+    posted_campaign_ids = {p.campaign_id for p in posts if p.campaign_id and p.status != 'archived'}
+
+    # Social campaigns a seller has paid for that nobody has drafted a post for yet.
+    candidates = AdCampaign.query.filter(
+        AdCampaign.placement != 'smarkafrica'
+    ).order_by(AdCampaign.created_at.desc()).limit(100).all()
+    awaiting = [c for c in candidates if c.id not in posted_campaign_ids]
+
+    return {
+        'posts': posts,
+        'awaiting': awaiting,
+        'editing': editing,
+        'platforms': SOCIAL_AD_PLATFORMS,
+        'caption_limit': SOCIAL_AD_CAPTION_LIMIT,
+        'campaign_is_paid': social_ad_campaign_is_paid,
+        'products': Product.query.filter_by(is_active=True).order_by(Product.name).limit(300).all(),
+    }
+
+
+@app.route('/admin/social-ads')
+@login_required
+@admin_required
+def admin_social_ads():
+    """The posting queue: paid campaigns waiting, drafts, and what went live."""
+    return render_template('admin/social_ads.html', **social_ad_queue_context())
+
+
+@app.route('/admin/social-ads/new', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def admin_social_ad_new():
+    campaign_id = request.values.get('campaign_id', type=int)
+    campaign = AdCampaign.query.get(campaign_id) if campaign_id else None
+
+    if campaign and not social_ad_campaign_is_paid(campaign):
+        flash('This campaign has not been paid for yet. Mark it paid on the Ads screen first.', 'warning')
+        return redirect(url_for('admin_social_ads'))
+
+    if request.method == 'POST':
+        post = SocialAdPost(campaign_id=campaign.id if campaign else None)
+        error = apply_social_ad_form(post)
+        if error:
+            # Re-render with what they typed rather than making them start over.
+            flash(error, 'danger')
+            context = social_ad_queue_context(editing=post)
+            context['campaign'] = campaign
+            return render_template('admin/social_ads.html', **context)
+        db.session.add(post)
+        db.session.commit()
+        log_admin_action('social_ad_draft', 'social_ad_post', post.id,
+                         {'platform': post.platform, 'campaign_id': post.campaign_id})
+        flash('Draft saved. Copy the caption, post it, then record the link here.', 'success')
+        return redirect(url_for('admin_social_ads'))
+
+    # Pre-fill from the campaign the seller already paid for, so the admin is
+    # editing their words rather than retyping them.
+    draft = SocialAdPost(
+        campaign_id=campaign.id if campaign else None,
+        product_id=campaign.product_id if campaign else None,
+        platform='instagram',
+        caption=(campaign.ad_copy if campaign else '') or '',
+        creative_url=(campaign.creative_url if campaign else '') or
+                     (campaign.product.image_url if campaign and campaign.product else ''),
+        status='draft',
+    )
+    context = social_ad_queue_context(editing=draft)
+    context['campaign'] = campaign
+    return render_template('admin/social_ads.html', **context)
+
+
+@app.route('/admin/social-ads/<int:post_id>/edit', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def admin_social_ad_edit(post_id):
+    post = SocialAdPost.query.get_or_404(post_id)
+    if request.method == 'POST':
+        error = apply_social_ad_form(post)
+        if error:
+            flash(error, 'danger')
+        else:
+            db.session.commit()
+            flash('Post updated.', 'success')
+            return redirect(url_for('admin_social_ads'))
+    context = social_ad_queue_context(editing=post)
+    context['campaign'] = post.campaign
+    return render_template('admin/social_ads.html', **context)
+
+
+@app.route('/admin/social-ads/<int:post_id>/mark-posted', methods=['POST'])
+@login_required
+@admin_required
+def admin_social_ad_mark_posted(post_id):
+    post = SocialAdPost.query.get_or_404(post_id)
+    if not social_ad_campaign_is_paid(post.campaign):
+        flash('That campaign has not been paid for. Mark it paid before recording a live post.', 'danger')
+        return redirect(url_for('admin_social_ads'))
+
+    posted_url = (request.form.get('posted_url', '') or '').strip()
+    if not posted_url.startswith(('http://', 'https://')):
+        flash('Paste the full link to the live post, starting with https://.', 'danger')
+        return redirect(url_for('admin_social_ads'))
+
+    post.posted_url = posted_url[:500]
+    post.posted_at = utcnow()
+    post.posted_by_id = current_user.id
+    post.status = 'posted'
+
+    # Tell the seller their ad is live, using the notification bell they already have.
+    if post.campaign and post.campaign.seller_id:
+        db.session.add(CustomerNotification(
+            user_id=post.campaign.seller_id,
+            product_id=post.product_id,
+            title=f'Your {post.platform.title()} ad is live'[:180],
+            body=f'We posted your campaign on {post.platform.title()}. See it here: {posted_url}',
+            notification_type='ad',
+            is_read=False,
+        ))
+
+    db.session.commit()
+    log_admin_action('social_ad_posted', 'social_ad_post', post.id,
+                     {'platform': post.platform, 'url': posted_url})
+    flash('Recorded as live. The seller has been notified.', 'success')
+    return redirect(url_for('admin_social_ads'))
+
+
+@app.route('/admin/social-ads/<int:post_id>/archive', methods=['POST'])
+@login_required
+@admin_required
+def admin_social_ad_archive(post_id):
+    post = SocialAdPost.query.get_or_404(post_id)
+    post.status = 'archived'
+    db.session.commit()
+    flash('Post archived.', 'success')
+    return redirect(url_for('admin_social_ads'))
 
 
 @app.route('/admin/phase-two')
@@ -12522,6 +13044,9 @@ def admin_settings():
             'daraja_shortcode': '174379',
             'daraja_env': 'sandbox',
             'daraja_callback_secret': '',
+            'cloudinary_cloud_name': app.config.get('CLOUDINARY_CLOUD_NAME', ''),
+            'cloudinary_api_key': app.config.get('CLOUDINARY_API_KEY', ''),
+            'cloudinary_api_secret': app.config.get('CLOUDINARY_API_SECRET', ''),
             'app_base_url': DEFAULT_PUBLIC_BASE_URL,
             'business_name': 'SMARKAFRICA',
             'mail_server': 'smtp.gmail.com',
@@ -12627,7 +13152,8 @@ def admin_settings():
         settings[s.key] = s.value
 
     return render_template('admin/settings.html', settings=settings,
-                           daraja_status=daraja_diagnostics())
+                           daraja_status=daraja_diagnostics(),
+                           cloudinary=cloudinary_status())
 
 
 def daraja_diagnostics():
@@ -12646,6 +13172,7 @@ def daraja_diagnostics():
         'pairing_error': daraja_shortcode_pairing_error(env, shortcode),
         'callback_url': (callback_base.rstrip('/') + '/mpesa/callback') if callback_base else '',
         'host': daraja_base_url(env),
+        'sandbox_default_passkey': daraja_using_sandbox_default_passkey(),
     }
 
 
@@ -12687,6 +13214,39 @@ def admin_test_daraja():
         return redirect(url_for('admin_settings'))
 
     flash(f'Daraja credentials authenticated successfully against {env} (shortcode {shortcode}).', 'success')
+    return redirect(url_for('admin_settings'))
+
+
+@app.route('/admin/settings/cloudinary/test', methods=['POST'])
+@login_required
+@admin_required
+@limiter.limit("10 per hour")
+def admin_test_cloudinary():
+    """Ping Cloudinary so a bad key is caught here, not on a seller's upload."""
+    status = cloudinary_status()
+    if not status['installed']:
+        flash('The cloudinary package is not installed. Run "pip install -r requirements.txt" '
+              'on the server, then test again.', 'danger')
+        return redirect(url_for('admin_settings'))
+    if not status['enabled']:
+        flash('Enter the cloud name, API key and API secret, save, then test again.', 'danger')
+        return redirect(url_for('admin_settings'))
+
+    # Called for the side effect: it applies the saved keys to the module that
+    # cloudinary.api.ping() then reads from.
+    cloudinary_client()
+    try:
+        import cloudinary.api
+        cloudinary.api.ping()
+    except Exception as exc:
+        app.logger.warning('Cloudinary connection test failed', exc_info=True)
+        log_admin_action('cloudinary_connection_test', 'setting', None, {'ok': False})
+        flash(f'Cloudinary rejected these credentials: {exc}', 'danger')
+        return redirect(url_for('admin_settings'))
+
+    log_admin_action('cloudinary_connection_test', 'setting', None, {'ok': True})
+    flash(f'Cloudinary connected to "{status["cloud_name"]}". New image uploads will be '
+          'stored there and will survive redeploys.', 'success')
     return redirect(url_for('admin_settings'))
 
 
@@ -13517,6 +14077,7 @@ def phase_two_schema_spec():
             ('hot_sale_started_at', 'hot_sale_started_at DATETIME'),
             ('is_original_source', 'is_original_source BOOLEAN DEFAULT 0'),
             ('location_label', 'location_label VARCHAR(200)'),
+            ('excluded_countries', 'excluded_countries TEXT'),
             ('location_county', 'location_county VARCHAR(100)'),
             ('location_lat', 'location_lat FLOAT'),
             ('location_lng', 'location_lng FLOAT'),

@@ -140,6 +140,10 @@ class Config:
     DARAJA_SHORTCODE = os.environ.get('DARAJA_SHORTCODE', '174379')
     DARAJA_ENV = os.environ.get('DARAJA_ENV', 'sandbox')
 
+    CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
+    CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY', '')
+    CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET', '')
+
     FLUTTERWAVE_PUBLIC_KEY = os.environ.get('FLUTTERWAVE_PUBLIC_KEY', '')
     FLUTTERWAVE_SECRET_KEY = os.environ.get('FLUTTERWAVE_SECRET_KEY', '')
     FLUTTERWAVE_ENCRYPTION_KEY = os.environ.get('FLUTTERWAVE_ENCRYPTION_KEY', '')

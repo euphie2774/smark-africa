@@ -107,6 +107,19 @@
         <p class="small text-muted">Weight: {{ product.weight_kg }} kg</p>
         {% endif %}
 
+        {% if delivery_blocked %}
+        <div class="alert alert-warning d-flex align-items-start" role="alert">
+            <i class="fas fa-truck-fast me-2 mt-1"></i>
+            <div>
+                <strong>This seller does not deliver to {{ buyer_country }}.</strong>
+                <div class="small mb-0">
+                    You can still browse the item, but it cannot be shipped to your country.
+                    Change your delivery country at checkout if you have another address.
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
         {% if current_user.is_authenticated and product.category %}
         <form method="POST" action="{{ url_for('follow_category', category_id=product.category.id) }}" class="mb-3">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
@@ -114,6 +127,28 @@
                 <i class="fas fa-bell me-1"></i>{{ 'Unfollow' if is_following_category else 'Follow' }} {{ product.category.name }} updates
             </button>
         </form>
+        {% endif %}
+
+        {% if storefront %}
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+            <span class="text-muted small">
+                <i class="fas fa-store me-1"></i>Sold by <strong>{{ storefront.business_name }}</strong>
+            </span>
+            {% if current_user.is_authenticated %}
+            <form method="POST" action="{{ url_for('follow_storefront', storefront_id=storefront.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <button class="btn btn-sm {{ 'btn-success' if is_following_storefront else 'btn-outline-success' }}">
+                    <i class="fas fa-{{ 'check' if is_following_storefront else 'heart' }} me-1"></i>
+                    {{ 'Following shop' if is_following_storefront else 'Follow shop' }}
+                </button>
+            </form>
+            {% else %}
+            <a href="{{ url_for('login', next=request.path) }}" class="btn btn-sm btn-outline-success">
+                <i class="fas fa-heart me-1"></i>Follow shop
+            </a>
+            {% endif %}
+            <span class="text-muted small">Get deals and clearance alerts from this shop.</span>
+        </div>
         {% endif %}
 
         <!-- Add to Cart -->

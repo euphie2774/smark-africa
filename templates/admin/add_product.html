@@ -153,6 +153,23 @@
                     </div>
 
                     <div class="col-12">
+                        <label class="form-label fw-bold" for="admin_excluded_countries">Countries this seller cannot deliver to</label>
+                        {% set selected_exclusions = product_excluded_countries(product) if product else [] %}
+                        <select class="form-select" id="admin_excluded_countries" name="excluded_countries"
+                                multiple size="6">
+                            {% for country in excludable_countries() %}
+                            <option value="{{ country }}"
+                                    {% if country in selected_exclusions %}selected{% endif %}>{{ country }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">
+                            Optional. Hold Ctrl (or Cmd) to pick more than one. Anywhere in Kenya stays
+                            deliverable — you can only rule out countries outside Kenya. Buyers see
+                            this only if their own delivery country is on the list.
+                        </div>
+                    </div>
+
+                    <div class="col-12">
                         <label class="form-label fw-bold">Product Images</label>
                         <div>
                             <input type="file" name="product_images" class="form-control" accept="image/png,image/jpeg,image/gif,image/webp" multiple>

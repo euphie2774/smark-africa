@@ -150,6 +150,13 @@
                             payment confirmations, so STK pushes will never complete.
                         </div>
                         {% endif %}
+                        {% if daraja_status.sandbox_default_passkey %}
+                        <div class="alert alert-info mb-2 py-2 small">
+                            <i class="fas fa-flask me-1"></i>The sandbox portal lists the passkey as <code>N/A</code>,
+                            so Safaricom's published sandbox test passkey is being used automatically. STK pushes will
+                            work for testing. Enter your own passkey before switching to production.
+                        </div>
+                        {% endif %}
                         <div class="small text-muted">
                             Sending to <code>{{ daraja_status.host }}</code>
                             as <strong>{{ daraja_status.env }}</strong>, shortcode <strong>{{ daraja_status.shortcode or 'not set' }}</strong>.
@@ -165,6 +172,60 @@
                     </div>
                 </div>
                 {% endif %}
+            </div>
+        </div>
+
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Image hosting (Cloudinary)</h5>
+                {% if cloudinary.enabled %}
+                <span class="badge bg-success">Active</span>
+                {% else %}
+                <span class="badge bg-secondary">Local storage</span>
+                {% endif %}
+            </div>
+            <div class="card-body">
+                {% if cloudinary.enabled %}
+                <div class="alert alert-success py-2 small">
+                    <i class="fas fa-cloud-arrow-up me-1"></i>New uploads go to
+                    <strong>{{ cloudinary.cloud_name }}</strong> and survive redeploys.
+                    Images already saved locally keep serving from this server.
+                </div>
+                {% elif not cloudinary.installed %}
+                <div class="alert alert-warning py-2 small">
+                    <i class="fas fa-triangle-exclamation me-1"></i>The <code>cloudinary</code> package
+                    is not installed. Run <code>pip install -r requirements.txt</code> on the server.
+                </div>
+                {% else %}
+                <div class="alert alert-warning py-2 small">
+                    <i class="fas fa-triangle-exclamation me-1"></i>Not configured, so uploads still go to
+                    <code>static/uploads</code> and will break on the next redeploy. Add the three values
+                    below from your Cloudinary dashboard.
+                </div>
+                {% endif %}
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label">Cloud name</label>
+                        <input name="cloudinary_cloud_name" class="form-control"
+                               value="{{ settings.cloudinary_cloud_name or '' }}" placeholder="e.g. dxyz1234">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">API key</label>
+                        <input name="cloudinary_api_key" class="form-control"
+                               value="{{ settings.cloudinary_api_key or '' }}">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">API secret</label>
+                        <input type="password" name="cloudinary_api_secret" class="form-control"
+                               value="{{ settings.cloudinary_api_secret or '' }}">
+                    </div>
+                    <div class="col-12 text-lg-end">
+                        <button type="submit" form="cloudinaryTestForm" class="btn btn-outline-primary">
+                            <i class="fas fa-plug-circle-check me-1"></i>Test Cloudinary connection
+                        </button>
+                        <div class="form-text">Save first, then test the stored credentials.</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -458,6 +519,10 @@
     <!-- Kept outside the settings form so the Daraja test cannot submit a half-filled form.
          The button lives in the Daraja card and targets this form by id. -->
     <form id="darajaTestForm" method="POST" action="{{ url_for('admin_test_daraja') }}" class="d-none">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+    </form>
+
+    <form id="cloudinaryTestForm" method="POST" action="{{ url_for('admin_test_cloudinary') }}" class="d-none">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
     </form>
 </div>

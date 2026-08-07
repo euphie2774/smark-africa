@@ -129,6 +129,11 @@ class Product(db.Model):
     location_lat = db.Column(db.Float)
     location_lng = db.Column(db.Float)
 
+    # Countries the seller will not ship to, as a JSON list of country names.
+    # Kenya and its counties are never excludable - the home market always
+    # delivers - so this only ever holds countries outside Kenya.
+    excluded_countries = db.Column(db.Text)
+
     # Media
     image_url = db.Column(db.String(500))
     additional_images = db.Column(db.Text)  # JSON list
@@ -473,6 +478,37 @@ class AdCampaign(db.Model):
 
     seller = db.relationship('User', lazy=True)
     product = db.relationship('Product', lazy=True)
+
+
+class SocialAdPost(db.Model):
+    """An ad queued for posting to a social platform by an admin.
+
+    Sellers never touch this table: they buy a campaign through AdCampaign and
+    an admin turns a paid campaign into a post here, recording the live URL.
+    """
+    __tablename__ = 'social_ad_posts'
+    __table_args__ = (
+        db.Index('ix_social_ad_posts_status_created', 'status', 'created_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    # Nullable so admins can also post house ads with no seller behind them.
+    campaign_id = db.Column(db.Integer, db.ForeignKey('ad_campaigns.id'), nullable=True)
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=True)
+    platform = db.Column(db.String(40), default='instagram')
+    caption = db.Column(db.Text)
+    hashtags = db.Column(db.String(600))
+    creative_url = db.Column(db.String(500))
+    scheduled_for = db.Column(db.DateTime)
+    status = db.Column(db.String(30), default='draft')  # draft|scheduled|posted|archived
+    posted_url = db.Column(db.String(500))
+    posted_at = db.Column(db.DateTime)
+    posted_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    campaign = db.relationship('AdCampaign', lazy=True)
+    product = db.relationship('Product', lazy=True)
+    posted_by = db.relationship('User', lazy=True, foreign_keys=[posted_by_id])
 
 
 class Manufacturer(db.Model):
@@ -949,6 +985,22 @@ class CategoryFollow(db.Model):
 
     user = db.relationship('User', lazy=True)
     category = db.relationship('Category', lazy=True)
+
+
+class StorefrontFollow(db.Model):
+    """A shopper following a shop, so they hear about its deals and clearances."""
+    __tablename__ = 'storefront_follows'
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'storefront_id', name='uq_storefront_follow'),
+        db.Index('ix_storefront_follows_storefront', 'storefront_id'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    storefront_id = db.Column(db.Integer, db.ForeignKey('business_storefronts.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', lazy=True)
+    storefront = db.relationship('BusinessStorefront', lazy=True)
 
 
 class PriceAlert(db.Model):
