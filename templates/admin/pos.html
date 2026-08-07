@@ -273,6 +273,7 @@
                         <div class="col-md-8"><input name="barcode" class="form-control" placeholder="Barcode optional; auto-generated if blank"></div>
                         <div class="col-md-4"><input name="weight_kg" type="number" step="0.01" min="0" class="form-control" placeholder="Kg"></div>
                         <div class="col-12"><input name="short_description" class="form-control" placeholder="SKU, supplier code, brand, pack size"></div>
+                        <div class="col-12"><div class="form-text">Scanning a sold-out item sends its barcode here. Saving with that barcode restocks the existing product instead of creating a new one.</div></div>
                         <div class="col-12"><button class="btn btn-gold w-100"><i class="fas fa-plus me-1"></i>Save Product</button></div>
                     </form>
                 </div>
@@ -467,13 +468,37 @@
         const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
         return token ? {'Content-Type': 'application/json', 'X-CSRFToken': token} : {'Content-Type': 'application/json'};
     }
+    function registrationForm() {
+        const marker = document.querySelector('form input[name="action"][value="quick_product"]');
+        return marker ? marker.closest('form') : null;
+    }
     function populateRegistrationBarcode(barcode) {
-        const regBarcodeField = document.querySelector('input[name="barcode"]');
+        const regForm = registrationForm();
+        const regBarcodeField = regForm ? regForm.querySelector('input[name="barcode"]')
+                                        : document.querySelector('input[name="barcode"]');
         const clean = String(barcode || '').trim();
         if (!regBarcodeField || !clean) return;
         regBarcodeField.value = clean;
         regBarcodeField.classList.add('border-warning');
         setTimeout(() => regBarcodeField.classList.remove('border-warning'), 3000);
+    }
+    // A sold-out scan skips the cart. Send the barcode and name to Register Product
+    // so the cashier can restock it on the spot.
+    function handleOutOfStock(data) {
+        populateRegistrationBarcode(data.register_barcode || data.barcode || '');
+        const regForm = registrationForm();
+        if (regForm) {
+            const nameField = regForm.querySelector('input[name="name"]');
+            if (nameField && !nameField.value.trim() && data.product_name) {
+                nameField.value = data.product_name;
+            }
+            regForm.scrollIntoView({behavior: 'smooth', block: 'center'});
+            const stockField = regForm.querySelector('input[name="stock"]');
+            if (stockField) stockField.focus();
+        }
+        if (status) {
+            status.textContent = data.error || 'out of stock - barcode sent to Register Product';
+        }
     }
     async function pollPhoneScanner() {
         try {
@@ -481,8 +506,16 @@
             if (!response.ok) return;
             const data = await response.json();
             if (!data.success) return;
-            if (data.barcode) populateRegistrationBarcode(data.barcode);
             if (data.cart) renderCart(data.cart);
+            if (data.out_of_stock) {
+                handleOutOfStock({
+                    register_barcode: data.barcode,
+                    product_name: data.product_name,
+                    error: `${data.product_name || 'Item'} is out of stock - barcode sent to Register Product`
+                });
+                return;
+            }
+            if (data.barcode) populateRegistrationBarcode(data.barcode);
             if (data.product_name) {
                 if (status) status.textContent = `${data.action === 'remove' ? 'removed' : 'received'} ${data.product_name}`;
             } else if (data.barcode) {
@@ -514,6 +547,9 @@
                 renderCart(data.cart);
                 input.value = '';
                 if (status) status.textContent = 'added from barcode input';
+            } else if (data.out_of_stock) {
+                handleOutOfStock(data);
+                input.value = '';
             } else if (status) {
                 status.textContent = data.error || 'barcode not found';
             }
@@ -533,6 +569,8 @@
         if (data.success) {
             renderCart(data.cart);
             if (status) status.textContent = `added from ${sourceLabel}`;
+        } else if (data.out_of_stock) {
+            handleOutOfStock(data);
         } else {
             if (status) status.textContent = data.error || 'barcode not found';
         }

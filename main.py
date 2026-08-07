@@ -3972,6 +3972,32 @@ def save_pos_terminal_cart(lines, user_id=None):
     Setting.set(pos_terminal_key(user_id), json.dumps(clean_lines))
 
 
+def pos_product_out_of_stock(product):
+    """True when a scanned product has no stock left to sell.
+
+    Digital goods have nothing to count, so they are always sellable. Used by every
+    scan entry point to route a sold-out barcode to the registration form instead of
+    the cart.
+    """
+    if product is None:
+        return False
+    if getattr(product, 'is_digital', False):
+        return False
+    return int(product.stock or 0) <= 0
+
+
+def pos_out_of_stock_response(product, barcode):
+    """Payload telling the POS screen to send this barcode to Register Product."""
+    return {
+        'success': False,
+        'out_of_stock': True,
+        'register_barcode': (barcode or getattr(product, 'pos_barcode', '') or ''),
+        'product_id': product.id,
+        'product_name': product.name,
+        'error': f'{product.name} is out of stock. Barcode moved to Register Product.',
+    }
+
+
 def add_product_to_pos_terminal(product, quantity=1, user_id=None):
     lines = pos_terminal_cart(user_id)
     for line in lines:
@@ -7778,7 +7804,21 @@ def award_coins(user_id, amount, coin_type, description='', reference_id=''):
     return txn
 
 
+# Raffle tickets are cash-only. Coins are earned for free through check-ins,
+# reviews and referrals, so letting them buy tickets would hand out entries into a
+# prize draw at no cost. Blocked here rather than only at the route so no later
+# caller can reintroduce it.
+COIN_SPEND_BLOCKED_TYPES = {'raffle', 'raffle_ticket', 'raffle_ticket_sale', 'raffle_entry'}
+
+
+def coin_spend_is_allowed(coin_type):
+    return str(coin_type or '').strip().lower() not in COIN_SPEND_BLOCKED_TYPES
+
+
 def spend_coins(user_id, amount, coin_type, description='', reference_id=''):
+    if not coin_spend_is_allowed(coin_type):
+        app.logger.warning('Blocked coin spend of type %s for user %s', coin_type, user_id)
+        return None
     current_balance = get_user_coin_balance(user_id)
     if amount > current_balance:
         return None
@@ -7867,19 +7907,12 @@ def coins_page():
     transactions = CoinTransaction.query.filter_by(user_id=current_user.id).order_by(
         CoinTransaction.created_at.desc()).limit(30).all()
 
-    # Leaderboard (top 10)
-    from sqlalchemy import func as sqfunc
-    leaderboard = db.session.query(
-        User.username,
-        sqfunc.coalesce(
-            db.session.query(CoinTransaction.balance_after)
-            .filter(CoinTransaction.user_id == User.id)
-            .order_by(CoinTransaction.created_at.desc())
-            .limit(1)
-            .correlate(User)
-            .scalar_subquery(), 0
-        ).label('balance')
-    ).filter(User.is_active == True).order_by(db.text('balance DESC')).limit(10).all()
+    # Top collectors are for admins only: the board names other shoppers and
+    # shows their balances, so shoppers never see it. Skip the query entirely
+    # rather than hide the result in the template.
+    leaderboard = []
+    if getattr(current_user, 'is_admin', False):
+        leaderboard = coin_leaderboard()
 
     return render_template('coins.html',
                            balance=balance,
@@ -7895,6 +7928,22 @@ def coins_page():
                                'streak_bonus_7day': coin_setting('coins_streak_bonus_7day', 25),
                                'event_participation': coin_setting('coins_event_participation', 20),
                            })
+
+
+def coin_leaderboard(limit=10):
+    """Top coin holders. Admin-facing only - see coins_page."""
+    from sqlalchemy import func as sqfunc
+    return db.session.query(
+        User.username,
+        sqfunc.coalesce(
+            db.session.query(CoinTransaction.balance_after)
+            .filter(CoinTransaction.user_id == User.id)
+            .order_by(CoinTransaction.created_at.desc())
+            .limit(1)
+            .correlate(User)
+            .scalar_subquery(), 0
+        ).label('balance')
+    ).filter(User.is_active == True).order_by(db.text('balance DESC')).limit(limit).all()
 
 
 @app.route('/coins/check-in', methods=['POST'])
@@ -7966,6 +8015,11 @@ def raffle_buy_ticket(raffle_id):
     raffle = Raffle.query.get_or_404(raffle_id)
     if raffle.status != 'active':
         flash('This raffle is no longer accepting tickets.', 'warning')
+        return redirect(url_for('raffle_detail', raffle_id=raffle_id))
+
+    # Tickets are cash-only - see COIN_SPEND_BLOCKED_TYPES.
+    if (request.form.get('pay_with', '') or '').strip().lower() in ('coins', 'coin'):
+        flash('Raffle tickets cannot be paid for with coins. Use M-Pesa.', 'warning')
         return redirect(url_for('raffle_detail', raffle_id=raffle_id))
 
     qty = request.form.get('quantity', 1, type=int)
@@ -9363,6 +9417,29 @@ def admin_pos():
             if not name or selling_price <= 0:
                 flash('Product name and selling price are required.', 'danger')
                 return redirect(url_for('admin_pos'))
+
+            # An out-of-stock scan drops its barcode into this form, so the barcode
+            # often already belongs to a product. Restock that one instead of
+            # creating a duplicate, which assign_product_barcode would reject anyway.
+            typed_barcode = request.form.get('barcode', '').strip()
+            existing_product = product_by_barcode(typed_barcode) if typed_barcode else None
+            if existing_product:
+                if selling_price > 0:
+                    existing_product.selling_price = selling_price
+                if buying_price > 0:
+                    existing_product.buying_price = max(0, buying_price)
+                existing_product.vat_applicable = vat_applicable
+                existing_product.vat_rate = vat_rate
+                if stock:
+                    record_stock_movement(existing_product, 'goods_received', stock, 'pos_product',
+                                          existing_product.id, 'Restocked from POS after an out-of-stock scan')
+                if not existing_product.is_active:
+                    existing_product.is_active = True
+                db.session.commit()
+                flash(f'{existing_product.name} restocked to {existing_product.stock or 0} '
+                      f'(barcode {typed_barcode}).', 'success')
+                return redirect(url_for('admin_pos'))
+
             slug = slugify(name, 180)
             base_slug = slug
             counter = 1
@@ -10025,7 +10102,8 @@ def pos_pair_scan_push(token):
         return jsonify({'success': False, 'error': 'No barcode received'}), 400
     product = product_by_barcode(barcode)
     user_id = int(pairing['user_id'])
-    if product:
+    sold_out = action != 'remove' and pos_product_out_of_stock(product)
+    if product and not sold_out:
         if action == 'remove':
             remove_product_from_pos_terminal(product, 1, user_id=user_id)
         else:
@@ -10035,12 +10113,15 @@ def pos_pair_scan_push(token):
         'action': action,
         'product_id': product.id if product else None,
         'product_name': product.name if product else '',
+        'out_of_stock': bool(sold_out),
         'cart': pos_terminal_payload(user_id=user_id),
         'received_at': utcnow().isoformat()
     }))
     db.session.commit()
     if not product:
         return jsonify({'success': False, 'error': f'No product found for barcode: {barcode}', 'barcode': barcode})
+    if sold_out:
+        return jsonify(pos_out_of_stock_response(product, barcode)), 409
     return jsonify({'success': True, 'barcode': barcode, 'product': product.name, 'action': action})
 
 
@@ -10055,7 +10136,8 @@ def admin_pos_scan_push():
     if not barcode:
         return jsonify({'success': False, 'error': 'No barcode received'}), 400
     product = product_by_barcode(barcode)
-    if product:
+    sold_out = action != 'remove' and pos_product_out_of_stock(product)
+    if product and not sold_out:
         if action == 'remove':
             remove_product_from_pos_terminal(product, 1)
         else:
@@ -10065,12 +10147,15 @@ def admin_pos_scan_push():
         'action': action,
         'product_id': product.id if product else None,
         'product_name': product.name if product else '',
+        'out_of_stock': bool(sold_out),
         'cart': pos_terminal_payload(),
         'received_at': utcnow().isoformat()
     }))
     db.session.commit()
     if not product:
         return jsonify({'success': False, 'error': f'No product found for barcode: {barcode}', 'barcode': barcode})
+    if sold_out:
+        return jsonify(pos_out_of_stock_response(product, barcode)), 409
     return jsonify({'success': True, 'barcode': barcode, 'product': product.name, 'action': action})
 
 
@@ -10114,6 +10199,10 @@ def admin_pos_cart_add():
     product = product_by_barcode(barcode) if barcode else Product.query.get(product_id) if product_id else None
     if not product:
         return jsonify({'success': False, 'error': 'Product not found'}), 404
+    # A sold-out item must not join the sale. Hand the barcode back so the screen
+    # can drop it into Register Product for a restock instead.
+    if action != 'remove' and pos_product_out_of_stock(product):
+        return jsonify(pos_out_of_stock_response(product, barcode)), 409
     if action == 'remove':
         remove_product_from_pos_terminal(product, int(data.get('quantity') or 1))
     else:

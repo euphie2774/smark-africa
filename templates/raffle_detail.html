@@ -154,7 +154,7 @@
                 <div class="card-body small">
                     <h6><i class="fas fa-info-circle text-warning me-1"></i>How it works</h6>
                     <ol class="text-muted ps-3 mb-0">
-                        <li>Buy one or more tickets at KSh {{ "%.0f"|format(raffle.ticket_price) }} each</li>
+                        <li>Buy one or more tickets at KSh {{ "%.0f"|format(raffle.ticket_price) }} each, paid by M-Pesa. Coins cannot be used for raffle tickets.</li>
                         <li>The raffle can end when {{ raffle.min_participants or raffle.total_tickets }} different buyers join, on the due date, or when an authorized admin ends it</li>
                         <li>The winner gets the product worth KSh {{ "%.0f"|format(raffle.product_value) }}</li>
                         <li>The buyer holding the most tickets wins</li>
