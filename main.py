@@ -10,7 +10,7 @@ from io import BytesIO, StringIO
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, send_from_directory, abort, make_response, g
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, send_from_directory, abort, make_response, g, has_request_context
 from flask_login import (LoginManager, login_user, logout_user,
                          login_required, current_user)
 from flask_wtf.csrf import CSRFProtect, CSRFError
@@ -1946,11 +1946,16 @@ def resolve_destination(country=None, county=None, city=None, address=None, lat=
 
 def quote_shipping(country=None, county=None, city=None, address=None,
                    lat=None, lng=None, weight_kg=0.0, order_value=0.0,
-                   order_id=None, user_id=None, persist=False):
+                   order_id=None, user_id=None, persist=False,
+                   origin_lat=None, origin_lng=None, origin_label=None):
     """Price a delivery and explain how the number was reached.
 
     Returns a dict with the amount plus every input and intermediate value, so
     the UI can show a breakdown and support can audit a disputed charge.
+
+    origin_* overrides the global dispatch point, which is how a per-product
+    quote is priced from where the item actually is: a Kisumu shop billing a
+    Kirinyaga buyer measures that distance, not Nairobi's.
     """
     country = (country or 'Kenya').strip() or 'Kenya'
     try:
@@ -1962,7 +1967,22 @@ def quote_shipping(country=None, county=None, city=None, address=None,
     except (TypeError, ValueError):
         value = 0.0
 
-    origin_point, origin_label = shipping_origin_point()
+    origin_point, resolved_origin_label = shipping_origin_point()
+    if origin_lat is not None and origin_lng is not None:
+        try:
+            candidate = GeoPoint(float(origin_lat), float(origin_lng))
+        except (TypeError, ValueError):
+            candidate = None
+        if candidate and candidate.is_valid():
+            origin_point = candidate
+            resolved_origin_label = origin_label or resolved_origin_label
+    elif origin_label:
+        hit = cached_geocode(cache, origin_label, country)
+        if hit.found:
+            origin_point = hit.point
+            resolved_origin_label = origin_label
+    origin_label = resolved_origin_label
+
     dest_point, dest_county, dest_label = resolve_destination(
         country=country, county=county, city=city, address=address, lat=lat, lng=lng
     )
@@ -2093,6 +2113,256 @@ def quote_shipping(country=None, county=None, city=None, address=None,
             app.logger.warning('Could not persist shipping quote', exc_info=True)
 
     return result
+
+
+def product_origin(product):
+    """Where a product ships from, and the label to show for it.
+
+    A product's own pin wins; otherwise it inherits its storefront's pin, then
+    the seller's county, then the platform dispatch origin. Nothing is asked of
+    the seller at listing time - the origin is whatever the account already has.
+    """
+    if product is None:
+        point, label = shipping_origin_point()
+        return point.lat, point.lng, label
+
+    label = (product.location_label or product.location_county or '').strip()
+    if product.location_lat is not None and product.location_lng is not None:
+        return product.location_lat, product.location_lng, label or None
+
+    storefront = None
+    if product.seller_id:
+        try:
+            storefront = BusinessStorefront.query.filter_by(
+                owner_id=product.seller_id).order_by(BusinessStorefront.id.asc()).first()
+        except SQLAlchemyError:
+            db.session.rollback()
+            storefront = None
+    if storefront:
+        shop_label = label or storefront.location_label or storefront.location_county
+        if storefront.location_lat is not None and storefront.location_lng is not None:
+            return storefront.location_lat, storefront.location_lng, shop_label
+        if shop_label:
+            return None, None, shop_label
+
+    if label:
+        return None, None, label
+
+    seller = getattr(product, 'seller', None)
+    seller_place = ''
+    if seller is not None:
+        seller_place = (getattr(seller, 'county', '') or getattr(seller, 'city', '') or '').strip()
+    if seller_place:
+        return None, None, seller_place
+
+    point, origin_label = shipping_origin_point()
+    return point.lat, point.lng, origin_label
+
+
+def product_ships_free(product):
+    """True when this item's delivery is on the house."""
+    return bool(product is not None and getattr(product, 'free_delivery', False))
+
+
+def buyer_delivery_location(user=None):
+    """Best guess at where a shopper wants things delivered.
+
+    Checked in order: the area they picked this session, the address on their
+    most recent order, then the country on their account. Returns a dict so the
+    UI can say which one it used and offer to change it.
+    """
+    # Callable from background jobs too, where there is no session to read.
+    picked = (session.get('delivery_location') or {}) if has_request_context() else {}
+    if picked.get('county') or picked.get('city') or picked.get('country'):
+        return {
+            'country': picked.get('country') or 'Kenya',
+            'county': picked.get('county') or '',
+            'city': picked.get('city') or '',
+            'address': picked.get('address') or '',
+            'source': 'chosen',
+        }
+
+    if user is not None and getattr(user, 'is_authenticated', False):
+        try:
+            recent = Order.query.filter(
+                Order.user_id == user.id,
+                Order.payment_status.in_(ORDER_PAID_STATUSES)
+            ).order_by(Order.created_at.desc()).first()
+        except SQLAlchemyError:
+            db.session.rollback()
+            recent = None
+        if recent and (recent.shipping_state or recent.shipping_city):
+            return {
+                'country': recent.shipping_country or 'Kenya',
+                'county': recent.shipping_state or '',
+                'city': recent.shipping_city or '',
+                'address': recent.shipping_address or '',
+                'source': 'last_order',
+            }
+        if getattr(user, 'country', None):
+            return {'country': user.country, 'county': '', 'city': '', 'address': '',
+                    'source': 'account'}
+
+    return {'country': '', 'county': '', 'city': '', 'address': '', 'source': 'unknown'}
+
+
+def quote_product_delivery(product, user=None, country=None, county=None,
+                           city=None, address=None, lat=None, lng=None,
+                           quantity=1, persist=False, order_value=None):
+    """Delivery price for one product to one buyer's location.
+
+    Falls back to the buyer's remembered delivery area when no explicit
+    destination is given, which is what lets a product page show a personalised
+    figure without the shopper typing anything.
+    """
+    try:
+        qty = max(1, int(quantity or 1))
+    except (TypeError, ValueError):
+        qty = 1
+
+    if country is None and county is None and city is None and address is None:
+        known = buyer_delivery_location(user)
+        country, county = known['country'], known['county']
+        city, address = known['city'], known['address']
+
+    has_destination = any((country, county, city, address)) or (lat is not None and lng is not None)
+    o_lat, o_lng, o_label = product_origin(product)
+    unit_price = (product.discounted_price or product.selling_price) if product else 0.0
+    weight = (getattr(product, 'weight_kg', 0.0) or 0.0) * qty
+
+    if product_ships_free(product):
+        return {
+            'total_amount': 0.0, 'currency': 'KSh', 'free_delivery': True,
+            'has_destination': has_destination, 'is_digital': bool(getattr(product, 'is_digital', False)),
+            'origin_label': o_label, 'destination_label': address or city or county or country,
+            'destination_county': county, 'distance_km': 0.0, 'weight_kg': weight,
+            'explanation': 'The seller covers delivery on this item.',
+            'zone_name': None, 'estimated_days_min': None, 'estimated_days_max': None,
+        }
+
+    if getattr(product, 'is_digital', False):
+        return {
+            'total_amount': 0.0, 'currency': 'KSh', 'free_delivery': True,
+            'has_destination': has_destination, 'is_digital': True,
+            'origin_label': o_label, 'destination_label': None, 'destination_county': county,
+            'distance_km': 0.0, 'weight_kg': 0.0,
+            'explanation': 'Digital download - nothing to deliver.',
+            'zone_name': None, 'estimated_days_min': None, 'estimated_days_max': None,
+        }
+
+    # order_value drives the "free over KSh X" threshold. When quoting inside a
+    # cart we pass the whole cart's value, so a big basket still earns free
+    # delivery instead of each line being judged on its own.
+    basket_value = unit_price * qty if order_value is None else order_value
+    quote = quote_shipping(
+        country=country, county=county, city=city, address=address,
+        lat=lat, lng=lng, weight_kg=weight, order_value=basket_value,
+        user_id=getattr(user, 'id', None), persist=persist,
+        origin_lat=o_lat, origin_lng=o_lng, origin_label=o_label,
+    )
+    quote['free_delivery'] = quote['total_amount'] <= 0
+    quote['has_destination'] = has_destination
+    quote['is_digital'] = False
+    return quote
+
+
+def quote_cart_delivery(cart_items, user=None, country=None, county=None,
+                        city=None, address=None, persist=False):
+    """Delivery for a whole cart, priced from each seller's own location.
+
+    Items are grouped by where they ship from, so a cart mixing a Kisumu shop
+    and a Kiambu shop pays the real cost of both legs to the buyer's area, while
+    two items from the same shop travel as one delivery. Free-delivery and
+    digital lines contribute nothing. This is the same engine the product page
+    quotes with, so the figure the buyer was shown is the figure they pay.
+    """
+    # Everything leaving the same pickup point is one delivery, so it is quoted
+    # once on the combined weight. Quoting line by line would charge the minimum
+    # fee (and any flat zone fee) again for every item in the basket.
+    cart_value = sum((item.product.discounted_price or item.product.selling_price or 0)
+                     * item.quantity
+                     for item in cart_items if getattr(item, 'product', None))
+
+    lines = []
+    groups = {}
+    for item in cart_items:
+        product = getattr(item, 'product', None)
+        if product is None:
+            continue
+        line = {
+            'item_id': getattr(item, 'id', None),
+            'product_id': product.id,
+            'product_name': product.name,
+            'quantity': item.quantity,
+            'amount': 0.0,
+            'free_delivery': True,
+            'is_digital': bool(getattr(product, 'is_digital', False)),
+            'origin_label': None,
+            'weight_kg': (getattr(product, 'weight_kg', 0.0) or 0.0) * item.quantity,
+            'explanation': '',
+            'estimated_days_min': None,
+            'estimated_days_max': None,
+        }
+        lines.append(line)
+
+        if line['is_digital']:
+            line['weight_kg'] = 0.0
+            line['explanation'] = 'Digital download - nothing to deliver.'
+            continue
+        if product_ships_free(product):
+            line['origin_label'] = product_origin(product)[2]
+            line['explanation'] = 'The seller covers delivery on this item.'
+            continue
+
+        o_lat, o_lng, o_label = product_origin(product)
+        line['origin_label'] = o_label
+        key = (round(o_lat, 4) if o_lat is not None else None,
+               round(o_lng, 4) if o_lng is not None else None,
+               o_label or '')
+        groups.setdefault(key, []).append(line)
+
+    total = 0.0
+    for (o_lat, o_lng, o_label), members in groups.items():
+        weight = sum(member['weight_kg'] for member in members)
+        quote = quote_shipping(
+            country=country, county=county, city=city, address=address,
+            weight_kg=weight, order_value=cart_value,
+            user_id=getattr(user, 'id', None), persist=persist,
+            origin_lat=o_lat, origin_lng=o_lng, origin_label=o_label or None,
+        )
+        amount = round(quote.get('total_amount') or 0.0, 2)
+        total += amount
+
+        # Split the one delivery charge across its items by weight, so the
+        # per-item column still adds up to what is billed.
+        shares = [member['weight_kg'] for member in members]
+        pool = sum(shares) or float(len(members))
+        if not sum(shares):
+            shares = [1.0] * len(members)
+        running = 0.0
+        for index, member in enumerate(members):
+            member['free_delivery'] = amount <= 0
+            member['explanation'] = quote.get('explanation') or ''
+            member['distance_km'] = quote.get('distance_km')
+            member['estimated_days_min'] = quote.get('estimated_days_min')
+            member['estimated_days_max'] = quote.get('estimated_days_max')
+            if index == len(members) - 1:
+                member['amount'] = round(amount - running, 2)
+            else:
+                member['amount'] = round(amount * shares[index] / pool, 2)
+                running += member['amount']
+
+    priced = [line for line in lines if not line['is_digital']]
+    return {
+        'total_amount': round(total, 2),
+        'currency': 'KSh',
+        'lines': lines,
+        'free_delivery': bool(priced) and total <= 0,
+        'has_physical': bool(priced),
+    }
+
+
+app.jinja_env.globals['product_ships_free'] = product_ships_free
 
 
 def daraja_base_url(env=None):
@@ -4301,7 +4571,11 @@ def architecture_snapshot():
 
 
 def ensure_customer_notifications(user, limit=8):
-    orders = Order.query.filter_by(user_id=user.id).order_by(Order.updated_at.desc(), Order.created_at.desc()).limit(8).all()
+    # Unpaid checkouts are not orders yet, so they get no tracking or payment notices.
+    orders = Order.query.filter(
+        Order.user_id == user.id,
+        Order.payment_status.in_(ORDER_PAID_STATUSES)
+    ).order_by(Order.updated_at.desc(), Order.created_at.desc()).limit(limit).all()
     for order in orders:
         physical_items = [item for item in order.items if not item.is_digital]
         if physical_items:
@@ -5899,6 +6173,47 @@ def shop_image_search():
     )
 
 
+@app.route('/delivery/quote/<int:product_id>')
+def delivery_quote_api(product_id):
+    """Re-price one product's delivery for a county the shopper picked.
+
+    Used by the product page so changing the destination updates the figure
+    without a reload, and by the cart for the same reason.
+    """
+    product = Product.query.get_or_404(product_id)
+    county = (request.args.get('county') or '').strip()
+    city = (request.args.get('city') or '').strip()
+    country = (request.args.get('country') or ('Kenya' if county or city else '')).strip()
+
+    if county or city or country:
+        session['delivery_location'] = {
+            'country': country or 'Kenya', 'county': county, 'city': city, 'address': '',
+        }
+        session.modified = True
+        quote = quote_product_delivery(
+            product, user=current_user,
+            country=country or 'Kenya', county=county, city=city, address='')
+    else:
+        quote = quote_product_delivery(product, user=current_user)
+
+    return jsonify({
+        'success': True,
+        'amount': quote['total_amount'],
+        'display': 'Free delivery' if quote['total_amount'] <= 0 else f"KSh {quote['total_amount']:,.2f}",
+        'free_delivery': bool(quote.get('free_delivery')),
+        'origin_label': quote.get('origin_label'),
+        'destination_label': quote.get('destination_label'),
+        'destination_county': quote.get('destination_county'),
+        'distance_km': quote.get('distance_km'),
+        'weight_kg': quote.get('weight_kg'),
+        'zone_name': quote.get('zone_name'),
+        'days_min': quote.get('estimated_days_min'),
+        'days_max': quote.get('estimated_days_max'),
+        'explanation': quote.get('explanation'),
+        'has_destination': bool(quote.get('has_destination')),
+    })
+
+
 @app.route('/product/<slug>')
 def product_page(slug):
     product = Product.query.filter_by(slug=slug, is_active=True).first_or_404()
@@ -5939,6 +6254,13 @@ def product_page(slug):
     buyer_country = getattr(current_user, 'country', None) if current_user.is_authenticated else None
     delivery_blocked = product_delivery_blocked(product, buyer_country)
 
+    # Delivery is priced from where this item actually sits to where the shopper
+    # is, so the figure on the page is the one they will be charged.
+    delivery_location = buyer_delivery_location(current_user)
+    delivery_quote = None
+    if not delivery_blocked:
+        delivery_quote = quote_product_delivery(product, user=current_user)
+
     return render_template('product.html',
                            product=product,
                            reviews=reviews,
@@ -5949,6 +6271,9 @@ def product_page(slug):
                            storefront=storefront,
                            delivery_blocked=delivery_blocked,
                            buyer_country=buyer_country,
+                           delivery_quote=delivery_quote,
+                           delivery_location=delivery_location,
+                           delivery_counties=checkout_address_book().get('Kenya', {}),
                            gallery_images=gallery_images,
                            media_kind=product_media_kind(product),
                            is_music_product=is_music_category(product.category),
@@ -6405,24 +6730,142 @@ def update_cart(item_id=None):
     return jsonify({'success': True})
 
 
+@app.route('/cart/clear', methods=['POST'])
+@login_required
+def clear_cart():
+    """Empty the cart in one go - the way out after a payment that did not complete."""
+    removed = Cart.query.filter_by(user_id=current_user.id).delete(synchronize_session=False)
+    db.session.commit()
+    flash('Cart cleared.' if removed else 'Your cart was already empty.', 'success')
+    return redirect(url_for('cart'))
+
+
+def cart_totals_payload(user_id):
+    """Recomputed cart figures, so a removal can repaint the page without a reload."""
+    items = Cart.query.filter_by(user_id=user_id).all()
+    subtotal = sum((item.product.discounted_price or 0) * item.quantity
+                   for item in items if item.product)
+    return {
+        'cart_count': len(items),
+        'cart_quantity': sum(item.quantity for item in items),
+        'subtotal': round(subtotal, 2),
+        'subtotal_display': f'KSh {subtotal:,.2f}',
+        'is_empty': not items,
+    }
+
+
 @app.route('/cart/remove/<int:item_id>', methods=['POST'])
 @app.route('/api/cart/remove/<int:item_id>', methods=['POST'])
 @login_required
 def remove_cart_item(item_id):
-    wants_json = request.is_json or request.path.startswith('/api/')
+    # The cart page removes items over fetch() and repaints in place, so the
+    # buyer never lands on a separate "item removed" screen. The redirect below
+    # is only the no-JavaScript fallback.
+    wants_json = (request.is_json
+                  or request.path.startswith('/api/')
+                  or request.headers.get('X-Requested-With') == 'XMLHttpRequest')
     item = Cart.query.filter_by(id=item_id, user_id=current_user.id).first()
     if item:
         db.session.delete(item)
         db.session.commit()
     if not wants_json:
-        flash('Item removed from cart.', 'success')
         return redirect(url_for('cart'))
-    return jsonify({'success': True})
+    payload = {'success': True, 'removed': bool(item)}
+    payload.update(cart_totals_payload(current_user.id))
+    return jsonify(payload)
 
 
 # ========================================================================
 # CHECKOUT & PAYMENT ROUTES
 # ========================================================================
+
+# A checkout only becomes an order once the money lands. Until then the buyer keeps
+# their cart, stock stays on the shelf, and nothing appears under My Orders.
+# 'paid' is here only for rows written by the older card path.
+ORDER_PAID_STATUSES = ('completed', 'paid')
+
+
+def order_is_paid(order):
+    return bool(order) and (order.payment_status or '') in ORDER_PAID_STATUSES
+
+
+def forget_order_checkout_ids(order):
+    """Drop the M-Pesa checkout-id bookmarks for an order we no longer wait on."""
+    stale = [f'mpesa_order_checkout_{order.id}']
+    checkout_request_id = Setting.get(f'mpesa_order_checkout_{order.id}', '')
+    if checkout_request_id:
+        stale.append(f'mpesa_checkout_order_{checkout_request_id}')
+    Setting.query.filter(Setting.key.in_(stale)).delete(synchronize_session=False)
+
+
+def abandon_unpaid_order(order, reason=''):
+    """
+    Payment failed, so this checkout stops counting as an order: it drops out of My
+    Orders and the buyer returns to a cart that still holds everything they picked.
+    Stock and seller earnings were never taken, so there is nothing to hand back.
+    """
+    if not order or order_is_paid(order):
+        return False
+    order.payment_status = 'failed'
+    order.status = 'abandoned'
+    if reason:
+        order.notes = f'{order.notes or ""}\n{reason}'.strip()
+    forget_order_checkout_ids(order)
+    db.session.commit()
+    return True
+
+
+def finalize_paid_order(order):
+    """
+    Everything that has to wait for confirmed money: stock comes down, the sale is
+    recorded under buyer/seller protection, and the paid lines leave the cart.
+    Idempotent, because a callback and a status poll can both reach the same order.
+    """
+    if Transaction.query.filter_by(order_id=order.id, type='sale', status='held').first():
+        return False
+
+    for item in order.items:
+        product = item.product
+        if not product:
+            continue
+        if not product.is_digital:
+            product.stock = max(0, (product.stock or 0) - item.quantity)
+        product.sales_count = (product.sales_count or 0) + item.quantity
+
+        commission_percent = commission_for_product(product)
+        line_total = (item.price or 0) * item.quantity
+        commission_amount = round(line_total * commission_percent / 100, 2)
+        seller_amount = round(line_total - commission_amount, 2)
+        db.session.add(Transaction(
+            order_id=order.id,
+            user_id=order.user_id if product.admin_priority else product.seller_id,
+            type='sale',
+            amount=line_total,
+            description=f'Sale held under buyer/seller protection for {product.name}',
+            status='held',
+            commission_amount=commission_amount,
+            tax_amount=0.0,
+            available_on=utcnow() + timedelta(days=7)
+        ))
+        if product.seller_id and not product.admin_priority:
+            db.session.add(Transaction(
+                order_id=order.id,
+                user_id=product.seller_id,
+                type='seller_earning',
+                amount=seller_amount,
+                description=f'Net seller earning after {commission_percent:.0f}% SMARKAFRICA commission',
+                status='pending_review',
+                commission_amount=commission_amount,
+                tax_amount=0.0,
+                available_on=utcnow() + timedelta(days=7)
+            ))
+
+    paid_product_ids = [item.product_id for item in order.items if item.product_id]
+    if paid_product_ids:
+        Cart.query.filter(Cart.user_id == order.user_id,
+                          Cart.product_id.in_(paid_product_ids)).delete(synchronize_session=False)
+    return True
+
 
 @app.route('/checkout', methods=['GET', 'POST'])
 @login_required
@@ -6467,6 +6910,7 @@ def checkout():
         subtotal = 0
         has_physical = False
         total_weight = 0
+        billable_weight = 0
 
         for item in cart_items:
             p = item.product
@@ -6475,14 +6919,24 @@ def checkout():
                 subtotal += price * item.quantity
                 if not p.is_digital:
                     has_physical = True
-                    total_weight += (p.weight_kg or 0) * item.quantity
+                    line_weight = (p.weight_kg or 0) * item.quantity
+                    total_weight += line_weight
+                    # A free-delivery item must not drag the flat-rate fallback up.
+                    if not product_ships_free(p):
+                        billable_weight += line_weight
 
+        # Priced per item from each seller's own location, matching the quote the
+        # product page showed. Items the seller delivers free contribute zero.
         shipping_cost = 0
         if has_physical:
             if shipping_country or shipping_state or shipping_city:
-                shipping_cost = estimate_shipping_cost(shipping_country, shipping_state, shipping_city, total_weight)
+                shipping_cost = quote_cart_delivery(
+                    cart_items, user=current_user, country=shipping_country,
+                    county=shipping_state, city=shipping_city,
+                    address=shipping_address, persist=True,
+                )['total_amount']
             elif shipping_rate_id:
-                shipping_cost = calculate_shipping_cost(shipping_rate_id, total_weight)
+                shipping_cost = calculate_shipping_cost(shipping_rate_id, billable_weight)
 
         total = subtotal + shipping_cost
 
@@ -6516,7 +6970,8 @@ def checkout():
                 description='Your order was received and is waiting for payment confirmation.'
             ))
 
-        # Create order items and reduce stock
+        # Create order items. Stock, seller earnings, and the cart itself are left
+        # alone until payment is confirmed - see finalize_paid_order().
         for item in cart_items:
             p = item.product
             if p:
@@ -6529,42 +6984,6 @@ def checkout():
                     is_digital=p.is_digital
                 )
                 db.session.add(oi)
-
-                if not p.is_digital:
-                    p.stock = max(0, p.stock - item.quantity)
-                p.sales_count = (p.sales_count or 0) + item.quantity
-
-                commission_percent = commission_for_product(p)
-                line_total = (p.discounted_price or p.selling_price) * item.quantity
-                commission_amount = round(line_total * commission_percent / 100, 2)
-                seller_amount = round(line_total - commission_amount, 2)
-                db.session.add(Transaction(
-                    order_id=order.id,
-                    user_id=current_user.id if p.admin_priority else p.seller_id,
-                    type='sale',
-                    amount=line_total,
-                    description=f'Sale held under buyer/seller protection for {p.name}',
-                    status='held',
-                    commission_amount=commission_amount,
-                    tax_amount=0.0,
-                    available_on=utcnow() + timedelta(days=7)
-                ))
-                if p.seller_id and not p.admin_priority:
-                    db.session.add(Transaction(
-                        order_id=order.id,
-                        user_id=p.seller_id,
-                        type='seller_earning',
-                        amount=seller_amount,
-                        description=f'Net seller earning after {commission_percent:.0f}% SMARKAFRICA commission',
-                        status='pending_review',
-                        commission_amount=commission_amount,
-                        tax_amount=0.0,
-                        available_on=utcnow() + timedelta(days=7)
-                    ))
-
-        # Clear cart
-        for item in cart_items:
-            db.session.delete(item)
 
         db.session.commit()
 
@@ -6584,27 +7003,37 @@ def checkout():
             message = result.get("error", "Unknown error")
             if detail and detail not in message:
                 message = f'{message}: {detail}'
-            order.payment_status = 'failed'
-            order.notes = ((order.notes or '') + f'\nSTK initiation failed: {message}').strip()
-            db.session.commit()
-            flash(f'Payment initiation failed: {message}. You can retry from your orders.', 'warning')
-            return redirect(url_for('orders'))
+            abandon_unpaid_order(order, f'STK initiation failed: {message}')
+            flash(f'Payment initiation failed: {message}. Your cart is untouched - '
+                  'try checking out again or clear it below.', 'warning')
+            return redirect(url_for('cart'))
 
     # Calculate totals for display
     subtotal = 0
     total_weight = 0
+    billable_weight = 0
     for item in cart_items:
         if item.product:
             price = item.product.discounted_price or item.product.selling_price
             item.subtotal = price * item.quantity
             subtotal += item.subtotal
             if not item.product.is_digital:
-                total_weight += (item.product.weight_kg or 0) * item.quantity
+                line_weight = (item.product.weight_kg or 0) * item.quantity
+                total_weight += line_weight
+                # The flat-rate fallback bills off this figure, so a free-delivery
+                # item must not add to it. Matches the POST branch above.
+                if not product_ships_free(item.product):
+                    billable_weight += line_weight
 
+    # Preview delivery against wherever we think the buyer is, so the page can
+    # show a real per-item breakdown. The template adds shipping to `total`
+    # itself, so `total` stays pre-shipping.
+    delivery_preview = quote_cart_delivery(cart_items, user=current_user)
     total = subtotal  # before shipping
 
     return render_template('checkout.html', cart_items=cart_items, shipping_rates=shipping_rates, subtotal=subtotal,
-                           total=total, weight_kg=total_weight, shipping_required=total_weight > 0,
+                           total=total, weight_kg=billable_weight, shipping_required=total_weight > 0,
+                           delivery_preview=delivery_preview,
                            address_book=checkout_address_book(),
                            launch_soon_message=LAUNCH_SOON_MESSAGE,
                            show_country_launch_popup=Setting.get('show_country_launch_popup', '1') == '1')
@@ -6617,13 +7046,13 @@ def check_payment(order_id):
     if order.user_id != current_user.id:
         return jsonify({'error': 'Unauthorized'}), 403
 
-    if order.payment_status == 'completed':
+    if order_is_paid(order):
         return jsonify({
             'payment_status': 'completed',
             'mpesa_receipt': order.mpesa_receipt
         })
     elif order.payment_status == 'failed':
-        return jsonify({'payment_status': 'failed'})
+        return jsonify({'payment_status': 'failed', 'cart_url': url_for('cart')})
 
     checkout_request_id = Setting.get(f'mpesa_order_checkout_{order.id}', '')
     if checkout_request_id:
@@ -6643,6 +7072,7 @@ def check_payment(order_id):
                             description='Payment was confirmed. Your item is moving to seller packing and carrier assignment.'
                         ))
                 order.mpesa_receipt = status_data.get('MpesaReceiptNumber') or order.mpesa_receipt
+                finalize_paid_order(order)
 
                 # Record transaction
                 txn = Transaction(
@@ -6671,9 +7101,10 @@ def check_payment(order_id):
                     'mpesa_receipt': order.mpesa_receipt or checkout_request_id
                 })
             elif result_code and str(result_code) != '1032':  # 1032 = user cancelled
-                order.payment_status = 'failed'
-                db.session.commit()
-                return jsonify({'payment_status': 'failed'})
+                abandon_unpaid_order(
+                    order,
+                    f'M-Pesa payment failed: {status_data.get("ResultDesc", result_code)}')
+                return jsonify({'payment_status': 'failed', 'cart_url': url_for('cart')})
 
     return jsonify({'payment_status': 'pending'})
 
@@ -6753,6 +7184,8 @@ def mpesa_callback():
                             description='Payment was confirmed. Your item is moving to seller packing and carrier assignment.'
                         ))
 
+                finalize_paid_order(order)
+
                 existing_txn = Transaction.query.filter_by(order_id=order.id, mpesa_receipt=receipt).first()
                 if not existing_txn:
                     txn = Transaction(
@@ -6781,10 +7214,7 @@ def mpesa_callback():
                         apply_auto_discount(item.product)
                 db.session.commit()
         elif order:
-            order.payment_status = 'failed'
-            failure_note = f'M-Pesa payment failed: {result_desc or merchant_id}'
-            order.notes = f"{order.notes or ''}\n{failure_note}".strip()
-            db.session.commit()
+            abandon_unpaid_order(order, f'M-Pesa payment failed: {result_desc or merchant_id}')
 
         # Also check POS sale payments
         pos_setting = Setting.query.filter_by(key=f'pos_stk_{checkout_id}').first()
@@ -6912,9 +7342,11 @@ def flutterwave_callback():
             order_ref = Setting.query.filter_by(key=f'flw_order_{tx_ref}').first()
             if order_ref:
                 order = Order.query.get(int(order_ref.value))
-                if order and order.payment_status != 'paid':
-                    order.payment_status = 'paid'
+                if order and not order_is_paid(order):
+                    # 'completed' is the status every other query filters on.
+                    order.payment_status = 'completed'
                     order.status = 'processing'
+                    finalize_paid_order(order)
                     db.session.delete(order_ref)
                     db.session.commit()
 
@@ -6929,7 +7361,12 @@ def flutterwave_callback():
 @app.route('/orders')
 @login_required
 def orders():
-    user_orders = Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
+    # Only orders where the money actually arrived. A failed or still-pending
+    # checkout is not an order yet - the buyer's cart is where they pick it up again.
+    user_orders = Order.query.filter(
+        Order.user_id == current_user.id,
+        Order.payment_status.in_(ORDER_PAID_STATUSES)
+    ).order_by(Order.created_at.desc()).all()
     return render_template('orders.html', orders=user_orders)
 
 
@@ -6939,6 +7376,11 @@ def order_detail(order_id):
     order = Order.query.get_or_404(order_id)
     if order.user_id != current_user.id and not current_user.is_admin:
         abort(403)
+    # Admins still need to inspect unpaid attempts; buyers get sent back to the cart.
+    if not order_is_paid(order) and not current_user.is_admin:
+        flash('That checkout was not paid for, so it is not in your orders. '
+              'Your cart still has the items - check out again or clear it.', 'info')
+        return redirect(url_for('cart'))
     return render_template('order_detail.html', order=order)
 
 
@@ -6948,14 +7390,20 @@ def retry_payment(order_id):
     order = Order.query.get_or_404(order_id)
     if order.user_id != current_user.id:
         abort(403)
-    if order.payment_status == 'completed':
+    if order_is_paid(order):
         flash('This order is already paid.', 'info')
         return redirect(url_for('order_detail', order_id=order.id))
+    # A failed checkout was already handed back to the cart, so retrying means
+    # checking out again from there rather than reviving the abandoned attempt.
+    if order.payment_status == 'failed':
+        flash('That payment did not go through. Your cart still has the items - '
+              'check out again or clear the cart.', 'info')
+        return redirect(url_for('cart'))
 
     phone = request.form.get('phone', '').strip() or order.mpesa_phone or current_user.phone
     if not phone:
         flash('Add an M-Pesa phone number before retrying payment.', 'danger')
-        return redirect(url_for('order_detail', order_id=order.id))
+        return redirect(url_for('cart'))
 
     result = stk_push(phone, order.amount_paid, order.order_number)
     if result.get('success'):
@@ -6981,11 +7429,9 @@ def retry_payment(order_id):
     message = result.get('error', 'Unknown error')
     if detail and detail not in message:
         message = f'{message}: {detail}'
-    order.payment_status = 'failed'
-    order.notes = ((order.notes or '') + f'\nSTK retry failed: {message}').strip()
-    db.session.commit()
-    flash(f'Payment retry failed: {message}', 'warning')
-    return redirect(url_for('order_detail', order_id=order.id))
+    abandon_unpaid_order(order, f'STK retry failed: {message}')
+    flash(f'Payment retry failed: {message}. Your cart still has the items.', 'warning')
+    return redirect(url_for('cart'))
 
 
 @app.route('/track/<int:order_id>')
@@ -7151,6 +7597,24 @@ def api_shipping_cost():
     city = data.get('city')
     if not country_is_supported_for_sales(country):
         return jsonify({'shipping_cost': 0, 'available': False, 'message': LAUNCH_SOON_MESSAGE})
+
+    # A signed-in shopper gets their real cart priced line by line, from each
+    # seller's location, so this matches what checkout() will charge. Anonymous
+    # callers fall back to a single weight-based quote.
+    if current_user.is_authenticated:
+        cart_items = Cart.query.filter_by(user_id=current_user.id).all()
+        if cart_items:
+            cart_quote = quote_cart_delivery(
+                cart_items, user=current_user, country=country, county=state,
+                city=city, address=data.get('address'),
+            )
+            return jsonify({
+                'shipping_cost': cart_quote['total_amount'],
+                'available': True,
+                'free_delivery': cart_quote['free_delivery'],
+                'lines': cart_quote['lines'],
+                'breakdown': cart_quote,
+            })
 
     quote = quote_shipping(
         country=country,
@@ -10314,6 +10778,7 @@ def admin_add_product():
 
         product.excluded_countries = serialize_excluded_countries(
             request.form.getlist('excluded_countries'))
+        product.free_delivery = bool(request.form.get('free_delivery'))
 
         # Handle image upload
         product_images = uploaded_product_images()
@@ -10424,6 +10889,7 @@ def admin_edit_product(pid):
         )
         product.excluded_countries = serialize_excluded_countries(
             request.form.getlist('excluded_countries'))
+        product.free_delivery = form_bool('free_delivery')
         product.vat_applicable = form_bool('vat_applicable')
         product.vat_rate = form_float('vat_rate', product.vat_rate or (16 if product.vat_applicable else 0), minimum=0, maximum=100) if product.vat_applicable else 0
         product.product_condition = request.form.get('product_condition', product.product_condition or 'new')
@@ -12081,6 +12547,10 @@ def save_seller_product(product, storefront, is_new):
     # block a domestic county.
     product.excluded_countries = serialize_excluded_countries(
         request.form.getlist('excluded_countries'))
+
+    # Sellers may absorb the delivery charge on a listing; everything else is
+    # priced automatically from the origin above.
+    product.free_delivery = bool(request.form.get('free_delivery'))
     return None
 
 
@@ -14167,6 +14637,7 @@ def phase_two_schema_spec():
             ('is_original_source', 'is_original_source BOOLEAN DEFAULT 0'),
             ('location_label', 'location_label VARCHAR(200)'),
             ('excluded_countries', 'excluded_countries TEXT'),
+            ('free_delivery', 'free_delivery BOOLEAN DEFAULT 0'),
             ('location_county', 'location_county VARCHAR(100)'),
             ('location_lat', 'location_lat FLOAT'),
             ('location_lng', 'location_lng FLOAT'),

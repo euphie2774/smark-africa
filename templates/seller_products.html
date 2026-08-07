@@ -141,6 +141,19 @@
                         </div>
 
                         <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" name="free_delivery" id="free_delivery"
+                                   value="1" {% if product and product.free_delivery %}checked{% endif %}>
+                            <label class="form-check-label" for="free_delivery">
+                                I cover delivery on this item (shows as <strong>Free delivery</strong>)
+                            </label>
+                        </div>
+                        <div class="form-text mb-3">
+                            Leave unticked and buyers see a delivery price worked out automatically
+                            from your shop location to theirs, using the platform per-km and per-kg
+                            rates. You do not set a shipping cost yourself.
+                        </div>
+
+                        <div class="form-check mb-3">
                             <input class="form-check-input" type="checkbox" name="is_active" id="is_active"
                                    value="1" {% if not product or product.is_active %}checked{% endif %}>
                             <label class="form-check-label" for="is_active">Show in the shop straight away</label>

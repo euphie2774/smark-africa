@@ -18,7 +18,7 @@
         </thead>
         <tbody>
             {% for item in cart_items %}
-            <tr>
+            <tr data-cart-row="{{ item.id }}">
                 <td>
                     <div class="d-flex align-items-center">
                         {% if item.product.image_url %}
@@ -27,6 +27,9 @@
                         <div>
                             <a href="{{ url_for('product_page', slug=item.product.slug) }}" class="text-decoration-none fw-bold">{{ item.product.name[:50] }}</a>
                             {% if item.product.is_digital %}<span class="badge bg-info">Digital</span>{% endif %}
+                            {% if item.product.free_delivery and not item.product.is_digital %}
+                            <span class="badge bg-success"><i class="fas fa-truck me-1"></i>Free delivery</span>
+                            {% endif %}
                         </div>
                     </div>
                 </td>
@@ -47,7 +50,8 @@
                 </td>
                 <td class="fw-bold">KSh {{ "%.2f"|format(item.subtotal) }}</td>
                 <td>
-                    <form method="POST" action="{{ url_for('remove_cart_item', item_id=item.id) }}">
+                    <form method="POST" action="{{ url_for('remove_cart_item', item_id=item.id) }}"
+                          class="cart-remove-form" data-row="{{ item.id }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                         <button type="submit" class="btn btn-sm btn-danger">Remove</button>
                     </form>
@@ -58,23 +62,64 @@
         <tfoot>
             <tr class="table-secondary">
                 <td colspan="3" class="text-end fw-bold">Total:</td>
-                <td class="fw-bold fs-5 text-success">KSh {{ "%.2f"|format(total) }}</td>
+                <td class="fw-bold fs-5 text-success" id="cartSubtotal">KSh {{ "%.2f"|format(total) }}</td>
                 <td></td>
             </tr>
         </tfoot>
     </table>
 </div>
 
-<div class="d-flex justify-content-between mt-4">
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-4">
     <a href="{{ url_for('shop') }}" class="btn btn-outline-primary">Continue Shopping</a>
-    <a href="{{ url_for('checkout') }}" class="btn btn-warning btn-lg fw-bold px-5">Proceed to Checkout</a>
+    <div class="d-flex flex-wrap align-items-center gap-2">
+        <form method="POST" action="{{ url_for('clear_cart') }}"
+              onsubmit="return confirm('Remove everything from your cart?');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+            <button type="submit" class="btn btn-outline-danger">Clear Cart</button>
+        </form>
+        <a href="{{ url_for('checkout') }}" class="btn btn-warning btn-lg fw-bold px-5">Proceed to Checkout</a>
+    </div>
 </div>
 
 {% else %}
-<div class="text-center py-5">
+<div class="text-center py-5" id="cartEmptyState">
     <h3 class="text-muted">Your cart is empty</h3>
     <p>Add some products to get started!</p>
     <a href="{{ url_for('shop') }}" class="btn btn-warning btn-lg mt-3">Browse Products</a>
 </div>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+// Removing an item edits the page in place - no navigation, no interstitial
+// "item removed" screen. Falls back to the plain form post if fetch fails.
+document.querySelectorAll('.cart-remove-form').forEach(form => {
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const button = form.querySelector('button');
+        button.disabled = true;
+        try {
+            const res = await fetch(form.action, {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                body: new FormData(form)
+            });
+            const data = await res.json();
+            if (!res.ok || !data.success) throw new Error('remove failed');
+
+            document.querySelector('[data-cart-row="' + form.dataset.row + '"]')?.remove();
+            const subtotal = document.getElementById('cartSubtotal');
+            if (subtotal) subtotal.textContent = data.subtotal_display;
+            document.querySelectorAll('[data-cart-count]').forEach(el => {
+                el.textContent = data.cart_count;
+            });
+            if (data.is_empty) window.location.reload();
+        } catch (err) {
+            form.submit();
+        }
+    });
+});
+</script>
 {% endblock %}

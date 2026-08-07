@@ -120,6 +120,52 @@
         </div>
         {% endif %}
 
+        {% if delivery_quote and not product.is_digital %}
+        <div class="card border-0 bg-light mb-3" id="deliveryQuoteCard"
+             data-product-id="{{ product.id }}"
+             data-quote-url="{{ url_for('delivery_quote_api', product_id=product.id) }}">
+            <div class="card-body py-3">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <span class="fw-semibold">
+                        <i class="fas fa-truck text-success me-2"></i>Delivery
+                    </span>
+                    <span class="fs-5 fw-bold {{ 'text-success' if delivery_quote.free_delivery or delivery_quote.total_amount <= 0 else '' }}"
+                          id="deliveryQuoteAmount">
+                        {% if delivery_quote.free_delivery or delivery_quote.total_amount <= 0 %}
+                        Free delivery
+                        {% else %}
+                        KSh {{ "%.2f"|format(delivery_quote.total_amount) }}
+                        {% endif %}
+                    </span>
+                </div>
+
+                <div class="small text-muted mt-2" id="deliveryQuoteExplain">{{ delivery_quote.explanation }}</div>
+
+                {% if not delivery_quote.free_delivery %}
+                <div class="row g-2 mt-2 align-items-end">
+                    <div class="col-sm-7">
+                        <label class="form-label small mb-1" for="deliveryCounty">Deliver to</label>
+                        <select class="form-select form-select-sm" id="deliveryCounty">
+                            <option value="">Choose your county…</option>
+                            {% for county in delivery_counties %}
+                            <option value="{{ county }}"
+                                    {% if county == delivery_quote.destination_county %}selected{% endif %}>{{ county }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-sm-5">
+                        <div class="small text-muted" id="deliveryQuoteEta">
+                            {% if delivery_quote.estimated_days_min %}
+                            Arrives in {{ delivery_quote.estimated_days_min }}–{{ delivery_quote.estimated_days_max }} day(s)
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
         {% if current_user.is_authenticated and product.category %}
         <form method="POST" action="{{ url_for('follow_category', category_id=product.category.id) }}" class="mb-3">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
@@ -301,6 +347,43 @@ if (musicPreview) {
         if (!prompted) {
             prompted = true;
             showPurchasePrompt();
+        }
+    });
+}
+
+const quoteCard = document.getElementById('deliveryQuoteCard');
+const countySelect = document.getElementById('deliveryCounty');
+if (quoteCard && countySelect) {
+    const amountEl = document.getElementById('deliveryQuoteAmount');
+    const explainEl = document.getElementById('deliveryQuoteExplain');
+    const etaEl = document.getElementById('deliveryQuoteEta');
+
+    countySelect.addEventListener('change', async () => {
+        const county = countySelect.value;
+        if (!county) return;
+        countySelect.disabled = true;
+        amountEl.textContent = 'Working it out…';
+        try {
+            const res = await fetch(quoteCard.dataset.quoteUrl + '?county=' + encodeURIComponent(county), {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            const data = await res.json();
+            if (!res.ok || !data.success) throw new Error(data.error || 'quote failed');
+            amountEl.textContent = data.free_delivery || data.total_amount <= 0
+                ? 'Free delivery'
+                : 'KSh ' + Number(data.total_amount).toFixed(2);
+            amountEl.classList.toggle('text-success', !!data.free_delivery || data.total_amount <= 0);
+            explainEl.textContent = data.explanation || '';
+            if (etaEl) {
+                etaEl.textContent = data.estimated_days_min
+                    ? 'Arrives in ' + data.estimated_days_min + '–' + data.estimated_days_max + ' day(s)'
+                    : '';
+            }
+        } catch (err) {
+            amountEl.textContent = 'Quote unavailable';
+            explainEl.textContent = 'We could not price this route just now. The exact cost shows at checkout.';
+        } finally {
+            countySelect.disabled = false;
         }
     });
 }

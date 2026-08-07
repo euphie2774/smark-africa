@@ -170,6 +170,22 @@
                     </div>
 
                     <div class="col-12">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="free_delivery"
+                                   id="admin_free_delivery" value="1"
+                                   {% if product and product.free_delivery %}checked{% endif %}>
+                            <label class="form-check-label fw-bold" for="admin_free_delivery">
+                                Free delivery on this product
+                            </label>
+                        </div>
+                        <div class="form-text">
+                            Leave unticked and the buyer is quoted automatically from this item's
+                            location to their delivery county, using the per-km and per-kg rates in
+                            Shipping settings and the weight above.
+                        </div>
+                    </div>
+
+                    <div class="col-12">
                         <label class="form-label fw-bold">Product Images</label>
                         <div>
                             <input type="file" name="product_images" class="form-control" accept="image/png,image/jpeg,image/gif,image/webp" multiple>

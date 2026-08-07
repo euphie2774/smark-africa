@@ -104,6 +104,9 @@
                     <div class="product-meta">
                         <span>{{ product.category.name if product.category else 'General' }}</span>
                         {% if product.is_digital %}<span>Digital</span>{% elif product.stock > 0 %}<span>In Stock</span>{% endif %}
+                        {% if product.free_delivery and not product.is_digital %}
+                        <span class="text-success"><i class="fas fa-truck"></i> Free delivery</span>
+                        {% endif %}
                         {% if product.has_location %}
                         <span class="product-pin" title="Item location: {{ product.location_display }}">
                             <i class="fas fa-location-dot"></i>{{ product.location_display[:24] }}

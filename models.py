@@ -123,6 +123,10 @@ class Product(db.Model):
     stock = db.Column(db.Integer, default=0)
     weight_kg = db.Column(db.Float, default=0.0)  # For shipping calc
 
+    # Seller (or admin) absorbs delivery on this item. Overrides the calculated
+    # quote with zero rather than editing the rate card.
+    free_delivery = db.Column(db.Boolean, default=False)
+
     # Where the item actually is, so buyers see a pin before they open it
     location_label = db.Column(db.String(200))
     location_county = db.Column(db.String(100))

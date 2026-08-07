@@ -15,7 +15,11 @@
                 <p class="mb-1"><strong>Order:</strong> {{ order.order_number }}</p>
                 <p class="mb-4"><strong>Total:</strong> KSh {{ "%.2f"|format(order.amount_paid) }}</p>
                 <div id="payment-status" class="alert alert-info">Waiting for payment confirmation...</div>
-                <a href="{{ url_for('orders') }}" class="btn btn-outline-gold">View My Orders</a>
+                <p class="small text-muted mb-3">
+                    This appears in My Orders once payment is confirmed. If it does not go
+                    through, your cart keeps everything so you can try again.
+                </p>
+                <a href="{{ url_for('cart') }}" class="btn btn-outline-secondary">Back to Cart</a>
             </div>
         </div>
     </div>
@@ -52,7 +56,8 @@
                 </div>
 
                 <!-- Shipping cost -->
-                {% if shipping_required and shipping_rates %}
+                {% if shipping_required %}
+                {% if shipping_rates %}
                 <div class="mt-3">
                     <label class="form-label fw-bold">Shipping Method</label>
                     <select class="form-select form-select-sm" id="shipping-rate" onchange="updateShipping()">
@@ -65,17 +70,41 @@
                     </select>
                     <p class="small text-muted mt-2" id="shipping-detail"></p>
                 </div>
+                {% endif %}
                 <div class="d-flex justify-content-between">
                     <span>Shipping</span>
-                    <span id="shipping-cost-display">KSh 0.00</span>
+                    <span id="shipping-cost-display">
+                        KSh {{ "%.2f"|format(delivery_preview.total_amount if delivery_preview else 0) }}
+                    </span>
                 </div>
-                <input type="hidden" id="shipping-cost-value" value="0">
+                <input type="hidden" id="shipping-cost-value"
+                       value="{{ delivery_preview.total_amount if delivery_preview else 0 }}">
+
+                {# Per item, from each seller's location to the buyer's area. #}
+                {% if delivery_preview and delivery_preview.lines %}
+                <div class="small text-muted mt-2" id="delivery-breakdown">
+                    {% for line in delivery_preview.lines if not line.is_digital %}
+                    <div class="d-flex justify-content-between">
+                        <span>{{ line.product_name[:28] }}{% if line.origin_label %}
+                            <span class="text-muted">· from {{ line.origin_label }}</span>{% endif %}</span>
+                        <span>
+                            {% if line.free_delivery %}
+                            <span class="text-success">Free</span>
+                            {% else %}
+                            KSh {{ "%.2f"|format(line.amount) }}
+                            {% endif %}
+                        </span>
+                    </div>
+                    {% endfor %}
+                    <div class="mt-1">Worked out from distance and weight using the platform rates. Confirmed once you pick your delivery area.</div>
+                </div>
+                {% endif %}
                 <hr>
                 {% endif %}
 
                 <div class="d-flex justify-content-between fw-bold fs-5">
                     <span>Total</span>
-                    <span id="grand-total" class="text-success">KSh {{ "%.2f"|format(total) }}</span>
+                    <span id="grand-total" class="text-success">KSh {{ "%.2f"|format(total + (delivery_preview.total_amount if delivery_preview else 0)) }}</span>
                 </div>
             </div>
         </div>
@@ -226,8 +255,10 @@ const pollPayment = () => {
                 paymentStatus.textContent = 'Payment completed. Redirecting to your order details...';
                 window.location.href = "{{ url_for('order_detail', order_id=order.id) }}";
             } else if (data.payment_status === 'failed') {
+                clearInterval(pollTimer);
                 paymentStatus.className = 'alert alert-warning';
-                paymentStatus.textContent = 'Payment was not completed. You can retry from My Orders.';
+                paymentStatus.textContent = 'Payment was not completed. Taking you back to your cart, where you can try again or clear it.';
+                window.location.href = data.cart_url || "{{ url_for('cart') }}";
             }
         })
         .catch(() => {
@@ -235,11 +266,49 @@ const pollPayment = () => {
             paymentStatus.textContent = 'Could not fetch payment status yet. Keep checking your phone or view My Orders.';
         });
 };
-setInterval(pollPayment, 5000);
+const pollTimer = setInterval(pollPayment, 5000);
 pollPayment();
 {% else %}
 let totalBeforeShipping = {{ total|default(0) }};
-let shippingCost = 0;
+// Seeded from the server-side preview so the summary is consistent before the
+// buyer touches the address selectors.
+let shippingCost = {{ (delivery_preview.total_amount if delivery_preview else 0)|default(0) }};
+
+// Repaint the per-item delivery lines from a fresh quote. Product names and shop
+// labels are seller-supplied, so they are set as text, never as markup.
+function renderDeliveryLines(lines) {
+    const wrap = document.getElementById('delivery-breakdown');
+    if (!wrap || !Array.isArray(lines)) return;
+    wrap.textContent = '';
+    lines.filter(line => !line.is_digital).forEach(line => {
+        const row = document.createElement('div');
+        row.className = 'd-flex justify-content-between';
+
+        const label = document.createElement('span');
+        label.textContent = (line.product_name || '').slice(0, 28);
+        if (line.origin_label) {
+            const origin = document.createElement('span');
+            origin.className = 'text-muted';
+            origin.textContent = ` · from ${line.origin_label}`;
+            label.appendChild(origin);
+        }
+
+        const price = document.createElement('span');
+        if (line.free_delivery) {
+            price.className = 'text-success';
+            price.textContent = 'Free';
+        } else {
+            price.textContent = `KSh ${Number(line.amount || 0).toFixed(2)}`;
+        }
+
+        row.append(label, price);
+        wrap.appendChild(row);
+    });
+    const note = document.createElement('div');
+    note.className = 'mt-1';
+    note.textContent = 'Worked out from distance and weight using the platform rates.';
+    wrap.appendChild(note);
+}
 const addressBook = {{ address_book|default({})|tojson }};
 const showCountryLaunchPopup = {{ 'true' if show_country_launch_popup else 'false' }};
 const allowedCheckoutCountries = new Set({{ settings.get('checkout_allowed_countries', 'Kenya').split(',')|tojson }}.map(item => item.trim()).filter(Boolean));
@@ -304,6 +373,7 @@ function updateShipping() {
             shippingCost = Number(data.shipping_cost || 0);
             if (detail) detail.textContent = `Auto-calculated for ${city}, ${state}, ${country}`;
             if (hiddenRate) hiddenRate.value = '';
+            renderDeliveryLines(data.lines);
             if (shippingValue) shippingValue.value = shippingCost;
             const newTotal = totalBeforeShipping + shippingCost;
             if (display) display.textContent = `KSh ${shippingCost.toFixed(2)}`;
