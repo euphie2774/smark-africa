@@ -148,7 +148,7 @@
                             <td class="text-{{ 'success' if (o.total_amount - o.cogs) >= 0 else 'danger' }}">
                                 KSh {{ "%.2f"|format(o.total_amount - o.cogs) }}
                             </td>
-                            <td><span class="badge bg-{{ 'success' if o.payment_status == 'Paid' else 'warning' }}">{{ o.payment_status }}</span></td>
+                            <td><span class="badge bg-{{ 'success' if o.payment_status in ['completed', 'paid'] else 'warning' }}">{{ (o.payment_status or 'pending')|title }}</span></td>
                             <td>{{ o.created_at.strftime('%d %b %Y') }}</td>
                         </tr>
                         {% endfor %}

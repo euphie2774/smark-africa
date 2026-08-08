@@ -57,20 +57,6 @@
 
                 <!-- Shipping cost -->
                 {% if shipping_required %}
-                {% if shipping_rates %}
-                <div class="mt-3">
-                    <label class="form-label fw-bold">Shipping Method</label>
-                    <select class="form-select form-select-sm" id="shipping-rate" onchange="updateShipping()">
-                        <option value="">Select shipping...</option>
-                        {% for rate in shipping_rates %}
-                        <option value="{{ rate.id }}" data-base="{{ rate.base_cost }}" data-perkg="{{ rate.cost_per_kg }}" data-days="{{ rate.estimated_days_min }}-{{ rate.estimated_days_max }}">
-                            {{ rate.name|platform_clean }} ({{ rate.estimated_days_min }}-{{ rate.estimated_days_max }} days) — KSh {{ "%.2f"|format(rate.base_cost) }} + KSh {{ "%.2f"|format(rate.cost_per_kg) }}/kg
-                        </option>
-                        {% endfor %}
-                    </select>
-                    <p class="small text-muted mt-2" id="shipping-detail"></p>
-                </div>
-                {% endif %}
                 <div class="d-flex justify-content-between">
                     <span>Shipping</span>
                     <span id="shipping-cost-display">
@@ -96,7 +82,6 @@
                         </span>
                     </div>
                     {% endfor %}
-                    <div class="mt-1">Worked out from distance and weight using the platform rates. Confirmed once you pick your delivery area.</div>
                 </div>
                 {% endif %}
                 <hr>
@@ -119,7 +104,6 @@
 
                 <form method="POST" action="{{ url_for('checkout') }}" id="checkout-form">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                    <input type="hidden" name="shipping_rate_id" id="selected-shipping-rate" value="">
 
                     <div class="mb-3">
                         <label for="phone" class="form-label">M-Pesa Phone Number</label>
@@ -304,10 +288,6 @@ function renderDeliveryLines(lines) {
         row.append(label, price);
         wrap.appendChild(row);
     });
-    const note = document.createElement('div');
-    note.className = 'mt-1';
-    note.textContent = 'Worked out from distance and weight using the platform rates.';
-    wrap.appendChild(note);
 }
 const addressBook = {{ address_book|default({})|tojson }};
 const showCountryLaunchPopup = {{ 'true' if show_country_launch_popup else 'false' }};
@@ -349,59 +329,37 @@ function setupAddressSelectors() {
     country.dispatchEvent(new Event('change'));
 }
 
+// Re-price delivery for the address the buyer picked. The server does the
+// distance, weight and zone arithmetic; the page only ever shows the fee it
+// returns, so nothing about the rate card reaches the shopper.
 function updateShipping() {
-    const select = document.getElementById('shipping-rate');
-    const selected = select ? select.options[select.selectedIndex] : null;
-    const detail = document.getElementById('shipping-detail');
     const display = document.getElementById('shipping-cost-display');
     const grandTotal = document.getElementById('grand-total');
     const payAmount = document.getElementById('pay-amount');
     const shippingValue = document.getElementById('shipping-cost-value');
-    const hiddenRate = document.getElementById('selected-shipping-rate');
 
     const country = document.getElementById('shipping_country')?.value || '';
     const state = document.getElementById('shipping_state')?.value || '';
     const city = document.getElementById('shipping_city')?.value || '';
+    if (!country && !state && !city) return;
 
-    if (country || state || city) {
-        const weightKg = {{ weight_kg|default(0) }};
-        fetch("{{ url_for('api_shipping_cost') }}", {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({country, state, city, weight_kg: weightKg})
-        }).then(r => r.json()).then(data => {
-            shippingCost = Number(data.shipping_cost || 0);
-            if (detail) detail.textContent = `Auto-calculated for ${city}, ${state}, ${country}`;
-            if (hiddenRate) hiddenRate.value = '';
-            renderDeliveryLines(data.lines);
-            if (shippingValue) shippingValue.value = shippingCost;
-            const newTotal = totalBeforeShipping + shippingCost;
-            if (display) display.textContent = `KSh ${shippingCost.toFixed(2)}`;
-            grandTotal.textContent = `KSh ${newTotal.toFixed(2)}`;
-            payAmount.textContent = newTotal.toFixed(2);
-        }).catch(()=>{});
-        return;
-    }
+    const paint = () => {
+        if (shippingValue) shippingValue.value = shippingCost;
+        const newTotal = totalBeforeShipping + shippingCost;
+        if (display) display.textContent = `KSh ${shippingCost.toFixed(2)}`;
+        if (grandTotal) grandTotal.textContent = `KSh ${newTotal.toFixed(2)}`;
+        if (payAmount) payAmount.textContent = newTotal.toFixed(2);
+    };
 
-    if (selected && selected.value) {
-        const base = parseFloat(selected.dataset.base) || 0;
-        const perKg = parseFloat(selected.dataset.perkg) || 0;
-        const days = selected.dataset.days || '';
-        const weightKg = {{ weight_kg|default(0) }};
-        shippingCost = base + (perKg * weightKg);
-        if (detail) detail.textContent = `Estimated delivery: ${days} business days`;
-        if (hiddenRate) hiddenRate.value = selected.value;
-    } else {
-        shippingCost = 0;
-        if (detail) detail.textContent = '';
-        if (hiddenRate) hiddenRate.value = '';
-    }
-
-    if (shippingValue) shippingValue.value = shippingCost;
-    const newTotal = totalBeforeShipping + shippingCost;
-    if (display) display.textContent = `KSh ${shippingCost.toFixed(2)}`;
-    grandTotal.textContent = `KSh ${newTotal.toFixed(2)}`;
-    payAmount.textContent = newTotal.toFixed(2);
+    fetch("{{ url_for('api_shipping_cost') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({country, state, city, weight_kg: {{ weight_kg|default(0) }}})
+    }).then(r => r.json()).then(data => {
+        shippingCost = Number(data.shipping_cost || 0);
+        renderDeliveryLines(data.lines);
+        paint();
+    }).catch(() => {});
 }
 setupAddressSelectors();
 {% endif %}

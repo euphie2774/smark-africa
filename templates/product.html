@@ -16,6 +16,12 @@
         <div class="position-relative">
             <img src="{{ gallery_images[0] }}" id="main-product-image" class="img-fluid shadow-sm product-main-image" alt="{{ product.name }}">
             {% if product.is_hot_sale %}<strong class="hot-sale-tag">Hot Sale</strong>{% endif %}
+            {% set brand_label = product_brand_label(product) %}
+            {% if brand_label %}
+            <strong class="brand-tag{% if product.is_hot_sale %} brand-tag-stacked{% endif %}">
+                <i class="fas fa-crown"></i><span>{{ brand_label }}</span>
+            </strong>
+            {% endif %}
             {% if product.discount_percent and product.discount_percent > 0 and not product.is_hot_sale %}<strong class="price-drop-tag"><small>Save</small>{{ product.discount_percent|int }}% OFF</strong>{% endif %}
             {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
             {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
@@ -121,48 +127,23 @@
         {% endif %}
 
         {% if delivery_quote and not product.is_digital %}
-        <div class="card border-0 bg-light mb-3" id="deliveryQuoteCard"
-             data-product-id="{{ product.id }}"
-             data-quote-url="{{ url_for('delivery_quote_api', product_id=product.id) }}">
-            <div class="card-body py-3">
-                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-                    <span class="fw-semibold">
-                        <i class="fas fa-truck text-success me-2"></i>Delivery
-                    </span>
-                    <span class="fs-5 fw-bold {{ 'text-success' if delivery_quote.free_delivery or delivery_quote.total_amount <= 0 else '' }}"
-                          id="deliveryQuoteAmount">
-                        {% if delivery_quote.free_delivery or delivery_quote.total_amount <= 0 %}
-                        Free delivery
-                        {% else %}
-                        KSh {{ "%.2f"|format(delivery_quote.total_amount) }}
-                        {% endif %}
-                    </span>
-                </div>
-
-                <div class="small text-muted mt-2" id="deliveryQuoteExplain">{{ delivery_quote.explanation }}</div>
-
-                {% if not delivery_quote.free_delivery %}
-                <div class="row g-2 mt-2 align-items-end">
-                    <div class="col-sm-7">
-                        <label class="form-label small mb-1" for="deliveryCounty">Deliver to</label>
-                        <select class="form-select form-select-sm" id="deliveryCounty">
-                            <option value="">Choose your county…</option>
-                            {% for county in delivery_counties %}
-                            <option value="{{ county }}"
-                                    {% if county == delivery_quote.destination_county %}selected{% endif %}>{{ county }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                    <div class="col-sm-5">
-                        <div class="small text-muted" id="deliveryQuoteEta">
-                            {% if delivery_quote.estimated_days_min %}
-                            Arrives in {{ delivery_quote.estimated_days_min }}–{{ delivery_quote.estimated_days_max }} day(s)
-                            {% endif %}
-                        </div>
-                    </div>
-                </div>
+        {# Just the fee. The distance, weight, zone and rate maths behind it are
+           the platform's business, not the shopper's - and the flat fee in
+           particular is never surfaced. Origin and destination are geocoded
+           automatically, so there is nothing here for the buyer to fill in. #}
+        <div class="d-flex align-items-center gap-2 mb-3" id="deliveryQuoteCard"
+             data-quote-url="{{ url_for('delivery_quote_api', product_id=product.id) }}"
+             {% if delivery_quote.free_delivery or delivery_quote.total_amount <= 0 %}data-free-delivery="1"{% endif %}>
+            <i class="fas fa-truck text-success"></i>
+            <span class="text-muted">Delivery</span>
+            <span class="fw-bold {{ 'text-success' if delivery_quote.free_delivery or delivery_quote.total_amount <= 0 else '' }}"
+                  id="deliveryQuoteAmount">
+                {% if delivery_quote.free_delivery or delivery_quote.total_amount <= 0 %}
+                Free delivery
+                {% else %}
+                KSh {{ "%.2f"|format(delivery_quote.total_amount) }}
                 {% endif %}
-            </div>
+            </span>
         </div>
         {% endif %}
 
@@ -351,41 +332,29 @@ if (musicPreview) {
     });
 }
 
+// The server already priced this from the buyer's known area. If the browser
+// will share a precise position we requote against it silently, so the figure
+// sharpens on its own. No prompt, no controls - a refusal just leaves the
+// server's figure in place.
 const quoteCard = document.getElementById('deliveryQuoteCard');
-const countySelect = document.getElementById('deliveryCounty');
-if (quoteCard && countySelect) {
+if (quoteCard && navigator.geolocation && !quoteCard.dataset.freeDelivery) {
     const amountEl = document.getElementById('deliveryQuoteAmount');
-    const explainEl = document.getElementById('deliveryQuoteExplain');
-    const etaEl = document.getElementById('deliveryQuoteEta');
-
-    countySelect.addEventListener('change', async () => {
-        const county = countySelect.value;
-        if (!county) return;
-        countySelect.disabled = true;
-        amountEl.textContent = 'Working it out…';
+    navigator.geolocation.getCurrentPosition(async pos => {
         try {
-            const res = await fetch(quoteCard.dataset.quoteUrl + '?county=' + encodeURIComponent(county), {
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
-            });
+            const url = quoteCard.dataset.quoteUrl
+                + '?lat=' + encodeURIComponent(pos.coords.latitude.toFixed(6))
+                + '&lng=' + encodeURIComponent(pos.coords.longitude.toFixed(6));
+            const res = await fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
             const data = await res.json();
-            if (!res.ok || !data.success) throw new Error(data.error || 'quote failed');
+            if (!res.ok || !data.success) return;
             amountEl.textContent = data.free_delivery || data.total_amount <= 0
                 ? 'Free delivery'
                 : 'KSh ' + Number(data.total_amount).toFixed(2);
             amountEl.classList.toggle('text-success', !!data.free_delivery || data.total_amount <= 0);
-            explainEl.textContent = data.explanation || '';
-            if (etaEl) {
-                etaEl.textContent = data.estimated_days_min
-                    ? 'Arrives in ' + data.estimated_days_min + '–' + data.estimated_days_max + ' day(s)'
-                    : '';
-            }
         } catch (err) {
-            amountEl.textContent = 'Quote unavailable';
-            explainEl.textContent = 'We could not price this route just now. The exact cost shows at checkout.';
-        } finally {
-            countySelect.disabled = false;
+            /* Keep the server-rendered figure. */
         }
-    });
+    }, () => {}, { timeout: 8000, maximumAge: 600000 });
 }
 </script>
 {% endblock %}

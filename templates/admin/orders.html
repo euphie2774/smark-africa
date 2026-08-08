@@ -36,18 +36,18 @@
                             <td>{{ order.items|length }}</td>
                             <td class="fw-bold">KSh {{ "%.2f"|format(order.total_amount) }}</td>
                             <td>
-                                <span class="badge bg-{{ 'success' if order.payment_status == 'Paid' else 'warning' }}">
-                                    {{ order.payment_status }}
+                                <span class="badge bg-{{ 'success' if order.payment_status in ['completed', 'paid'] else 'warning' }}">
+                                    {{ (order.payment_status or 'pending')|title }}
                                 </span>
                             </td>
                             <td>
-                                <span class="badge bg-{{ 'success' if order.status == 'Delivered' else 'primary' if order.status == 'Processing' else 'secondary' }}">
-                                    {{ order.status }}
+                                <span class="badge bg-{{ 'success' if order.status == 'completed' else 'primary' if order.status == 'processing' else 'secondary' }}">
+                                    {{ (order.status or 'pending')|title }}
                                 </span>
                             </td>
                             <td>
                                 {% if order.shipping_status %}
-                                <span class="badge bg-info">{{ order.shipping_status }}</span>
+                                <span class="badge bg-info">{{ order.shipping_status|title }}</span>
                                 {% else %}
                                 <span class="text-muted">-</span>
                                 {% endif %}

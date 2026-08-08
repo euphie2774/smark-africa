@@ -17,8 +17,8 @@
                     <div class="d-flex justify-content-between mb-3">
                         <h4 class="mb-0">Order #{{ order.id }}</h4>
                         <div>
-                            <span class="badge bg-{{ 'success' if order.payment_status == 'Paid' else 'warning' }}">{{ order.payment_status }}</span>
-                            <span class="badge bg-{{ 'success' if order.status == 'Delivered' else 'primary' }}">{{ order.status }}</span>
+                            <span class="badge bg-{{ 'success' if order.payment_status in ['completed', 'paid'] else 'warning' }}">{{ (order.payment_status or 'pending')|title }}</span>
+                            <span class="badge bg-{{ 'success' if order.status == 'completed' else 'primary' }}">{{ (order.status or 'pending')|title }}</span>
                         </div>
                     </div>
 
@@ -30,33 +30,36 @@
 
                     <form method="POST" action="{{ url_for('admin_update_order', order_id=order.id) }}" class="row g-3 mt-3">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        {# Values are the lowercase vocabulary models.py records and every
+                           query matches on. Labels are title-cased for reading only; the
+                           selected checks are case-insensitive so orders saved by the older
+                           Title Case version of this form still show their real status. #}
                         <div class="col-md-4">
                             <label class="form-label">Order Status</label>
                             <select name="status" class="form-select">
-                                <option value="Pending" {{ 'selected' if order.status == 'Pending' }}>Pending</option>
-                                <option value="Processing" {{ 'selected' if order.status == 'Processing' }}>Processing</option>
-                                <option value="Shipped" {{ 'selected' if order.status == 'Shipped' }}>Shipped</option>
-                                <option value="Delivered" {{ 'selected' if order.status == 'Delivered' }}>Delivered</option>
-                                <option value="Cancelled" {{ 'selected' if order.status == 'Cancelled' }}>Cancelled</option>
+                                {% set current_status = (order.status or '')|lower %}
+                                <option value="pending" {{ 'selected' if current_status == 'pending' }}>Pending</option>
+                                <option value="processing" {{ 'selected' if current_status == 'processing' }}>Processing</option>
+                                <option value="completed" {{ 'selected' if current_status == 'completed' }}>Completed</option>
+                                <option value="cancelled" {{ 'selected' if current_status == 'cancelled' }}>Cancelled</option>
                             </select>
                         </div>
                         <div class="col-md-4">
                             <label class="form-label">Payment Status</label>
-                            <select name="payment_status" class="form-select">
-                                <option value="Pending" {{ 'selected' if order.payment_status == 'Pending' }}>Pending</option>
-                                <option value="Paid" {{ 'selected' if order.payment_status == 'Paid' }}>Paid</option>
-                                <option value="Failed" {{ 'selected' if order.payment_status == 'Failed' }}>Failed</option>
-                                <option value="Refunded" {{ 'selected' if order.payment_status == 'Refunded' }}>Refunded</option>
-                            </select>
+                            <input type="text" class="form-control" value="{{ (order.payment_status or 'pending')|title }}" disabled>
+                            <div class="form-text">Set by M-Pesa confirmation, not editable here.</div>
                         </div>
                         <div class="col-md-4">
                             <label class="form-label">Shipping Status</label>
                             <select name="shipping_status" class="form-select">
+                                {% set current_shipping = (order.shipping_status or '')|lower %}
                                 <option value="">None</option>
-                                <option value="Processing" {{ 'selected' if order.shipping_status == 'Processing' }}>Processing</option>
-                                <option value="In Transit" {{ 'selected' if order.shipping_status == 'In Transit' }}>In Transit</option>
-                                <option value="Out for Delivery" {{ 'selected' if order.shipping_status == 'Out for Delivery' }}>Out for Delivery</option>
-                                <option value="Delivered" {{ 'selected' if order.shipping_status == 'Delivered' }}>Delivered</option>
+                                <option value="pending" {{ 'selected' if current_shipping == 'pending' }}>Pending</option>
+                                <option value="processing" {{ 'selected' if current_shipping == 'processing' }}>Processing</option>
+                                <option value="shipped" {{ 'selected' if current_shipping == 'shipped' }}>Shipped</option>
+                                <option value="in transit" {{ 'selected' if current_shipping == 'in transit' }}>In Transit</option>
+                                <option value="out for delivery" {{ 'selected' if current_shipping == 'out for delivery' }}>Out for Delivery</option>
+                                <option value="delivered" {{ 'selected' if current_shipping == 'delivered' }}>Delivered</option>
                             </select>
                         </div>
                         <div class="col-md-6">

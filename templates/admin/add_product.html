@@ -186,6 +186,25 @@
                     </div>
 
                     <div class="col-12">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="is_brand_partner"
+                                   id="admin_is_brand_partner" value="1"
+                                   {% if product and product.is_brand_partner %}checked{% endif %}>
+                            <label class="form-check-label fw-bold" for="admin_is_brand_partner">
+                                Stock from a partnered brand
+                            </label>
+                        </div>
+                        <input type="text" name="brand_label" class="form-control mt-2" maxlength="80"
+                               value="{{ product.brand_label or '' if product else '' }}"
+                               placeholder="Brand name to show (optional)">
+                        <div class="form-text">
+                            Adds a small crown and brand label to the corner of this product's image.
+                            Leave the name blank to use the seller's brand name, or just "Brand".
+                            Sellers marked as a brand get this on everything they list without ticking it here.
+                        </div>
+                    </div>
+
+                    <div class="col-12">
                         <label class="form-label fw-bold">Product Images</label>
                         <div>
                             <input type="file" name="product_images" class="form-control" accept="image/png,image/jpeg,image/gif,image/webp" multiple>

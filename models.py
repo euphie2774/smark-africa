@@ -42,6 +42,11 @@ class User(UserMixin, db.Model):
     ai_training_coins = db.Column(db.Integer, default=0)
     is_verified_seller = db.Column(db.Boolean, default=False)
     verified_seller_at = db.Column(db.DateTime)
+    # A partnered brand rather than an individual trader. Admin-granted only, so
+    # no seller can award themselves the crown. Every product they list carries
+    # the brand mark; see Product.is_brand_partner for one-off brand stock.
+    is_brand = db.Column(db.Boolean, default=False)
+    brand_name = db.Column(db.String(160))
     seller_rating = db.Column(db.Float, default=0.0)
     seller_rating_notes = db.Column(db.Text)
     verified_seller_badge_enabled = db.Column(db.Boolean, default=True)
@@ -112,6 +117,11 @@ class Product(db.Model):
     is_hot_sale = db.Column(db.Boolean, default=False)
     hot_sale_started_at = db.Column(db.DateTime)
     is_original_source = db.Column(db.Boolean, default=False)
+    # Stock from a brand the platform has partnered with. Set per product so
+    # admin can flag brand goods listed under any account; a seller marked
+    # User.is_brand brands every listing without this needing to be ticked.
+    is_brand_partner = db.Column(db.Boolean, default=False)
+    brand_label = db.Column(db.String(80))
 
     # Product type
     is_digital = db.Column(db.Boolean, default=False)

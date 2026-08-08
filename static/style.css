@@ -656,6 +656,46 @@ footer a:hover {
     color: #fffaf0;
 }
 
+/* Brand mark: top-left, small enough to sit over a corner without covering the
+   subject of the photo. Sized in rem so it stays proportional on cards and on
+   the larger product-page image. */
+.brand-tag {
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    z-index: 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: calc(100% - 16px);
+    padding: 3px 7px;
+    border-radius: 999px;
+    background: rgba(17, 17, 17, 0.82);
+    color: #f6d67a;
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    line-height: 1.2;
+    text-transform: uppercase;
+    backdrop-filter: blur(2px);
+}
+
+.brand-tag i {
+    font-size: 0.62rem;
+}
+
+.brand-tag span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Nudged down when a hot-sale tag already owns the top-left corner. */
+.hot-sale-tag ~ .brand-tag,
+.brand-tag.brand-tag-stacked {
+    top: 42px;
+}
+
 .trend-card-image,
 .market-news-image,
 .product-main-image {

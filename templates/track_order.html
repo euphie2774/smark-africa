@@ -31,7 +31,7 @@
                 <div class="card-header bg-white">
                     <div class="d-flex justify-content-between align-items-center">
                         <h4 class="mb-0">Order #{{ order.id }}</h4>
-                        <span class="badge bg-{{ 'success' if order.payment_status == 'Paid' else 'warning' }}">{{ order.payment_status }}</span>
+                        <span class="badge bg-{{ 'success' if order.payment_status in ['completed', 'paid'] else 'warning' }}">{{ (order.payment_status or 'pending')|title }}</span>
                     </div>
                 </div>
                 <div class="card-body">
@@ -40,7 +40,7 @@
                             <p class="mb-1"><strong>Order Date:</strong> {{ order.created_at.strftime('%d %b %Y, %H:%M') }}</p>
                             <p class="mb-1"><strong>Total:</strong> KSh {{ "%.2f"|format(order.total_amount) }}</p>
                             <p class="mb-0"><strong>Status:</strong>
-                                <span class="badge bg-{{ 'success' if order.status == 'Delivered' else 'primary' if order.status == 'Processing' else 'secondary' }}">{{ order.status }}</span>
+                                <span class="badge bg-{{ 'success' if order.status == 'completed' else 'primary' if order.status == 'processing' else 'secondary' }}">{{ (order.status or 'pending')|title }}</span>
                             </p>
                         </div>
                         <div class="col-md-6">

@@ -2164,6 +2164,27 @@ def product_ships_free(product):
     return bool(product is not None and getattr(product, 'free_delivery', False))
 
 
+def product_brand_label(product):
+    """The brand mark for a product, or '' when it is not brand stock.
+
+    Two ways in: the product is flagged as partnered brand stock, or its seller
+    account is marked a brand and everything it lists inherits the mark.
+    Returns the name to print beside the crown.
+    """
+    if product is None:
+        return ''
+    seller = getattr(product, 'seller', None)
+    if getattr(product, 'is_brand_partner', False):
+        return (getattr(product, 'brand_label', '') or '').strip() \
+            or (getattr(seller, 'brand_name', '') or '').strip() or 'Brand'
+    if seller is not None and getattr(seller, 'is_brand', False):
+        return (getattr(seller, 'brand_name', '') or '').strip() or 'Brand'
+    return ''
+
+
+app.jinja_env.globals['product_brand_label'] = product_brand_label
+
+
 def buyer_delivery_location(user=None):
     """Best guess at where a shopper wants things delivered.
 
@@ -2740,7 +2761,13 @@ def apply_auto_discount(product):
 
 
 def calculate_shipping_cost(shipping_rate_id, weight_kg):
-    """Calculate shipping cost from rate and weight"""
+    """Legacy rate-card arithmetic, kept for the admin shipping console only.
+
+    Checkout no longer uses this: buyer charges come from quote_cart_delivery,
+    which prices each item from its seller's own location. Do not reintroduce it
+    on a request path driven by a form field - the caller could then choose which
+    rate it was billed at.
+    """
     rate = ShippingRate.query.get(shipping_rate_id)
     if not rate or not rate.is_active:
         return 0
@@ -3792,10 +3819,11 @@ def release_eligible_seller_earnings():
         if not order:
             continue
         buyer_received = (
-            order.payment_status == 'completed' and
+            order.payment_status in ORDER_PAID_STATUSES and
             (
-                order.shipping_status == 'delivered' or
-                order.status == 'completed' or
+                # Rows written before statuses were normalised carry 'Delivered'.
+                (order.shipping_status or '').strip().lower() == 'delivered' or
+                (order.status or '').strip().lower() == 'completed' or
                 order.protection_status == 'released'
             )
         )
@@ -6175,17 +6203,38 @@ def shop_image_search():
 
 @app.route('/delivery/quote/<int:product_id>')
 def delivery_quote_api(product_id):
-    """Re-price one product's delivery for a county the shopper picked.
+    """Re-price one product's delivery for wherever the shopper actually is.
 
-    Used by the product page so changing the destination updates the figure
-    without a reload, and by the cart for the same reason.
+    Accepts precise coordinates from the browser, or a county/city when that is
+    all we have. Deliberately returns the fee and nothing else: the distance,
+    weight, zone and flat-fee arithmetic behind it is not shopper-facing.
     """
     product = Product.query.get_or_404(product_id)
     county = (request.args.get('county') or '').strip()
     city = (request.args.get('city') or '').strip()
     country = (request.args.get('country') or ('Kenya' if county or city else '')).strip()
 
-    if county or city or country:
+    lat = request.args.get('lat', type=float)
+    lng = request.args.get('lng', type=float)
+    point = GeoPoint(lat, lng) if (lat is not None and lng is not None) else None
+    if point is not None and not point.is_valid():
+        point = None
+
+    if point is not None:
+        # Turn the fix into a place name so the session, and later checkout, has
+        # something to work with rather than bare coordinates.
+        located = cached_reverse(cache, point)
+        resolved_county = (getattr(located, 'county', '') or '').strip()
+        resolved_country = (getattr(located, 'country', '') or '').strip() or 'Kenya'
+        session['delivery_location'] = {
+            'country': resolved_country, 'county': resolved_county,
+            'city': (getattr(located, 'label', '') or '').strip(), 'address': '',
+        }
+        session.modified = True
+        quote = quote_product_delivery(
+            product, user=current_user, country=resolved_country,
+            county=resolved_county, city='', address='', lat=point.lat, lng=point.lng)
+    elif county or city or country:
         session['delivery_location'] = {
             'country': country or 'Kenya', 'county': county, 'city': city, 'address': '',
         }
@@ -6198,19 +6247,9 @@ def delivery_quote_api(product_id):
 
     return jsonify({
         'success': True,
-        'amount': quote['total_amount'],
+        'total_amount': quote['total_amount'],
         'display': 'Free delivery' if quote['total_amount'] <= 0 else f"KSh {quote['total_amount']:,.2f}",
         'free_delivery': bool(quote.get('free_delivery')),
-        'origin_label': quote.get('origin_label'),
-        'destination_label': quote.get('destination_label'),
-        'destination_county': quote.get('destination_county'),
-        'distance_km': quote.get('distance_km'),
-        'weight_kg': quote.get('weight_kg'),
-        'zone_name': quote.get('zone_name'),
-        'days_min': quote.get('estimated_days_min'),
-        'days_max': quote.get('estimated_days_max'),
-        'explanation': quote.get('explanation'),
-        'has_destination': bool(quote.get('has_destination')),
     })
 
 
@@ -6273,7 +6312,6 @@ def product_page(slug):
                            buyer_country=buyer_country,
                            delivery_quote=delivery_quote,
                            delivery_location=delivery_location,
-                           delivery_counties=checkout_address_book().get('Kenya', {}),
                            gallery_images=gallery_images,
                            media_kind=product_media_kind(product),
                            is_music_product=is_music_category(product.category),
@@ -6875,15 +6913,12 @@ def checkout():
         flash('Your cart is empty.', 'warning')
         return redirect(url_for('cart'))
 
-    shipping_rates = ShippingRate.query.filter_by(is_active=True).all()
-
     if request.method == 'POST':
         phone = selected_phone_value(request.form)
         shipping_address = request.form.get('shipping_address', '')
         shipping_country = request.form.get('shipping_country', '')
         shipping_city = request.form.get('shipping_city', '')
         shipping_state = request.form.get('shipping_state', '')
-        shipping_rate_id = request.form.get('shipping_rate_id', type=int)
         delivery_method = request.form.get('delivery_method', 'doorstep')
         pickup_station = request.form.get('pickup_station', '').strip()
 
@@ -6927,16 +6962,15 @@ def checkout():
 
         # Priced per item from each seller's own location, matching the quote the
         # product page showed. Items the seller delivers free contribute zero.
+        # This engine is the only pricing path: the old rate-card fallback was
+        # driven by a form field, so a crafted post could pick its own charge.
         shipping_cost = 0
-        if has_physical:
-            if shipping_country or shipping_state or shipping_city:
-                shipping_cost = quote_cart_delivery(
-                    cart_items, user=current_user, country=shipping_country,
-                    county=shipping_state, city=shipping_city,
-                    address=shipping_address, persist=True,
-                )['total_amount']
-            elif shipping_rate_id:
-                shipping_cost = calculate_shipping_cost(shipping_rate_id, billable_weight)
+        if has_physical and (shipping_country or shipping_state or shipping_city):
+            shipping_cost = quote_cart_delivery(
+                cart_items, user=current_user, country=shipping_country,
+                county=shipping_state, city=shipping_city,
+                address=shipping_address, persist=True,
+            )['total_amount']
 
         total = subtotal + shipping_cost
 
@@ -6958,7 +6992,7 @@ def checkout():
             protection_status='held',
             status='pending',
             payment_status='pending',
-            shipping_status='Processing' if has_physical else 'Digital delivery'
+            shipping_status='processing' if has_physical else 'digital delivery'
         )
         db.session.add(order)
         db.session.flush()
@@ -7031,7 +7065,7 @@ def checkout():
     delivery_preview = quote_cart_delivery(cart_items, user=current_user)
     total = subtotal  # before shipping
 
-    return render_template('checkout.html', cart_items=cart_items, shipping_rates=shipping_rates, subtotal=subtotal,
+    return render_template('checkout.html', cart_items=cart_items, subtotal=subtotal,
                            total=total, weight_kg=billable_weight, shipping_required=total_weight > 0,
                            delivery_preview=delivery_preview,
                            address_book=checkout_address_book(),
@@ -7063,7 +7097,7 @@ def check_payment(order_id):
                 order.payment_status = 'completed'
                 order.status = 'completed'
                 if any(not item.is_digital for item in order.items):
-                    order.shipping_status = 'Processing'
+                    order.shipping_status = 'processing'
                     if not TrackingUpdate.query.filter_by(order_id=order.id, status='Payment confirmed').first():
                         db.session.add(TrackingUpdate(
                             order_id=order.id,
@@ -7175,7 +7209,7 @@ def mpesa_callback():
                 order.status = 'completed'
                 order.mpesa_receipt = receipt
                 if any(not item.is_digital for item in order.items):
-                    order.shipping_status = 'Processing'
+                    order.shipping_status = 'processing'
                     if not TrackingUpdate.query.filter_by(order_id=order.id, status='Payment confirmed').first():
                         db.session.add(TrackingUpdate(
                             order_id=order.id,
@@ -7608,12 +7642,22 @@ def api_shipping_cost():
                 cart_items, user=current_user, country=country, county=state,
                 city=city, address=data.get('address'),
             )
+            # Only what the summary renders. The zone, flat fee, per-km rate,
+            # distance and weight behind the figure stay server-side.
             return jsonify({
                 'shipping_cost': cart_quote['total_amount'],
                 'available': True,
                 'free_delivery': cart_quote['free_delivery'],
-                'lines': cart_quote['lines'],
-                'breakdown': cart_quote,
+                'lines': [
+                    {
+                        'product_name': line['product_name'],
+                        'origin_label': line['origin_label'],
+                        'amount': line['amount'],
+                        'free_delivery': line['free_delivery'],
+                        'is_digital': line['is_digital'],
+                    }
+                    for line in cart_quote['lines']
+                ],
             })
 
     quote = quote_shipping(
@@ -7628,18 +7672,24 @@ def api_shipping_cost():
         user_id=current_user.id if current_user.is_authenticated else None,
         persist=False,
     )
-    # shipping_cost is kept for existing checkout JS; breakdown is additive.
     return jsonify({
         'shipping_cost': quote['total_amount'],
         'available': True,
-        'breakdown': quote,
+        'free_delivery': bool(quote.get('free_delivery')),
     })
 
 
 @app.route('/api/shipping/quote', methods=['POST'])
+@login_required
+@admin_required
 @limiter.limit('60 per minute')
 def api_shipping_quote():
-    """Full quote with breakdown, used by the admin calculator and checkout map."""
+    """Full quote with breakdown, for the admin rate calculator only.
+
+    This is the one endpoint that returns the zone, flat fee, per-km rate and
+    distance behind a delivery charge, so it is admin-only. Shoppers get the fee
+    and nothing else, from /api/shipping-cost and /delivery/quote/<id>.
+    """
     data = request.get_json() or {}
     quote = quote_shipping(
         country=data.get('country') or 'Kenya',
@@ -10780,6 +10830,11 @@ def admin_add_product():
             request.form.getlist('excluded_countries'))
         product.free_delivery = bool(request.form.get('free_delivery'))
 
+        # One-off brand stock. Admin-set, like the brand flag on a seller account.
+        product.is_brand_partner = bool(request.form.get('is_brand_partner'))
+        product.brand_label = (request.form.get('brand_label', '') or '').strip()[:80] \
+            if product.is_brand_partner else None
+
         # Handle image upload
         product_images = uploaded_product_images()
         if product_images:
@@ -10890,6 +10945,9 @@ def admin_edit_product(pid):
         product.excluded_countries = serialize_excluded_countries(
             request.form.getlist('excluded_countries'))
         product.free_delivery = form_bool('free_delivery')
+        product.is_brand_partner = current_user.is_admin and form_bool('is_brand_partner')
+        product.brand_label = (request.form.get('brand_label', '') or '').strip()[:80] \
+            if product.is_brand_partner else None
         product.vat_applicable = form_bool('vat_applicable')
         product.vat_rate = form_float('vat_rate', product.vat_rate or (16 if product.vat_applicable else 0), minimum=0, maximum=100) if product.vat_applicable else 0
         product.product_condition = request.form.get('product_condition', product.product_condition or 'new')
@@ -11145,8 +11203,15 @@ def admin_order_detail(order_id):
 @admin_required
 def admin_update_order(order_id):
     order = Order.query.get_or_404(order_id)
-    order.status = request.form.get('status', order.status)
-    order.shipping_status = request.form.get('shipping_status', order.shipping_status)
+    # Statuses are stored lowercase (models.py:241, 249) and matched that way by the
+    # dispatch queue, the escrow release sweep and the revenue reports. This form
+    # used to submit Title Case, which quietly took an order out of all three, so
+    # whatever arrives is folded down here rather than trusted.
+    submitted_status = (request.form.get('status') or '').strip().lower()
+    submitted_shipping = request.form.get('shipping_status')
+    order.status = submitted_status or order.status
+    if submitted_shipping is not None:
+        order.shipping_status = submitted_shipping.strip().lower() or None
     order.tracking_number = request.form.get('tracking_number', order.tracking_number)
     order.notes = request.form.get('notes', order.notes)
 
@@ -11156,9 +11221,12 @@ def admin_update_order(order_id):
     tracking_desc = request.form.get('tracking_description', '')
 
     if tracking_status or tracking_desc:
+        # TrackingUpdate.status is read straight out to the customer timeline, so it
+        # carries the readable form of whatever the stored lowercase status is.
+        display_status = (tracking_status or order.shipping_status or 'pending').title()
         update = TrackingUpdate(
             order_id=order.id,
-            status=tracking_status or order.shipping_status,
+            status=display_status,
             location=tracking_location,
             description=tracking_desc
         )
@@ -11166,7 +11234,7 @@ def admin_update_order(order_id):
         create_customer_notification(
             order.user_id,
             f'Tracking update for {order.order_number}',
-            f'{tracking_status or order.shipping_status}: {tracking_desc or "Your order has a new delivery progress update."}',
+            f'{display_status}: {tracking_desc or "Your order has a new delivery progress update."}',
             'tracking'
         )
 
@@ -11358,6 +11426,41 @@ def admin_toggle_verified_seller(uid):
     })
 
     flash(f'{user.username} {"now has" if user.is_verified_seller else "no longer has"} a verified seller authenticity seal.', 'success')
+    return redirect(url_for('admin_users'))
+
+
+@app.route('/admin/users/brand/<int:uid>', methods=['POST'])
+@login_required
+@mvp_required
+@limiter.limit("20 per hour")
+def admin_toggle_brand_seller(uid):
+    """Mark a seller as a partnered brand, so everything they list wears the crown.
+
+    Admin-only on purpose: a seller who could award themselves the mark would
+    make it worthless. The optional name is what prints beside the crown; left
+    blank it falls back to the plain 'Brand' label.
+    """
+    user = User.query.get_or_404(uid)
+
+    was_brand = bool(user.is_brand)
+    user.is_brand = not was_brand
+    submitted_name = (request.form.get('brand_name') or '').strip()[:160]
+    if user.is_brand:
+        user.brand_name = submitted_name or user.brand_name or user.username
+    invalidate_product_cache()
+    db.session.commit()
+
+    log_admin_action('user_toggle_brand_seller', 'user', uid, {
+        'old_brand': was_brand,
+        'new_brand': user.is_brand,
+        'brand_name': user.brand_name,
+        'username': user.username,
+        'admin_id': current_user.id
+    })
+
+    flash(
+        f'{user.username} is {"now a partnered brand - their listings carry the crown" if user.is_brand else "no longer marked as a brand"}.',
+        'success')
     return redirect(url_for('admin_users'))
 
 
@@ -11792,9 +11895,23 @@ def admin_dispatch():
     assignments = DeliveryAssignment.query.filter(
         DeliveryAssignment.status.in_(['assigned', 'picked_up', 'in_transit'])
     ).order_by(DeliveryAssignment.assigned_at.desc()).all()
+    # Anything paid and not yet on the road. Shipping status has been written in
+    # mixed case across the payment, admin and assignment paths ('Processing' from
+    # checkout, 'processing' from a driver assignment), so it is matched case
+    # insensitively - otherwise a freshly paid order never reaches this queue.
+    # Rows predating the column default carry NULL and are included too.
+    live_assignment_orders = db.session.query(DeliveryAssignment.order_id).filter(
+        DeliveryAssignment.status.in_(['assigned', 'picked_up', 'in_transit'])
+    ).scalar_subquery()
     pending_orders = Order.query.filter(
-        Order.payment_status == 'completed',
-        Order.shipping_status.in_(['pending', 'processing'])
+        Order.payment_status.in_(ORDER_PAID_STATUSES),
+        or_(
+            Order.shipping_status.is_(None),
+            func.lower(func.trim(Order.shipping_status)).in_(
+                ['', 'pending', 'processing', 'ready', 'ready for dispatch']),
+        ),
+        # An order already with a live driver is not offered for assignment twice.
+        ~Order.id.in_(live_assignment_orders),
     ).order_by(Order.created_at.desc()).limit(50).all()
     origin_point, origin_label = shipping_origin_point()
     return render_template(
@@ -14618,6 +14735,8 @@ def phase_two_schema_spec():
             ('ai_training_coins', 'ai_training_coins INTEGER DEFAULT 0'),
             ('is_verified_seller', 'is_verified_seller BOOLEAN DEFAULT 0'),
             ('verified_seller_at', 'verified_seller_at DATETIME'),
+            ('is_brand', 'is_brand BOOLEAN DEFAULT 0'),
+            ('brand_name', 'brand_name VARCHAR(160)'),
             ('seller_rating', 'seller_rating FLOAT DEFAULT 0'),
             ('seller_rating_notes', 'seller_rating_notes TEXT'),
             ('verified_seller_badge_enabled', 'verified_seller_badge_enabled BOOLEAN DEFAULT 1'),
@@ -14638,6 +14757,8 @@ def phase_two_schema_spec():
             ('location_label', 'location_label VARCHAR(200)'),
             ('excluded_countries', 'excluded_countries TEXT'),
             ('free_delivery', 'free_delivery BOOLEAN DEFAULT 0'),
+            ('is_brand_partner', 'is_brand_partner BOOLEAN DEFAULT 0'),
+            ('brand_label', 'brand_label VARCHAR(80)'),
             ('location_county', 'location_county VARCHAR(100)'),
             ('location_lat', 'location_lat FLOAT'),
             ('location_lng', 'location_lng FLOAT'),

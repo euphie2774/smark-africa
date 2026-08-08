@@ -81,6 +81,13 @@
                                             <i class="fas fa-certificate"></i>
                                         </button>
                                     </form>
+                                    <form method="POST" action="{{ url_for('admin_toggle_brand_seller', uid=user.id) }}" class="d-flex gap-1 mt-1">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <input name="brand_name" class="form-control form-control-sm" value="{{ user.brand_name or '' }}" placeholder="Brand name" title="Prints beside the crown">
+                                        <button class="btn btn-sm {{ 'btn-warning' if user.is_brand else 'btn-outline-warning' }}" title="{{ 'Remove brand mark' if user.is_brand else 'Mark as partnered brand' }}">
+                                            <i class="fas fa-crown"></i>
+                                        </button>
+                                    </form>
                                     <a href="{{ url_for('admin_reset_password', uid=user.id) }}" class="btn btn-outline-info btn-sm" title="Reset Password">
                                         <i class="fas fa-key"></i>
                                     </a>

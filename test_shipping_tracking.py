@@ -123,6 +123,53 @@ with app.app_context():
         profile.tracking_token, order.order_number, order.id, admin.id)
     driver_id = profile.id
 
+print('\n== a paid order reaches the dispatch queue ==')
+with app.app_context():
+    # Checkout has historically stored 'Processing' with a capital P while the
+    # dispatch queue matched lowercase, so a paid order was never assignable.
+    order = Order.query.get(order_id)
+    order.shipping_status = 'Processing'
+    db.session.commit()
+
+with app.test_client() as client:
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(admin_id)
+        sess['_fresh'] = True
+    r = client.get('/admin/dispatch')
+    body = r.get_data(as_text=True)
+    check('dispatch page renders', r.status_code == 200, r.status_code)
+    check('mixed-case paid order is offered for assignment',
+          order_number in body, order_number)
+    check('no "nothing waiting" notice while an order waits',
+          'No paid orders are waiting for a driver' not in body)
+
+with app.app_context():
+    order = Order.query.get(order_id)
+    order.shipping_status = 'processing'
+    db.session.commit()
+
+print('\n== the admin order form cannot reintroduce mixed case ==')
+with app.test_client() as client:
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(admin_id)
+        sess['_fresh'] = True
+    # The form used to submit 'Processing'/'Delivered'; anything arriving that way
+    # is folded to the stored vocabulary rather than written through.
+    r = client.post(f'/admin/orders/{order_id}/update',
+                    data={'status': 'Processing', 'shipping_status': 'In Transit'},
+                    follow_redirects=False)
+    check('POST admin order update', r.status_code in (302, 200), r.status_code)
+
+with app.app_context():
+    o = Order.query.get(order_id)
+    check('order status stored lowercase', o.status == 'processing', o.status)
+    check('shipping status stored lowercase', o.shipping_status == 'in transit',
+          o.shipping_status)
+    # And an order the admin has touched is still reachable by the dispatch queue's
+    # own vocabulary check further down the lifecycle.
+    o.shipping_status = 'processing'
+    db.session.commit()
+
 print('\n== admin assigns the delivery ==')
 with app.test_client() as client:
     with client.session_transaction() as sess:
@@ -189,17 +236,34 @@ with app.test_client() as client:
 
 print('\n== quote + geocode apis ==')
 with app.test_client() as client:
+    # The full breakdown is the admin rate calculator's, not a shopper's.
     r = client.post('/api/shipping/quote', json={'city': 'Kisumu', 'weight_kg': 2})
-    q = r.get_json() or {}
-    check('POST quote returns a priced breakdown',
-          r.status_code == 200 and q.get('total_amount') and q.get('explanation'),
-          f'KSh {q.get("total_amount")}')
-    # The legacy checkout endpoint must keep its original key.
+    check('full breakdown is closed to anonymous callers', r.status_code in (301, 302, 401, 403),
+          r.status_code)
+
+    # The legacy checkout endpoint must keep its original key, and must not carry
+    # the rate mechanics behind the figure.
     r = client.post('/api/shipping-cost', json={'city': 'Kisumu', 'weight': 2})
+    payload = r.get_json() or {}
     check('legacy /api/shipping-cost still returns shipping_cost',
-          r.status_code == 200 and 'shipping_cost' in (r.get_json() or {}), r.get_json())
+          r.status_code == 200 and 'shipping_cost' in payload, payload)
+    check('shopper quote hides zone, flat fee and rate maths',
+          not ({'breakdown', 'explanation', 'zone_name', 'flat_fee', 'distance_km'}
+               & set(payload)),
+          sorted(payload))
+
     r = client.get('/api/geo/search?q=Eldoret')
     check('geocoder resolves a town', len((r.get_json() or {}).get('results', [])) > 0)
+
+with app.test_client() as client:
+    with client.session_transaction() as sess:
+        sess['_user_id'] = str(admin_id)
+        sess['_fresh'] = True
+    r = client.post('/api/shipping/quote', json={'city': 'Kisumu', 'weight_kg': 2})
+    q = r.get_json() or {}
+    check('admin POST quote returns a priced breakdown',
+          r.status_code == 200 and q.get('total_amount') and q.get('explanation'),
+          f'KSh {q.get("total_amount")}')
 
 print('\n== admin consoles render ==')
 with app.test_client() as client:

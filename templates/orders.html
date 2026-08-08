@@ -33,7 +33,7 @@
                     <div class="col-md-4 text-md-end">
                         <h5 class="text-success fw-bold">KSh {{ "%.2f"|format(order.total) }}</h5>
                         {% if order.shipping_status %}
-                        <small class="text-muted">Shipping: {{ order.shipping_status }}</small>
+                        <small class="text-muted">Shipping: {{ order.shipping_status|title }}</small>
                         {% endif %}
                     </div>
                 </div>
