@@ -624,36 +624,71 @@ footer a:hover {
     100% { opacity: 1; transform: translateX(-50%) scale(1); }
 }
 
-.authenticity-seal,
 .hot-sale-tag {
     position: absolute;
+    left: 10px;
+    top: 10px;
     z-index: 2;
     display: inline-flex;
     align-items: center;
     gap: 4px;
     padding: 5px 8px;
     border-radius: 999px;
+    background: #d83b24;
+    color: #fffaf0;
     font-size: 0.74rem;
     font-weight: 900;
 }
 
+/* Provenance seals: a tiny stack pinned to the bottom-left corner so the photo
+   stays readable. `top` is deliberately left auto - pairing it with `bottom` on
+   an auto-height absolute box stretches the pill down the whole image, which is
+   what used to bury the product behind a giant "Verified Seller" slab. */
 .authenticity-seal {
-    right: 10px;
-    bottom: 10px;
+    position: absolute;
+    left: 6px;
+    bottom: 6px;
+    top: auto;
+    right: auto;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    max-width: calc(100% - 12px);
+    padding: 2px 6px;
+    border-radius: 999px;
     background: #0d6efd;
     color: #fffaf0;
+    font-size: 0.58rem;
+    font-weight: 800;
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 
 .verified-seller-seal {
-    top: 48px;
     background: #0f5e42;
 }
 
-.hot-sale-tag {
-    left: 10px;
-    top: 10px;
-    background: #d83b24;
-    color: #fffaf0;
+/* When a product is both original and from a verified seller the two pills
+   stack rather than sit on top of each other. */
+.authenticity-seal:not(.verified-seller-seal) ~ .verified-seller-seal {
+    bottom: 25px;
+}
+
+/* The hot-deal strip thumbnail is only ~108px square, so trim the seals further
+   and drop the stack to a single visible pill. */
+.hot-deal-media .authenticity-seal {
+    left: 4px;
+    bottom: 4px;
+    padding: 1px 5px;
+    font-size: 0.5rem;
+}
+
+.hot-deal-media .authenticity-seal:not(.verified-seller-seal) ~ .verified-seller-seal {
+    bottom: 20px;
 }
 
 /* Brand mark: top-left, small enough to sit over a corner without covering the
@@ -1792,33 +1827,40 @@ h6 {
 }
 
 @media (max-width: 992px) {
-    .marketplace-shell,
-    .shop-layout {
-        grid-template-columns: 1fr;
-    }
-
     .market-category-rail,
     .shop-filter-panel {
         position: static;
     }
 
+    /* Both rails become narrow side columns rather than full-width blocks that
+       push the products a screen-height down. */
     .marketplace-shell {
         grid-template-columns: minmax(0, 1fr) 112px;
         align-items: start;
     }
 
-    .market-category-rail {
+    .shop-layout {
+        grid-template-columns: 132px minmax(0, 1fr);
+        gap: 12px;
+        align-items: start;
+        margin-top: 14px;
+    }
+
+    .market-category-rail,
+    .shop-filter-panel {
         max-height: 260px;
         overflow-y: auto;
         padding: 10px;
     }
 
-    .market-category-rail h2 {
+    .market-category-rail h2,
+    .shop-filter-panel h2 {
         font-size: 0.72rem;
         margin-bottom: 8px;
     }
 
-    .market-category-link {
+    .market-category-link,
+    .filter-link {
         font-size: 0.74rem;
         line-height: 1.15;
         padding: 7px 6px;
@@ -1880,13 +1922,78 @@ h6 {
         padding: 8px 6px;
     }
 
-    .market-category-link {
+    /* Shop keeps its category rail on the left, squeezed to a thumb-width strip
+       so the grid beside it still fits two products across. */
+    .shop-layout {
+        grid-template-columns: 88px minmax(0, 1fr);
+        gap: 8px;
+    }
+
+    .shop-filter-panel {
+        max-height: 320px;
+        padding: 8px 5px;
+    }
+
+    .shop-filter-panel hr {
+        margin: 8px 0;
+    }
+
+    .market-category-link,
+    .filter-link {
         font-size: 0.68rem;
         padding: 6px 4px;
     }
 
     .market-category-link i {
         display: none;
+    }
+
+    /* Two products across on a phone instead of one image per row. */
+    .market-product-grid,
+    .shop-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+    }
+
+    .product-media {
+        height: 132px;
+    }
+
+    .product-copy {
+        padding: 8px;
+    }
+
+    .product-title {
+        font-size: 0.82rem;
+        min-height: 34px;
+    }
+
+    /* Blurb and location pills are the first things to go at this width - the
+       photo, name, and price are what a shopper scans. */
+    .product-copy p,
+    .product-meta {
+        display: none;
+    }
+
+    .product-price span {
+        font-size: 0.95rem;
+    }
+
+    .product-price small {
+        font-size: 0.7rem;
+    }
+
+    /* Stacked, not side by side: two buttons across a half-width card leaves
+       each one too narrow to read. */
+    .product-actions {
+        grid-template-columns: 1fr;
+        margin-top: 8px;
+        gap: 6px;
+    }
+
+    .product-actions .btn {
+        padding: 6px 4px;
+        font-size: 0.74rem;
     }
 
     .image-inspo-search div {
@@ -1897,9 +2004,48 @@ h6 {
         padding: 12px;
     }
 
-    .feedback-strip form,
-    .product-actions {
-        grid-template-columns: 1fr;
+    /* Feedback block: both star rows sit side by side on one line and the stars
+       shrink, so the panel stops eating half the phone screen. */
+    .feedback-strip {
+        padding: 12px;
+    }
+
+    .feedback-strip form {
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        align-items: start;
+    }
+
+    .feedback-strip form > div:first-of-type,
+    .feedback-text {
+        grid-column: 1 / -1;
+    }
+
+    .feedback-strip h2 {
+        font-size: 1rem;
+    }
+
+    .feedback-strip p {
+        display: none;
+    }
+
+    .feedback-strip .form-label {
+        margin-bottom: 2px;
+        font-size: 0.72rem;
+    }
+
+    .feedback-strip .star-rating span {
+        width: 1.62rem;
+        height: 1.62rem;
+        font-size: 1.35rem;
+    }
+
+    .feedback-strip textarea.form-control {
+        font-size: 0.85rem;
+    }
+
+    .feedback-strip .btn {
+        grid-column: 1 / -1;
     }
 
     .hot-deal-card {

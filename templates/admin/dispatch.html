@@ -3,6 +3,61 @@
 
 {% block head %}
 <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
+<style>
+/* The "Move to" column used to be `text-nowrap` with four inline buttons in a
+   row. That forced the table wider than its card, so Order / Driver /
+   Destination sat off to the left behind the horizontal scroll - information
+   hidden with no hint it was there. The buttons now wrap into a compact block
+   and the table only scrolls as a last resort. */
+.dispatch-table { min-width: 720px; }
+
+.dispatch-table td.dispatch-actions { white-space: normal; }
+
+.dispatch-table .dispatch-actions .btn,
+.dispatch-table .btn-track {
+    --bs-btn-padding-y: .15rem;
+    --bs-btn-padding-x: .45rem;
+    --bs-btn-font-size: .72rem;
+}
+
+.dispatch-live .dot { font-size: .6rem; line-height: 1; }
+.dispatch-live .dot.live { color: #198754; }
+.dispatch-live .dot.stale { color: #adb5bd; }
+
+@media (max-width: 991.98px) {
+    /* Below the xl breakpoint the card is full width but seven columns still do
+       not fit honestly, so each delivery becomes a labelled block. Nothing ends
+       up behind a scrollbar and the row reads top to bottom on a phone. */
+    .dispatch-table { min-width: 0; }
+    .dispatch-table thead { display: none; }
+    .dispatch-table,
+    .dispatch-table tbody,
+    .dispatch-table tr,
+    .dispatch-table td { display: block; width: 100%; }
+
+    .dispatch-table tr { padding: .6rem .25rem; border-bottom: 1px solid rgba(0, 0, 0, .1); }
+    .dispatch-table tr:last-child { border-bottom: 0; }
+
+    .dispatch-table td {
+        border: 0 !important;
+        text-align: left !important;
+        padding: .18rem .6rem;
+    }
+
+    .dispatch-table td[data-label]::before {
+        content: attr(data-label);
+        display: block;
+        font-size: .64rem;
+        font-weight: 700;
+        letter-spacing: .05em;
+        text-transform: uppercase;
+        color: #8a8f98;
+    }
+
+    /* Remaining and ETA read as a pair rather than two stacked one-liners. */
+    .dispatch-table td.dispatch-metric { display: inline-block; width: auto; min-width: 8rem; }
+}
+</style>
 {% endblock %}
 
 {% block content %}
@@ -38,6 +93,7 @@
                     <span><i class="fas fa-warehouse me-1"></i>{{ origin_label }} (origin)</span>
                     <span><i class="fas fa-circle text-success me-1"></i>Live fix</span>
                     <span><i class="fas fa-circle text-secondary me-1"></i>Stale (no ping in 10 min)</span>
+                    <span><i class="fas fa-grip-lines text-primary me-1"></i>Path the phone has travelled</span>
                 </div>
             </div>
 
@@ -49,18 +105,18 @@
                     </h5>
                 </div>
                 <div class="table-responsive">
-                    <table class="table table-hover align-middle mb-0">
+                    <table class="table table-hover align-middle mb-0 dispatch-table">
                         <thead class="table-light">
                             <tr>
-                                <th>Order</th><th>Driver</th><th>Destination</th>
+                                <th>Order</th><th>Driver &amp; live position</th><th>Destination</th>
                                 <th class="text-end">Remaining</th><th class="text-end">ETA</th>
-                                <th>Status</th><th class="text-end">Move to</th>
+                                <th>Status</th><th>Move to</th>
                             </tr>
                         </thead>
                         <tbody>
                         {% for a in assignments %}
                             <tr>
-                                <td>
+                                <td data-label="Order">
                                     <a href="{{ url_for('admin_order_detail', order_id=a.order_id) }}"
                                        class="fw-semibold text-decoration-none">
                                         {{ a.order.order_number if a.order else a.order_id }}
@@ -69,41 +125,54 @@
                                         {{ a.assigned_at.strftime('%d %b %H:%M') if a.assigned_at else '' }}
                                     </div>
                                 </td>
-                                <td>
+                                <td data-label="Driver">
                                     <div>{{ a.driver.display_name if a.driver else '-' }}</div>
                                     <div class="small text-muted">{{ a.driver.vehicle_registration or a.driver.vehicle_type if a.driver else '' }}</div>
+                                    {% if a.driver %}
+                                    <div class="small dispatch-live d-flex flex-wrap align-items-center gap-2 mt-1"
+                                         data-live="{{ a.driver.id }}">
+                                        <span class="text-muted">Waiting for a phone fix&hellip;</span>
+                                    </div>
+                                    <button type="button" class="btn btn-outline-primary btn-track mt-1"
+                                            data-track="{{ a.driver.id }}"
+                                            title="Centre the map on this driver's phone">
+                                        <i class="fas fa-location-crosshairs me-1"></i>Follow on map
+                                    </button>
+                                    {% endif %}
                                 </td>
-                                <td class="small">{{ a.destination_label or 'Unknown' }}</td>
-                                <td class="text-end small">
+                                <td class="small" data-label="Destination">{{ a.destination_label or 'Unknown' }}</td>
+                                <td class="text-end small dispatch-metric" data-label="Remaining">
                                     {% if a.distance_remaining_km is not none %}
                                         {{ '%.1f'|format(a.distance_remaining_km) }} km
                                     {% else %}<span class="text-muted">&mdash;</span>{% endif %}
                                 </td>
-                                <td class="text-end small">
+                                <td class="text-end small dispatch-metric" data-label="ETA">
                                     {% if a.eta_minutes is not none %}
                                         <span class="fw-semibold">{{ a.eta_minutes | round | int }} min</span>
                                     {% else %}<span class="text-muted">&mdash;</span>{% endif %}
                                 </td>
-                                <td>
+                                <td data-label="Status">
                                     <span class="badge bg-{{ {'assigned':'secondary','picked_up':'info','in_transit':'primary'}.get(a.status, 'light') }}">
                                         {{ a.status.replace('_', ' ') }}
                                     </span>
                                 </td>
-                                <td class="text-end text-nowrap">
+                                <td class="dispatch-actions" data-label="Move to">
+                                    <div class="d-flex flex-wrap gap-1">
                                     {% for next_status, label, style in [
                                         ('picked_up', 'Picked up', 'info'),
                                         ('in_transit', 'In transit', 'primary'),
                                         ('delivered', 'Delivered', 'success'),
                                         ('failed', 'Failed', 'danger')] %}
                                         {% if a.status != next_status %}
-                                        <form method="POST" class="d-inline"
+                                        <form method="POST"
                                               action="{{ url_for('admin_update_assignment_status', assignment_id=a.id) }}">
                                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                                             <input type="hidden" name="status" value="{{ next_status }}">
-                                            <button class="btn btn-sm btn-outline-{{ style }}">{{ label }}</button>
+                                            <button class="btn btn-outline-{{ style }} text-nowrap">{{ label }}</button>
                                         </form>
                                         {% endif %}
                                     {% endfor %}
+                                    </div>
                                 </td>
                             </tr>
                         {% else %}
@@ -315,7 +384,11 @@ const RASTER_STYLE = {
 };
 
 let map = null;
+let mapReady = false;
 let markers = {};
+// Latest known position per driver, so "Follow on map" works without waiting
+// for the next 15s poll.
+let lastKnown = {};
 
 function initMap() {
     try {
@@ -331,6 +404,9 @@ function initMap() {
         new maplibregl.Marker({ element: depot }).setLngLat(ORIGIN)
             .setPopup(new maplibregl.Popup().setText({{ origin_label | tojson }}))
             .addTo(map);
+        // Sources and layers can only be added once the style is in place;
+        // adding one earlier throws and would kill the whole refresh loop.
+        map.on('load', () => { mapReady = true; refreshDrivers(); });
     } catch (err) {
         document.getElementById('map').classList.add('d-none');
         document.getElementById('mapFallback').classList.remove('d-none');
@@ -353,9 +429,139 @@ function popupHtml(driver) {
         ? Math.round(driver.assignment.eta_minutes) + ' min out'
         : 'No active ETA';
     const order = driver.assignment ? driver.assignment.order_number : 'Idle';
+    const moving = movementText(driver);
     return '<strong>' + driver.name + '</strong><br>' +
            '<span style="color:#666">' + order + ' &middot; ' + eta + '</span><br>' +
-           '<small>' + (driver.is_fresh ? 'Live' : 'Stale fix') + '</small>';
+           '<small>' + (driver.is_fresh ? 'Live' : 'Stale fix') +
+           (moving ? ' &middot; ' + moving : '') + '</small>';
+}
+
+/* --- movement -------------------------------------------------------- */
+
+function haversineKm(a, b) {
+    const R = 6371, rad = Math.PI / 180;
+    const dLat = (b.lat - a.lat) * rad, dLng = (b.lng - a.lng) * rad;
+    const h = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(a.lat * rad) * Math.cos(b.lat * rad) *
+              Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function trailKm(trail) {
+    let total = 0;
+    for (let i = 1; i < trail.length; i++) total += haversineKm(trail[i - 1], trail[i]);
+    return total;
+}
+
+function movementText(driver) {
+    if (driver.speed_kph != null && driver.speed_kph >= 3) {
+        return Math.round(driver.speed_kph) + ' km/h';
+    }
+    // A phone that has reported twice from the same spot is parked, not broken.
+    return (driver.trail && driver.trail.length > 1) ? 'stopped' : '';
+}
+
+function agoText(iso) {
+    if (!iso) return 'no fix yet';
+    // Server timestamps are naive UTC, so the Z is what makes them parse right.
+    const then = new Date(iso + 'Z').getTime();
+    if (isNaN(then)) return 'no fix yet';
+    const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+    if (secs < 60) return secs + 's ago';
+    if (secs < 3600) return Math.round(secs / 60) + 'm ago';
+    return Math.round(secs / 3600) + 'h ago';
+}
+
+/* --- trail layers ---------------------------------------------------- */
+
+function trailData(driver) {
+    const coords = (driver.trail || [])
+        .filter(p => p.lat != null && p.lng != null)
+        .map(p => [p.lng, p.lat]);
+    // A LineString needs two points; anything less is drawn as nothing.
+    if (coords.length < 2) return { type: 'FeatureCollection', features: [] };
+    return {
+        type: 'FeatureCollection',
+        features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }]
+    };
+}
+
+function updateTrail(driver) {
+    if (!map || !mapReady) return;
+    const src = 'trail-' + driver.id;
+    const data = trailData(driver);
+    if (map.getSource(src)) {
+        map.getSource(src).setData(data);
+        return;
+    }
+    map.addSource(src, { type: 'geojson', data: data });
+    // White casing first so the blue line stays legible over busy map tiles;
+    // MapLibre paints later layers on top.
+    map.addLayer({
+        id: src + '-casing', type: 'line', source: src,
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.85 }
+    });
+    map.addLayer({
+        id: src + '-line', type: 'line', source: src,
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': '#0d6efd', 'line-width': 3.5 }
+    });
+}
+
+function clearTrail(driverId) {
+    if (!map || !mapReady) return;
+    const src = 'trail-' + driverId;
+    [src + '-line', src + '-casing'].forEach(id => { if (map.getLayer(id)) map.removeLayer(id); });
+    if (map.getSource(src)) map.removeSource(src);
+}
+
+/* --- table row readouts ---------------------------------------------- */
+
+function renderLiveCell(driver) {
+    const cell = document.querySelector('[data-live="' + driver.id + '"]');
+    if (!cell) return;
+
+    if (driver.lat == null || driver.lng == null) {
+        cell.innerHTML = '<span class="text-muted">No phone fix yet &ndash; ask the driver to open their tracking link.</span>';
+        return;
+    }
+
+    const bits = [
+        '<span class="dot ' + (driver.is_fresh ? 'live' : 'stale') + '">&#9679;</span>',
+        '<span class="' + (driver.is_fresh ? 'text-success fw-semibold' : 'text-muted') + '">' +
+            (driver.is_fresh ? 'Live' : 'Stale') + '</span>',
+        '<span class="text-muted">' + agoText(driver.last_ping_at) + '</span>'
+    ];
+
+    const moving = movementText(driver);
+    if (moving) bits.push('<span class="text-muted"><i class="fas fa-gauge-high me-1"></i>' + moving + '</span>');
+
+    const covered = driver.trail && driver.trail.length > 1 ? trailKm(driver.trail) : 0;
+    if (covered >= 0.1) {
+        bits.push('<span class="text-muted"><i class="fas fa-route me-1"></i>' +
+                  covered.toFixed(1) + ' km travelled</span>');
+    }
+
+    cell.innerHTML = bits.join('');
+}
+
+function trackDriver(driverId) {
+    const position = lastKnown[driverId];
+    const cell = document.querySelector('[data-live="' + driverId + '"]');
+    if (!position) {
+        if (cell) cell.innerHTML =
+            '<span class="text-danger">Nothing to follow yet &ndash; this phone has not reported a position.</span>';
+        return;
+    }
+    if (!map) return;
+    map.flyTo({ center: position, zoom: 14, speed: 1.2 });
+    const marker = markers[driverId];
+    if (marker) {
+        const popup = marker.getPopup();
+        if (popup && !popup.isOpen()) marker.togglePopup();
+    }
+    document.getElementById('map').scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 async function refreshDrivers() {
@@ -376,8 +582,17 @@ async function refreshDrivers() {
                     ' <span class="text-muted">' + stamp + '</span>';
             }
 
-            if (!map || driver.lat == null || driver.lng == null) return;
+            renderLiveCell(driver);
+
+            if (driver.lat == null || driver.lng == null) return;
             const position = [driver.lng, driver.lat];
+            lastKnown[driver.id] = position;
+
+            // Trails belong to a live delivery; once it is dropped off the line
+            // stops being useful clutter on the map.
+            if (driver.assignment) updateTrail(driver); else clearTrail(driver.id);
+
+            if (!map) return;
             if (markers[driver.id]) {
                 markers[driver.id].setLngLat(position);
                 markers[driver.id].getPopup().setHTML(popupHtml(driver));
@@ -427,6 +642,11 @@ function editDriver(id) {
 
 document.addEventListener('DOMContentLoaded', () => {
     initMap();
+    // Delegated so the handler survives any future re-render of the table.
+    document.addEventListener('click', event => {
+        const button = event.target.closest('[data-track]');
+        if (button) trackDriver(parseInt(button.dataset.track, 10));
+    });
     refreshDrivers();
     setInterval(refreshDrivers, 15000);
 });

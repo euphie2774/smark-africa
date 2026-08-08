@@ -3,13 +3,30 @@
 
 {% block content %}
 <div class="container-fluid py-4">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2><i class="fas fa-users me-2"></i>Manage Users</h2>
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <h2 class="mb-0"><i class="fas fa-users me-2"></i>Manage Users</h2>
         <form method="GET" class="d-flex gap-2">
+            {% if role and role != 'all' %}<input type="hidden" name="role" value="{{ role }}">{% endif %}
             <input name="search" class="form-control" value="{{ search or '' }}" placeholder="Search username, email, phone">
             <button class="btn btn-outline-primary">Search</button>
         </form>
     </div>
+
+    <ul class="nav nav-pills mb-3 gap-2">
+        {% for key, label, icon in [
+            ('all', 'Everyone', 'users'),
+            ('sellers', 'Sellers', 'store'),
+            ('customers', 'Customers only', 'user'),
+            ('admins', 'Admins', 'user-shield')] %}
+        <li class="nav-item">
+            <a class="nav-link {{ 'active' if (role or 'all') == key }}"
+               href="{{ url_for('admin_users', role=key if key != 'all' else None, search=search or None) }}">
+                <i class="fas fa-{{ icon }} me-1"></i>{{ label }}
+                <span class="badge bg-{{ 'light text-dark' if (role or 'all') == key else 'secondary' }} ms-1">{{ role_counts.get(key, 0) }}</span>
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
 
     <div class="card border-0 shadow-sm">
         <div class="card-body p-0">
@@ -22,103 +39,134 @@
                             <th>Name</th>
                             <th>Email</th>
                             <th>Phone</th>
-                            <th>Orders</th>
+                            <th>Role</th>
+                            <th class="text-end">Orders</th>
+                            <th class="text-end">Listings</th>
                             <th>Joined</th>
                             <th>Active</th>
-                            <th>Admin</th>
-                            <th>Actions</th>
+                            <th style="min-width:320px;">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for user in users %}
+                        {% set is_seller = user.is_verified_seller or user.is_brand or user.seller_status in ['pending', 'verified', 'frozen', 'rejected'] %}
                         <tr>
                             <td>{{ user.id }}</td>
                             <td><strong>{{ user.username }}</strong></td>
                             <td>{{ user.first_name }} {{ user.last_name }}</td>
                             <td>{{ user.email }}</td>
                             <td>{{ user.phone }}</td>
-                            <td>{{ order_counts.get(user.id, 0) }}</td>
-                            <td>{{ user.created_at.strftime('%d %b %Y') }}</td>
+                            <td class="text-nowrap">
+                                {% if user.is_admin %}
+                                <span class="badge bg-warning text-dark">{{ user.admin_level|upper }}</span>
+                                {% elif is_seller %}
+                                <span class="badge bg-info text-dark"><i class="fas fa-store me-1"></i>Seller</span>
+                                {% else %}
+                                <span class="badge bg-secondary"><i class="fas fa-user me-1"></i>Customer</span>
+                                {% endif %}
+                                {% if is_seller %}
+                                <div class="small text-muted mt-1">{{ (user.seller_status or 'buyer')|replace('_', ' ')|title }}</div>
+                                {% endif %}
+                                <div class="mt-1 d-flex flex-wrap gap-1">
+                                    {% if user.is_verified_seller %}
+                                    <span class="badge bg-success">Verified</span>
+                                    {% endif %}
+                                    {% if user.is_brand %}
+                                    <span class="badge bg-warning text-dark"><i class="fas fa-crown me-1"></i>{{ user.brand_name or 'Brand' }}</span>
+                                    {% endif %}
+                                </div>
+                            </td>
+                            <td class="text-end">{{ order_counts.get(user.id, 0) }}</td>
+                            <td class="text-end">
+                                {% if product_counts.get(user.id) %}
+                                {{ product_counts.get(user.id) }}
+                                {% else %}
+                                <span class="text-muted">&mdash;</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-nowrap">{{ user.created_at.strftime('%d %b %Y') }}</td>
                             <td>
                                 <span class="badge bg-{{ 'success' if user.is_active else 'danger' }}">
                                     {{ 'Yes' if user.is_active else 'No' }}
                                 </span>
                             </td>
                             <td>
-                                <span class="badge bg-{{ 'warning' if user.is_admin else 'secondary' }}">
-                                    {{ user.admin_level|upper if user.is_admin else (user.seller_status or 'buyer') }}
-                                </span>
-                                {% if user.is_verified_seller %}
-                                <span class="badge bg-success">Verified Seller</span>
-                                {% endif %}
-                            </td>
-                            <td>
-                                <div class="btn-group btn-group-sm">
-                                    <form method="POST" action="{{ url_for('admin_toggle_user', uid=user.id) }}" style="display:inline;">
+                                <!-- Plain wrapping flex, not a .btn-group: a btn-group is a
+                                     nowrap flex row with negative margins, which squashed the
+                                     inline forms into each other and made the brand crown
+                                     land under a neighbouring button. -->
+                                <div class="d-flex flex-wrap gap-1 align-items-center">
+                                    <form method="POST" action="{{ url_for('admin_toggle_user', uid=user.id) }}">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                        <button type="submit" class="btn btn-{{ 'danger' if user.is_active else 'success' }}" title="{{ 'Deactivate' if user.is_active else 'Activate' }}">
+                                        <button type="submit" class="btn btn-sm btn-{{ 'danger' if user.is_active else 'success' }}" title="{{ 'Deactivate' if user.is_active else 'Activate' }}">
                                             <i class="fas fa-{{ 'ban' if user.is_active else 'check' }}"></i>
                                         </button>
                                     </form>
                                     {% if current_user.admin_level == 'mvp' %}
-                                    <form method="POST" action="{{ url_for('admin_make_admin', uid=user.id) }}" style="display:inline;">
+                                    <form method="POST" action="{{ url_for('admin_make_admin', uid=user.id) }}">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                        <button type="submit" class="btn btn-outline-warning" title="Toggle Admin" onclick="return confirm('Toggle admin rights for this user?');">
+                                        <button type="submit" class="btn btn-sm btn-outline-warning" title="Toggle Admin" onclick="return confirm('Toggle admin rights for this user?');">
                                             <i class="fas fa-crown"></i>
                                         </button>
                                     </form>
                                     {% if user.is_admin and user.admin_level != 'mvp' %}
-                                    <form method="POST" action="{{ url_for('admin_toggle_super_admin', uid=user.id) }}" style="display:inline;">
+                                    <form method="POST" action="{{ url_for('admin_toggle_super_admin', uid=user.id) }}">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                        <button type="submit" class="btn btn-outline-dark" title="{{ 'Remove Super Admin' if user.admin_level == 'super_admin' else 'Make Super Admin' }}" onclick="return confirm('Change super admin role for this user?');">
+                                        <button type="submit" class="btn btn-sm btn-outline-dark" title="{{ 'Remove Super Admin' if user.admin_level == 'super_admin' else 'Make Super Admin' }}" onclick="return confirm('Change super admin role for this user?');">
                                             <i class="fas fa-user-shield"></i>
                                         </button>
                                     </form>
                                     {% endif %}
-                                    <form method="POST" action="{{ url_for('admin_toggle_verified_seller', uid=user.id) }}" style="display:inline;">
+                                    <form method="POST" action="{{ url_for('admin_toggle_verified_seller', uid=user.id) }}">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                        <button type="submit" class="btn btn-outline-success" title="Toggle Verified Seller Seal">
+                                        <button type="submit" class="btn btn-sm btn-outline-success" title="Toggle Verified Seller Seal">
                                             <i class="fas fa-certificate"></i>
                                         </button>
                                     </form>
-                                    <form method="POST" action="{{ url_for('admin_toggle_brand_seller', uid=user.id) }}" class="d-flex gap-1 mt-1">
-                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                        <input name="brand_name" class="form-control form-control-sm" value="{{ user.brand_name or '' }}" placeholder="Brand name" title="Prints beside the crown">
-                                        <button class="btn btn-sm {{ 'btn-warning' if user.is_brand else 'btn-outline-warning' }}" title="{{ 'Remove brand mark' if user.is_brand else 'Mark as partnered brand' }}">
-                                            <i class="fas fa-crown"></i>
-                                        </button>
-                                    </form>
-                                    <a href="{{ url_for('admin_reset_password', uid=user.id) }}" class="btn btn-outline-info btn-sm" title="Reset Password">
+                                    <a href="{{ url_for('admin_reset_password', uid=user.id) }}" class="btn btn-sm btn-outline-info" title="Reset Password">
                                         <i class="fas fa-key"></i>
                                     </a>
                                     {% endif %}
-                                    {% if user.is_verified_seller or user.seller_status in ['verified', 'pending'] %}
-                                    <form method="POST" action="{{ url_for('admin_update_seller_rating', uid=user.id) }}" class="d-flex gap-1 mt-1">
+                                    <form method="POST" action="{{ url_for('admin_freeze_user', uid=user.id) }}">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                        <input name="seller_rating" type="number" step="0.1" min="0" max="5" class="form-control form-control-sm" value="{{ user.seller_rating or 0 }}" title="Seller rating">
-                                        <input name="seller_rating_notes" class="form-control form-control-sm" value="{{ user.seller_rating_notes or '' }}" placeholder="Rating note">
-                                        <input type="hidden" name="verified_seller_badge_enabled" value="0">
-                                        <label class="btn btn-sm btn-outline-primary mb-0" title="Verified badge privilege">
-                                            <input type="checkbox" name="verified_seller_badge_enabled" value="1" {{ 'checked' if user.verified_seller_badge_enabled }}> Badge
-                                        </label>
-                                        <button class="btn btn-sm btn-outline-success">Save</button>
-                                    </form>
-                                    {% endif %}
-                                    <form method="POST" action="{{ url_for('admin_freeze_user', uid=user.id) }}" style="display:inline;">
-                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                        <button type="submit" class="btn btn-outline-secondary" title="Freeze" onclick="return confirm('Freeze this account and lock withdrawals?');">
+                                        <button type="submit" class="btn btn-sm btn-outline-secondary" title="Freeze" onclick="return confirm('Freeze this account and lock withdrawals?');">
                                             <i class="fas fa-lock"></i>
                                         </button>
                                     </form>
-                                    <form method="POST" action="{{ url_for('admin_delete_user', uid=user.id) }}" style="display:inline;" onsubmit="return confirm('Delete this user and all their data?');">
+                                    <form method="POST" action="{{ url_for('admin_delete_user', uid=user.id) }}" onsubmit="return confirm('Delete this user and all their data?');">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                        <button type="submit" class="btn btn-outline-danger" title="Delete">
+                                        <button type="submit" class="btn btn-sm btn-outline-danger" title="Delete">
                                             <i class="fas fa-trash"></i>
                                         </button>
                                     </form>
                                 </div>
+
+                                {% if current_user.admin_level == 'mvp' %}
+                                <form method="POST" action="{{ url_for('admin_toggle_brand_seller', uid=user.id) }}" class="d-flex gap-1 mt-2">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                    <input name="brand_name" class="form-control form-control-sm" value="{{ user.brand_name or '' }}" placeholder="Brand name" title="Prints beside the crown" style="max-width:150px;">
+                                    <button type="submit" class="btn btn-sm text-nowrap {{ 'btn-warning' if user.is_brand else 'btn-outline-warning' }}" title="{{ 'Remove brand mark' if user.is_brand else 'Mark as partnered brand' }}">
+                                        <i class="fas fa-crown me-1"></i>{{ 'Unbrand' if user.is_brand else 'Brand' }}
+                                    </button>
+                                </form>
+                                {% endif %}
+
+                                {% if is_seller %}
+                                <form method="POST" action="{{ url_for('admin_update_seller_rating', uid=user.id) }}" class="d-flex flex-wrap gap-1 mt-2 align-items-center">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                    <input name="seller_rating" type="number" step="0.1" min="0" max="5" class="form-control form-control-sm" value="{{ user.seller_rating or 0 }}" title="Seller rating" style="max-width:72px;">
+                                    <input name="seller_rating_notes" class="form-control form-control-sm" value="{{ user.seller_rating_notes or '' }}" placeholder="Rating note" style="max-width:150px;">
+                                    <input type="hidden" name="verified_seller_badge_enabled" value="0">
+                                    <label class="btn btn-sm btn-outline-primary mb-0 text-nowrap" title="Verified badge privilege">
+                                        <input type="checkbox" name="verified_seller_badge_enabled" value="1" {{ 'checked' if user.verified_seller_badge_enabled }}> Badge
+                                    </label>
+                                    <button type="submit" class="btn btn-sm btn-outline-success">Save</button>
+                                </form>
+                                {% endif %}
                             </td>
                         </tr>
+                        {% else %}
+                        <tr><td colspan="11" class="text-center text-muted py-4">No users match this filter.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -126,20 +174,21 @@
         </div>
     </div>
     {% if pagination and pagination.pages > 1 %}
+    {% set role_arg = role if role and role != 'all' else None %}
     <nav class="mt-4">
         <ul class="pagination justify-content-end">
             {% if pagination.has_prev %}
-            <li class="page-item"><a class="page-link" href="{{ url_for('admin_users', page=pagination.prev_num, search=search or None) }}">Previous</a></li>
+            <li class="page-item"><a class="page-link" href="{{ url_for('admin_users', page=pagination.prev_num, search=search or None, role=role_arg) }}">Previous</a></li>
             {% endif %}
             {% for p in pagination.iter_pages() %}
             {% if p %}
-            <li class="page-item {{ 'active' if p == pagination.page }}"><a class="page-link" href="{{ url_for('admin_users', page=p, search=search or None) }}">{{ p }}</a></li>
+            <li class="page-item {{ 'active' if p == pagination.page }}"><a class="page-link" href="{{ url_for('admin_users', page=p, search=search or None, role=role_arg) }}">{{ p }}</a></li>
             {% else %}
             <li class="page-item disabled"><span class="page-link">...</span></li>
             {% endif %}
             {% endfor %}
             {% if pagination.has_next %}
-            <li class="page-item"><a class="page-link" href="{{ url_for('admin_users', page=pagination.next_num, search=search or None) }}">Next</a></li>
+            <li class="page-item"><a class="page-link" href="{{ url_for('admin_users', page=pagination.next_num, search=search or None, role=role_arg) }}">Next</a></li>
             {% endif %}
         </ul>
     </nav>

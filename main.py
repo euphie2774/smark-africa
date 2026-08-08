@@ -6853,6 +6853,158 @@ def abandon_unpaid_order(order, reason=''):
     return True
 
 
+def notify_seller_listing_live(product, storefront=None):
+    """Confirm to a seller that their new listing went up.
+
+    Both channels on purpose: the in-app note is what they see next time they
+    open the hub, the email is what reaches them when they have closed the tab.
+    """
+    seller = product.seller if product.seller_id else None
+    if not seller:
+        return False
+
+    pending_review = product.review_status != 'approved'
+    where = product.location_display or (storefront.business_name if storefront else '') or 'your storefront address'
+    body = (f'"{product.name}" is listed and pinned to {where}. '
+            + ('An admin still needs to approve it before shoppers can see it in the shop.'
+               if pending_review else 'It is live in the shop now.'))
+
+    note = create_customer_notification(
+        seller.id,
+        f'Listing published: {product.name}'[:180],
+        body,
+        'seller_listing',
+        product_id=product.id,
+    )
+    # A returned row that already has an id is a duplicate the helper found, so
+    # a double submit does not send a second email.
+    already_sent = note is not None and note.id is not None
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception('Seller listing notification failed for product %s', product.id)
+        return False
+    if already_sent:
+        return False
+
+    if not seller.email:
+        return False
+
+    try:
+        link = url_for('product_page', slug=product.slug, _external=True)
+    except Exception:
+        link = ''
+
+    price = float(product.selling_price or 0)
+    html = f"""
+    <h2>Your product is listed ✅</h2>
+    <p>Hi {seller.username},</p>
+    <p><strong>{product.name}</strong> has been added to your SMARKAFRICA storefront.</p>
+    <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse">
+        <tr><td>Price</td><td>KES {price:,.0f}</td></tr>
+        <tr><td>Stock</td><td>{product.stock if not product.is_digital else 'Digital - unlimited'}</td></tr>
+        <tr><td>Item location</td><td>{where}</td></tr>
+        <tr><td>Status</td><td>{'Awaiting admin review' if pending_review else 'Live in the shop'}</td></tr>
+    </table>
+    {f'<p><a href="{link}">View your listing</a></p>' if link else ''}
+    <p>We will email you again the moment it sells.</p>
+    <br><p>SMARKAFRICA Team</p>
+    """
+    try:
+        send_email(seller.email, f'"{product.name}" is now listed on SMARKAFRICA', html)
+    except Exception:
+        app.logger.exception('Seller listing email failed for product %s', product.id)
+    return True
+
+
+def notify_sellers_of_sale(order):
+    """Tell each seller with a line on this order that their item sold.
+
+    Grouped per seller so someone with three lines on one order gets one email,
+    not three. Idempotent: a payment callback and a status poll both land here.
+    """
+    if not order:
+        return 0
+
+    by_seller = {}
+    for item in order.items:
+        product = item.product
+        if not product or not product.seller_id or product.admin_priority:
+            continue
+        by_seller.setdefault(product.seller_id, []).append((product, item))
+
+    notified = 0
+    pending = []
+    for seller_id, lines in by_seller.items():
+        seller = db.session.get(User, seller_id)
+        if not seller:
+            continue
+
+        names = ', '.join(product.name for product, _ in lines)
+        gross = sum((item.price or 0) * item.quantity for _, item in lines)
+        net = 0.0
+        for product, item in lines:
+            line_total = (item.price or 0) * item.quantity
+            net += line_total - round(line_total * commission_for_product(product) / 100, 2)
+
+        note = create_customer_notification(
+            seller_id,
+            f'Sold: {names}'[:180],
+            f'Order {order.order_number} was paid. Pack the item for pickup - '
+            f'KES {net:,.0f} is held under buyer/seller protection and releases after delivery.',
+            'seller_sale',
+            product_id=lines[0][0].id,
+        )
+        if note is not None and note.id is not None:
+            continue  # already announced on an earlier callback
+
+        notified += 1
+        if not seller.email:
+            continue
+        pending.append((seller, lines, names, gross, net))
+
+    # Persist the in-app notes before the network calls, so a slow or failing
+    # mail provider cannot cost the seller the record of the sale.
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception('Seller sale notification failed for order %s', order.id)
+        return 0
+
+    for seller, lines, names, gross, net in pending:
+        rows = ''.join(
+            f'<tr><td>{product.name}</td><td>{item.quantity}</td>'
+            f'<td>KES {(item.price or 0) * item.quantity:,.0f}</td></tr>'
+            for product, item in lines
+        )
+        ship_to = ', '.join(part for part in [order.shipping_city, order.shipping_state,
+                                              order.shipping_country] if part) or 'See order detail'
+        html = f"""
+        <h2>You made a sale 🎉</h2>
+        <p>Hi {seller.username},</p>
+        <p>Order <strong>{order.order_number}</strong> has been paid for.</p>
+        <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;width:100%">
+            <tr style="background:#1a1a2e;color:white"><th>Item</th><th>Qty</th><th>Total</th></tr>
+            {rows}
+            <tr><td colspan="2"><strong>Gross</strong></td><td><strong>KES {gross:,.0f}</strong></td></tr>
+            <tr><td colspan="2"><strong>Your earning after commission</strong></td>
+                <td><strong>KES {net:,.0f}</strong></td></tr>
+        </table>
+        <p>Deliver to: {ship_to}</p>
+        <p>Please pack the item now so the assigned carrier can collect it. Your earning is held
+           under buyer/seller protection and is released once the buyer receives the order.</p>
+        <br><p>SMARKAFRICA Team</p>
+        """
+        try:
+            send_email(seller.email, f'Sold: {names[:80]} - order {order.order_number}', html)
+        except Exception:
+            app.logger.exception('Seller sale email failed for order %s', order.id)
+
+    return notified
+
+
 def finalize_paid_order(order):
     """
     Everything that has to wait for confirmed money: stock comes down, the sale is
@@ -7129,6 +7281,7 @@ def check_payment(order_id):
                 db.session.commit()
 
                 send_order_confirmation(order)
+                notify_sellers_of_sale(order)
 
                 return jsonify({
                     'payment_status': 'completed',
@@ -7242,6 +7395,7 @@ def mpesa_callback():
 
                 db.session.commit()
                 send_order_confirmation(order)
+                notify_sellers_of_sale(order)
 
                 for item in order.items:
                     if item.product:
@@ -7383,6 +7537,7 @@ def flutterwave_callback():
                     finalize_paid_order(order)
                     db.session.delete(order_ref)
                     db.session.commit()
+                    notify_sellers_of_sale(order)
 
     flash('Payment processed.', 'info')
     return redirect(url_for('admin_pos'))
@@ -11257,12 +11412,30 @@ def admin_transactions():
 
 # --- User Management ---
 
+# A user counts as a seller once they have been through verification in any
+# form - approved, still pending, or frozen after the fact. Anyone else is a
+# plain shopper. Kept in one place so the tab counts and the filter agree.
+SELLER_ACCOUNT_STATUSES = ('pending', 'verified', 'frozen', 'rejected')
+
+
+def seller_account_filter():
+    return or_(
+        User.is_verified_seller.is_(True),
+        User.is_brand.is_(True),
+        User.seller_status.in_(SELLER_ACCOUNT_STATUSES),
+    )
+
+
 @app.route('/admin/users')
 @login_required
 @admin_required
 def admin_users():
     page = request.args.get('page', 1, type=int)
     search = request.args.get('search', '').strip()
+    role = request.args.get('role', '').strip().lower()
+    if role not in ('sellers', 'customers', 'admins'):
+        role = 'all'
+
     query = User.query
     if search:
         query = query.filter(or_(
@@ -11270,14 +11443,42 @@ def admin_users():
             User.email.ilike(f'%{search}%'),
             User.phone.ilike(f'%{search}%')
         ))
+
+    sellers = seller_account_filter()
+    if role == 'sellers':
+        query = query.filter(sellers)
+    elif role == 'customers':
+        query = query.filter(db.not_(sellers), User.is_admin.isnot(True))
+    elif role == 'admins':
+        query = query.filter(User.is_admin.is_(True))
+
+    # Counts are for the whole base, not the current page, so the tabs read as
+    # totals rather than "how many of these 30".
+    seller_total = User.query.filter(sellers).count()
+    admin_total = User.query.filter(User.is_admin.is_(True)).count()
+    all_total = User.query.count()
+    role_counts = {
+        'all': all_total,
+        'sellers': seller_total,
+        'admins': admin_total,
+        'customers': User.query.filter(db.not_(sellers), User.is_admin.isnot(True)).count(),
+    }
+
     pagination = query.order_by(User.created_at.desc()).paginate(page=page, per_page=30, error_out=False)
     user_ids = [user.id for user in pagination.items]
     order_counts = {}
+    product_counts = {}
     if user_ids:
         order_counts = dict(
             db.session.query(Order.user_id, func.count(Order.id)).filter(Order.user_id.in_(user_ids)).group_by(Order.user_id).all()
         )
-    return render_template('admin/users.html', users=pagination.items, pagination=pagination, search=search, order_counts=order_counts)
+        product_counts = dict(
+            db.session.query(Product.seller_id, func.count(Product.id))
+            .filter(Product.seller_id.in_(user_ids)).group_by(Product.seller_id).all()
+        )
+    return render_template('admin/users.html', users=pagination.items, pagination=pagination, search=search,
+                           order_counts=order_counts, role=role, role_counts=role_counts,
+                           product_counts=product_counts)
 
 
 @app.route('/admin/users/toggle/<int:uid>', methods=['POST'])
@@ -11856,6 +12057,37 @@ def driver_payload(driver):
     }
 
 
+DRIVER_TRAIL_MINUTES = 180   # how far back the dispatch map draws a journey
+DRIVER_TRAIL_POINTS = 120    # cap so a long shift cannot bloat the poll payload
+
+
+def driver_trail(driver_id, order_id=None, minutes=DRIVER_TRAIL_MINUTES, limit=DRIVER_TRAIL_POINTS):
+    """Recent GPS breadcrumbs for one driver, oldest first.
+
+    Scoped to an order when there is one, so the line drawn on the map is the
+    journey of the delivery being watched rather than everywhere the phone has
+    been today. Newest rows are taken first and then reversed - the tail of the
+    trip is the part worth seeing, and the limit keeps the 15s poll small.
+    """
+    query = DriverLocationPing.query.filter(
+        DriverLocationPing.driver_id == driver_id,
+        DriverLocationPing.created_at >= utcnow() - timedelta(minutes=minutes),
+    )
+    if order_id:
+        query = query.filter(DriverLocationPing.order_id == order_id)
+    rows = query.order_by(DriverLocationPing.created_at.desc()).limit(limit).all()
+    return [
+        {
+            'lat': row.lat,
+            'lng': row.lng,
+            'at': row.created_at.isoformat() if row.created_at else None,
+            'speed_kph': row.speed_kph,
+            'heading': row.heading,
+        }
+        for row in reversed(rows)
+    ]
+
+
 def active_assignment_for_order(order_id):
     return DeliveryAssignment.query.filter(
         DeliveryAssignment.order_id == order_id,
@@ -12091,6 +12323,14 @@ def api_dispatch_drivers():
                 'destination_lat': active.destination_lat,
                 'destination_lng': active.destination_lng,
             }
+            # Breadcrumbs only for a driver actually carrying something: an idle
+            # phone's wanderings are not dispatch's business, and skipping them
+            # keeps this poll to one extra query per live delivery.
+            trail = driver_trail(driver.id, active.order_id)
+            item['trail'] = trail
+            if trail:
+                item['speed_kph'] = trail[-1].get('speed_kph')
+                item['heading'] = trail[-1].get('heading')
         payload.append(item)
     return jsonify({'drivers': payload, 'server_time': utcnow().isoformat()})
 
@@ -12705,6 +12945,7 @@ def seller_products(product_id=None):
                 if is_new:
                     where = target.location_display or 'your storefront address'
                     flash(f'"{target.name}" is listed and pinned to {where}.', 'success')
+                    notify_seller_listing_live(target, storefront)
                 else:
                     flash(f'"{target.name}" updated.', 'success')
                 if target.review_status != 'approved':
