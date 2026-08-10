@@ -36,11 +36,6 @@
             <button id="shareBtn" class="btn btn-success btn-lg w-100" onclick="toggleSharing()">
                 <i class="fas fa-location-crosshairs me-2"></i>Start sharing my location
             </button>
-            <div class="small text-muted mt-2" id="statusLine">
-                Keep this page open while you drive. Your position is sent every
-                {{ ping_seconds }} seconds and is only visible to dispatch and the customer
-                whose parcel you are carrying.
-            </div>
             <div class="row text-center mt-3 g-2" id="fixStats" style="display:none;">
                 <div class="col-4">
                     <div class="small text-muted">Accuracy</div>
@@ -133,7 +128,6 @@
         <div class="card-body text-center text-muted py-5">
             <i class="fas fa-mug-hot fa-2x mb-3 d-block"></i>
             No deliveries assigned right now.
-            <div class="small mt-2">Leave sharing on so dispatch can find you.</div>
         </div>
     </div>
     {% endfor %}
@@ -147,10 +141,19 @@ const PING_URL   = {{ url_for('api_driver_ping', token=token) | tojson }};
 const STATUS_URL = {{ url_for('api_driver_status', token=token) | tojson }};
 const PING_MS    = {{ ping_seconds }} * 1000;
 const STYLE_URL  = {{ (map_style_url or '') | tojson }};
+const TRAIL      = {{ trail | tojson }};
 const START = [
     {{ driver.last_lng if driver.last_lng is not none else 36.817223 }},
     {{ driver.last_lat if driver.last_lat is not none else -1.286389 }}
 ];
+
+// Keyed on the ping URL so a shared handset carrying two driver links keeps
+// each driver's state and backlog apart.
+const SHARE_KEY  = 'smk_share:' + PING_URL;
+const BUFFER_KEY = 'smk_fixes:' + PING_URL;
+const BUFFER_MAX = 60;   // matches DRIVER_PING_BATCH_LIMIT on the server
+const TRAIL_MAX  = 500;  // drawn points kept before the oldest tail is dropped
+const TRAIL_MIN_M = 8;   // ignore jitter below this so a parked van draws no knot
 
 const RASTER_STYLE = {
     version: 8,
@@ -166,13 +169,77 @@ const RASTER_STYLE = {
 };
 
 let map = null, meMarker = null, watchId = null, timer = null, lastFix = null, sharing = false;
+let wakeLock = null;
+let trailCoords = (TRAIL || []).map(p => [p.lng, p.lat]);
+let buffer = loadBuffer();
+
+function loadBuffer() {
+    // Fixes taken while the browser was frozen or out of signal survive here,
+    // so a reload or a crash does not punch a hole in the travelled line.
+    try {
+        const parsed = JSON.parse(localStorage.getItem(BUFFER_KEY) || '[]');
+        return Array.isArray(parsed) ? parsed.slice(-BUFFER_MAX) : [];
+    } catch (err) {
+        return [];
+    }
+}
+
+function saveBuffer() {
+    try { localStorage.setItem(BUFFER_KEY, JSON.stringify(buffer)); } catch (err) {}
+}
+
+function metresBetween(lat1, lng1, lat2, lng2) {
+    const R = 6371000, toRad = Math.PI / 180;
+    const dLat = (lat2 - lat1) * toRad, dLng = (lng2 - lng1) * toRad;
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
+              Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function trailData() {
+    // A LineString needs two positions to be valid, so a fresh shift with one
+    // fix draws nothing rather than an empty geometry MapLibre would reject.
+    if (trailCoords.length < 2) return { type: 'FeatureCollection', features: [] };
+    return {
+        type: 'FeatureCollection',
+        features: [{
+            type: 'Feature', properties: {},
+            geometry: { type: 'LineString', coordinates: trailCoords }
+        }]
+    };
+}
+
+function drawTrail() {
+    if (!map || !map.getSource || !map.getSource('trail')) return;
+    map.getSource('trail').setData(trailData());
+}
+
+function pushTrail(lng, lat) {
+    const last = trailCoords[trailCoords.length - 1];
+    if (last && metresBetween(last[1], last[0], lat, lng) < TRAIL_MIN_M) return;
+    trailCoords.push([lng, lat]);
+    if (trailCoords.length > TRAIL_MAX) trailCoords = trailCoords.slice(-TRAIL_MAX);
+    drawTrail();
+}
 
 function initMap() {
     try {
         map = new maplibregl.Map({
-            container: 'map', style: STYLE_URL || RASTER_STYLE, center: START, zoom: 13
+            container: 'map',
+            style: STYLE_URL || RASTER_STYLE,
+            center: trailCoords.length ? trailCoords[trailCoords.length - 1] : START,
+            zoom: 13
         });
         map.addControl(new maplibregl.NavigationControl(), 'top-right');
+        map.on('load', () => {
+            map.addSource('trail', { type: 'geojson', data: trailData() });
+            map.addLayer({
+                id: 'trail', type: 'line', source: 'trail',
+                layout: { 'line-cap': 'round', 'line-join': 'round' },
+                paint: { 'line-color': '#198754', 'line-width': 4, 'line-opacity': .85 }
+            });
+        });
         {% for a in assignments %}
         {% if a.destination_lat and a.destination_lng %}
         new maplibregl.Marker({ color: '#dc3545' })
@@ -181,6 +248,10 @@ function initMap() {
             .addTo(map);
         {% endif %}
         {% endfor %}
+        if (trailCoords.length) {
+            meMarker = new maplibregl.Marker({ color: '#198754' })
+                .setLngLat(trailCoords[trailCoords.length - 1]).addTo(map);
+        }
     } catch (err) {
         document.getElementById('map').style.display = 'none';
     }
@@ -196,38 +267,77 @@ function toggleSharing() {
     sharing ? stopSharing() : startSharing();
 }
 
-function startSharing() {
-    if (!navigator.geolocation) {
-        setDot('ping-err', 'Unsupported');
-        document.getElementById('statusLine').textContent =
-            'This browser cannot share location. Try Chrome or Safari.';
-        return;
-    }
-    sharing = true;
-    document.getElementById('shareBtn').className = 'btn btn-outline-danger btn-lg w-100';
-    document.getElementById('shareBtn').innerHTML =
-        '<i class="fas fa-stop me-2"></i>Stop sharing';
-    document.getElementById('fixStats').style.display = '';
-    setDot('ping-live', 'Acquiring GPS');
-
+function armWatch() {
+    // Re-armable: an OS that suspends the tab kills the watch and the timer
+    // without telling us, so coming back to the page rebuilds both.
+    if (watchId !== null) navigator.geolocation.clearWatch(watchId);
     watchId = navigator.geolocation.watchPosition(onFix, onGeoError, {
         enableHighAccuracy: true,
         maximumAge: 5000,
         timeout: 20000
     });
+    if (timer) clearInterval(timer);
     // watchPosition fires on movement, which can be never at a red light.
     // The timer guarantees dispatch sees a heartbeat on a fixed cadence.
-    timer = setInterval(sendFix, PING_MS);
+    timer = setInterval(flush, PING_MS);
+}
+
+function startSharing() {
+    if (!navigator.geolocation) {
+        setDot('ping-err', 'Unsupported');
+        return;
+    }
+    sharing = true;
+    try { localStorage.setItem(SHARE_KEY, '1'); } catch (err) {}
+    document.getElementById('shareBtn').className = 'btn btn-outline-danger btn-lg w-100';
+    document.getElementById('shareBtn').innerHTML =
+        '<i class="fas fa-stop me-2"></i>Stop sharing';
+    document.getElementById('fixStats').style.display = '';
+    setDot('ping-live', 'Acquiring GPS');
+    armWatch();
+    requestWakeLock();
 }
 
 function stopSharing() {
     sharing = false;
+    try { localStorage.removeItem(SHARE_KEY); } catch (err) {}
     if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
     if (timer) { clearInterval(timer); timer = null; }
+    releaseWakeLock();
+    flush();
     document.getElementById('shareBtn').className = 'btn btn-success btn-lg w-100';
     document.getElementById('shareBtn').innerHTML =
         '<i class="fas fa-location-crosshairs me-2"></i>Start sharing my location';
     setDot('ping-off', 'Sharing off');
+}
+
+async function requestWakeLock() {
+    // Best effort. Where it exists it stops the screen lock from suspending the
+    // tab; where it does not, the buffer above is what covers the gap.
+    if (!('wakeLock' in navigator)) return;
+    try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch (err) {
+        wakeLock = null;
+    }
+}
+
+function releaseWakeLock() {
+    if (!wakeLock) return;
+    try { wakeLock.release(); } catch (err) {}
+    wakeLock = null;
+}
+
+function fixPayload(coords, when) {
+    return {
+        lat: coords.latitude,
+        lng: coords.longitude,
+        accuracy_m: coords.accuracy != null ? coords.accuracy : null,
+        speed_kph: coords.speed != null ? coords.speed * 3.6 : null,
+        heading: coords.heading != null ? coords.heading : null,
+        at: new Date(when).toISOString()
+    };
 }
 
 function onFix(position) {
@@ -238,6 +348,12 @@ function onFix(position) {
     document.getElementById('statSpeed').textContent =
         c.speed != null ? Math.round(c.speed * 3.6) + ' km/h' : '—';
 
+    // Buffer first, send later: every fix is kept with the moment it was taken,
+    // so a backlog posted after a tunnel replays as the road actually driven.
+    buffer.push(fixPayload(c, position.timestamp || Date.now()));
+    if (buffer.length > BUFFER_MAX) buffer = buffer.slice(-BUFFER_MAX);
+    saveBuffer();
+
     if (map) {
         const at = [c.longitude, c.latitude];
         if (meMarker) {
@@ -247,35 +363,43 @@ function onFix(position) {
         }
         map.easeTo({ center: at });
     }
+    pushTrail(c.longitude, c.latitude);
     setDot('ping-live', 'Live');
 }
 
 function onGeoError(err) {
-    setDot('ping-err', 'Location blocked');
-    document.getElementById('statusLine').textContent =
-        'Location permission was denied or unavailable (' + err.message +
-        '). Allow location access for this site, then press start again.';
-    stopSharing();
+    // Only an outright refusal stops sharing. A timeout in a basement or a
+    // momentary loss of fix is not a reason to make the driver press start.
+    if (err && err.code === 1) {
+        setDot('ping-err', 'Location blocked');
+        stopSharing();
+        return;
+    }
+    setDot('ping-err', 'No GPS fix');
 }
 
-async function sendFix() {
-    if (!lastFix) return;
-    const c = lastFix.coords;
+async function flush() {
+    if (!buffer.length) {
+        // Nothing new since the last send. Repeat the last known fix so dispatch
+        // can tell a van waiting at a gate from a phone that has gone dark.
+        if (!lastFix) return;
+        buffer.push(fixPayload(lastFix.coords, Date.now()));
+    }
+    const sending = buffer.length;
     try {
         const resp = await fetch(PING_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                lat: c.latitude,
-                lng: c.longitude,
-                accuracy_m: c.accuracy,
-                speed_kph: c.speed != null ? c.speed * 3.6 : null,
-                heading: c.heading
-            })
+            body: JSON.stringify({ points: buffer.slice() }),
+            keepalive: true
         });
         const data = await resp.json();
         if (!data.ok) { setDot('ping-err', data.error || 'Rejected'); return; }
 
+        // Drop only what went out; anything the watch added mid-request is at
+        // the end of the buffer and still owed to the server.
+        buffer = buffer.slice(sending);
+        saveBuffer();
         document.getElementById('statSent').textContent = new Date().toLocaleTimeString();
         setDot('ping-live', 'Live');
 
@@ -288,9 +412,19 @@ async function sendFix() {
                 ? a.distance_remaining_km.toFixed(1) + ' km' : '—';
         }
     } catch (err) {
-        // Offline in a dead spot: keep watching, the next tick retries.
+        // Offline in a dead spot: the buffer holds, the next tick retries.
         setDot('ping-err', 'No signal');
     }
+}
+
+function beaconFlush() {
+    // The tab is being hidden or frozen and fetch may not survive it. sendBeacon
+    // is handed to the browser and delivered after the page is gone.
+    if (!buffer.length || !navigator.sendBeacon) return;
+    try {
+        const body = new Blob([JSON.stringify({ points: buffer })], { type: 'application/json' });
+        if (navigator.sendBeacon(PING_URL, body)) { buffer = []; saveBuffer(); }
+    } catch (err) {}
 }
 
 async function setStatus(assignmentId, status) {
@@ -322,7 +456,49 @@ async function setStatus(assignmentId, status) {
     }
 }
 
-document.addEventListener('DOMContentLoaded', initMap);
-window.addEventListener('beforeunload', () => { if (sharing) stopSharing(); });
+async function resumeSharing() {
+    // Sharing is a state of the phone, not of this tab. If it was on when the
+    // driver last left, it comes back on by itself when the page reopens.
+    let remembered = false;
+    try { remembered = localStorage.getItem(SHARE_KEY) === '1'; } catch (err) {}
+    if (!remembered || !navigator.geolocation) return;
+    if (navigator.permissions && navigator.permissions.query) {
+        try {
+            const status = await navigator.permissions.query({ name: 'geolocation' });
+            // Resume silently only where permission already stands; re-prompting
+            // on every load would be a nag of its own.
+            if (status.state === 'denied') {
+                try { localStorage.removeItem(SHARE_KEY); } catch (e) {}
+                return;
+            }
+        } catch (err) {}
+    }
+    startSharing();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    initMap();
+    resumeSharing();
+    flush();
+});
+
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+        beaconFlush();
+        return;
+    }
+    if (!sharing) return;
+    // Back in front: the watch, the timer and the wake lock may all have been
+    // torn down while the phone was doing something else.
+    armWatch();
+    requestWakeLock();
+    flush();
+});
+
+window.addEventListener('pagehide', beaconFlush);
+window.addEventListener('freeze', beaconFlush);
+window.addEventListener('pageshow', (event) => {
+    if (event.persisted && sharing) { armWatch(); requestWakeLock(); }
+});
 </script>
 {% endblock %}

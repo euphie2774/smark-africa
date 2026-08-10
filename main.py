@@ -168,6 +168,31 @@ csp = {
 # Only enforce HTTPS in production
 force_https = os.environ.get('FLASK_ENV') == 'production'
 
+# Locked down site-wide. Talisman owns this header - it registers its
+# after_request first, so it runs last and overwrites anything a later hook
+# sets - which is why the policy is declared here rather than by hand.
+PERMISSIONS_POLICY = {
+    'geolocation': '()',
+    'microphone': '()',
+    'camera': '()',
+    'browsing-topics': '()',
+}
+# The driver console and the two maps that follow a rider are the only pages
+# that read the device position, so they get their own relaxed copy.
+GEOLOCATION_POLICY = dict(PERMISSIONS_POLICY, geolocation='(self)')
+
+
+def allows_geolocation(view):
+    """Let one view ask the browser for the device position.
+
+    Talisman looks for this attribute on the view function and treats it as a
+    per-view override, so the site-wide `geolocation=()` above stays in force
+    everywhere it is not applied.
+    """
+    view.talisman_view_options = {'permissions_policy': GEOLOCATION_POLICY}
+    return view
+
+
 # Apply Flask-Talisman for security headers
 try:
     talisman = Talisman(
@@ -178,6 +203,7 @@ try:
         strict_transport_security_include_subdomains=True,
         strict_transport_security_preload=True,
         content_security_policy=csp,
+        permissions_policy=PERMISSIONS_POLICY,
     )
 except Exception as e:
     logger.warning(f'Flask-Talisman initialization warning: {e}. Continuing without some security headers.')
@@ -12282,8 +12308,9 @@ def driver_link_message(driver, reason='created'):
                if reason == 'created' else
                'Your SMARKAFRICA driver tracking link has been regenerated')
     return (f'Hi {name}. {opening}:\n\n{link}\n\n'
-            'Open it on the phone you deliver with, allow location and leave the '
-            'page open - dispatch follows you on the map from there. '
+            'Open it once on the phone you deliver with and allow location - '
+            'dispatch follows you on the map from there and you can keep using '
+            'your phone normally. '
             'Keep the link to yourself; it reports your position as you.')
 
 
@@ -12333,8 +12360,9 @@ def notify_driver_tracking_link(driver, reason='created'):
         html = f"""
         <h2>Your driver tracking link</h2>
         <p>Hi {name},</p>
-        <p>Open this on the phone you deliver with, allow location, and leave the
-           page open. Dispatch follows your position on the map from there.</p>
+        <p>Open this once on the phone you deliver with and allow location.
+           Dispatch follows your position on the map from there, and you can
+           carry on using your phone as normal.</p>
         <p><a href="{link}" style="background:#0d6efd;color:#fff;padding:10px 18px;
            border-radius:6px;text-decoration:none;display:inline-block">Open my driver console</a></p>
         <p style="font-size:12px;color:#666">{link}</p>
@@ -12645,6 +12673,36 @@ def driver_for_token(token):
     return DriverProfile.query.filter_by(tracking_token=token.strip(), is_active=True).first()
 
 
+# A backgrounded phone buffers its fixes and posts them together, so one request
+# can legitimately carry several minutes of driving. Bounded so a broken or
+# hostile client cannot push an unbounded backlog through in a single call.
+DRIVER_PING_BATCH_LIMIT = 60
+
+
+def parse_client_timestamp(value):
+    """A phone-supplied ISO timestamp, or None when it is absent or unusable.
+
+    Buffered fixes carry the moment they were taken rather than the moment they
+    reached us, otherwise a backlog posted after a tunnel would all land on the
+    same second and the trail would show a stop where there was none. Anything
+    unparseable, or far enough out of range to be a wrong device clock, is
+    dropped so the caller falls back to server time.
+    """
+    if not value:
+        return None
+    try:
+        text = str(value).strip().replace('Z', '+00:00')
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    now = utcnow()
+    if parsed > now + timedelta(minutes=5) or parsed < now - timedelta(hours=24):
+        return None
+    return parsed
+
+
 @app.route('/driver/<token>')
 def driver_console(token):
     """Mobile page a driver keeps open; posts GPS on an interval.
@@ -12666,6 +12724,9 @@ def driver_console(token):
         token=token,
         map_style_url=map_style_url(),
         ping_seconds=int(shipping_setting_float('driver_ping_seconds', 20) or 20),
+        # Seeded so the road already travelled is on the map the moment the page
+        # opens - after a reload, or after the driver comes back from another app.
+        trail=driver_trail(driver.id, assignments[0].order_id if assignments else None),
     )
 
 
@@ -12673,55 +12734,85 @@ def driver_console(token):
 @limiter.limit('120 per minute')
 @csrf.exempt
 def api_driver_ping(token):
-    """Ingest a GPS fix from a driver's phone.
+    """Ingest one or more GPS fixes from a driver's phone.
 
     CSRF-exempt because the driver page authenticates with the bearer-style
     token in the URL rather than a session cookie.
+
+    Accepts a batch under "points" as well as a single fix. A phone that goes
+    through a tunnel, or whose browser is put in the background, buffers its
+    fixes locally and posts the backlog on the next opportunity; taking them
+    all in one request is what keeps the travelled line unbroken instead of
+    jumping straight from the tunnel mouth to wherever the driver resurfaced.
     """
     driver = driver_for_token(token)
     if not driver:
         return jsonify({'ok': False, 'error': 'unknown driver'}), 404
 
     data = request.get_json(silent=True) or {}
-    try:
-        lat = float(data.get('lat'))
-        lng = float(data.get('lng'))
-    except (TypeError, ValueError):
-        return jsonify({'ok': False, 'error': 'lat and lng are required'}), 400
+    raw_points = data.get('points')
+    if not isinstance(raw_points, list) or not raw_points:
+        raw_points = [data]
+    # Cap the batch so a bad client cannot post an unbounded backlog in one go.
+    raw_points = raw_points[-DRIVER_PING_BATCH_LIMIT:]
 
-    point = GeoPoint(lat, lng)
-    if not point.is_valid():
-        return jsonify({'ok': False, 'error': 'coordinates out of range'}), 400
-
-    def _num(name):
+    def _num(source, name):
         try:
-            value = data.get(name)
+            value = source.get(name)
             return float(value) if value is not None else None
         except (TypeError, ValueError):
             return None
 
-    accuracy = _num('accuracy_m')
+    fixes = []
+    for raw in raw_points:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            lat = float(raw.get('lat'))
+            lng = float(raw.get('lng'))
+        except (TypeError, ValueError):
+            continue
+        if not GeoPoint(lat, lng).is_valid():
+            continue
+        fixes.append({
+            'lat': lat,
+            'lng': lng,
+            'accuracy_m': _num(raw, 'accuracy_m'),
+            'speed_kph': _num(raw, 'speed_kph'),
+            'heading': _num(raw, 'heading'),
+            'at': parse_client_timestamp(raw.get('at')),
+        })
+
+    if not fixes:
+        return jsonify({'ok': False, 'error': 'lat and lng are required'}), 400
+
     active = DeliveryAssignment.query.filter(
         DeliveryAssignment.driver_id == driver.id,
         DeliveryAssignment.status.in_(['assigned', 'picked_up', 'in_transit'])
     ).order_by(DeliveryAssignment.assigned_at.asc()).first()
 
-    driver.last_lat = lat
-    driver.last_lng = lng
-    driver.last_accuracy_m = accuracy
+    for fix in fixes:
+        db.session.add(DriverLocationPing(
+            driver_id=driver.id,
+            order_id=active.order_id if active else None,
+            lat=fix['lat'], lng=fix['lng'], accuracy_m=fix['accuracy_m'],
+            speed_kph=fix['speed_kph'], heading=fix['heading'],
+            created_at=fix['at'] or utcnow(),
+        ))
+
+    # The denormalised position on the profile is what the dispatch map reads,
+    # so it must follow the newest fix in the batch, not the first one stored.
+    latest = fixes[-1]
+    driver.last_lat = latest['lat']
+    driver.last_lng = latest['lng']
+    driver.last_accuracy_m = latest['accuracy_m']
     driver.last_ping_at = utcnow()
     # Derive availability from live work rather than trusting the stored value,
     # which drifts if an assignment is created outside the dispatch flow.
     driver.status = 'on_delivery' if active else 'available'
 
-    db.session.add(DriverLocationPing(
-        driver_id=driver.id,
-        order_id=active.order_id if active else None,
-        lat=lat, lng=lng, accuracy_m=accuracy,
-        speed_kph=_num('speed_kph'), heading=_num('heading'),
-    ))
-
-    response = {'ok': True, 'recorded_at': driver.last_ping_at.isoformat()}
+    response = {'ok': True, 'recorded_at': driver.last_ping_at.isoformat(),
+                'accepted': len(fixes)}
     if active:
         recalculate_assignment_eta(active, driver)
         response['assignment'] = {
@@ -13330,6 +13421,38 @@ def seller_withdrawals():
                            available_balance=seller_available_balance(current_user.id))
 
 
+def website_ad_link(product=None):
+    """The public URL an ad clicks through to - always back into the website.
+
+    Ads run from the SMARKAFRICA accounts, so the click has to land on our own
+    product page: an off-site link spends our audience on somebody else's
+    checkout. Built on public_base_url() rather than request.host_url because
+    the link is pasted into a phone app, where "http://localhost/..." is dead.
+    """
+    base = public_base_url() or ''
+    slug = getattr(product, 'slug', None) if product is not None else None
+    try:
+        path = url_for('product_page', slug=slug) if slug else url_for('shop')
+    except Exception:
+        path = f'/product/{slug}' if slug else '/shop'
+    return f'{base}{path}' if base else path
+
+
+def social_ad_request_error(user):
+    """Why this account may not ask for a post on our social accounts, or ''.
+
+    The rule is the seller's own trading credential: a verified seller badge or
+    an approved storefront. Anyone else has nothing for us to vouch for when the
+    ad goes out under the SMARKAFRICA name.
+    """
+    if not (user and getattr(user, 'is_authenticated', False)):
+        return 'Sign in with your seller account to request a social media ad.'
+    if user_can_sell(user) or user_has_storefront(user):
+        return ''
+    return ('Only verified sellers and approved storefronts can request a post on the '
+            'SMARKAFRICA social accounts. Finish verification first.')
+
+
 @app.route('/seller/ads', methods=['GET', 'POST'])
 @login_required
 def seller_ads():
@@ -13338,8 +13461,9 @@ def seller_ads():
     if Setting.get('seller_ads_enabled', '0') != '1':
         flash('Seller ads are currently disabled by admin.', 'info')
         return redirect(url_for('home'))
-    if not user_can_sell(current_user) and not user_has_storefront(current_user):
-        flash('Complete seller verification before creating ads.', 'warning')
+    eligibility_error = social_ad_request_error(current_user)
+    if eligibility_error:
+        flash(eligibility_error, 'warning')
         return redirect(url_for('seller_apply'))
 
     products = Product.query.filter_by(seller_id=current_user.id).all()
@@ -13349,6 +13473,10 @@ def seller_ads():
         ad_charge = ad_plan_prices.get(plan_key, ad_plan_prices['daily'])
         budget = form_float('budget', ad_charge, minimum=0)
         platform = request.form.get('platform', 'SMARKAFRICA')
+        placement = (request.form.get('placement', 'social') or 'social').strip()
+        # Anything that is not an on-platform banner goes out from our own social
+        # accounts, so it carries the stricter rules below.
+        wants_social = placement != 'smarkafrica'
         product_id = request.form.get('product_id', type=int)
         product = Product.query.filter_by(id=product_id, seller_id=current_user.id).first() if product_id else None
         mpesa_phone = request.form.get('mpesa_phone', '').strip() or current_user.phone or ''
@@ -13356,6 +13484,10 @@ def seller_ads():
             flash('Ad payment amount must be greater than zero.', 'danger')
         elif product_id and not product:
             flash('Choose one of your own products for this ad.', 'danger')
+        elif wants_social and not product:
+            # The request is to advertise a product, and the post has to link to
+            # its page - there is nothing to point the audience at without one.
+            flash('Choose which of your products should be posted on the SMARKAFRICA social accounts.', 'danger')
         elif not normalize_mpesa_phone(mpesa_phone):
             flash('Enter the M-Pesa phone number that should receive the STK push.', 'danger')
         else:
@@ -13371,8 +13503,10 @@ def seller_ads():
                 audience=request.form.get('audience', '').strip(),
                 ad_copy=request.form.get('ad_copy', '').strip(),
                 creative_url=request.form.get('creative_url', '').strip(),
-                destination_url=request.form.get('destination_url', '').strip(),
-                placement=request.form.get('placement', 'social'),
+                # Not seller-supplied. The post goes out from our accounts, so the
+                # click comes back to our product page every time.
+                destination_url=website_ad_link(product),
+                placement=placement,
                 total_charged=ad_charge,
                 status='pending_payment'
             )
@@ -13383,15 +13517,26 @@ def seller_ads():
             if stk_result.get('success') and stk_result.get('checkout_request_id'):
                 Setting.query.filter_by(key=f'ad_stk_{stk_result["checkout_request_id"]}').delete()
                 db.session.add(Setting(key=f'ad_stk_{stk_result["checkout_request_id"]}', value=str(campaign.id)))
-                flash(f'Ad details saved. STK Push sent to {mpesa_phone} for KSh {ad_charge:,.2f}. The ad will wait for payment confirmation and admin approval.', 'success')
+                flash(f'Ad details saved. STK Push sent to {mpesa_phone} for KSh {ad_charge:,.2f}. '
+                      f'Your request reaches the social posting queue once the payment clears.', 'success')
             else:
                 flash(stk_result.get('error') or f'Ad details saved, but the STK Push could not be sent. Try payment again from your ad list.', 'warning')
             db.session.commit()
         return redirect(url_for('seller_ads'))
     campaigns = AdCampaign.query.filter_by(seller_id=current_user.id).order_by(AdCampaign.created_at.desc()).all()
+    # Show the seller where each paid request got to, so "is it live yet?" is
+    # answered on the page instead of by a message to support.
+    posts_by_campaign = {}
+    campaign_ids = [c.id for c in campaigns]
+    if campaign_ids:
+        for post in SocialAdPost.query.filter(SocialAdPost.campaign_id.in_(campaign_ids)).all():
+            posts_by_campaign[post.campaign_id] = post
     return render_template('seller_ads.html', products=products, campaigns=campaigns,
                            payment_instructions=Setting.get('seller_ad_payment_instructions', ''),
-                           ad_plan_prices=ad_plan_prices)
+                           ad_plan_prices=ad_plan_prices,
+                           posts_by_campaign=posts_by_campaign,
+                           campaign_is_paid=social_ad_campaign_is_paid,
+                           site_base_url=public_base_url())
 
 
 @app.route('/admin/ads', methods=['GET', 'POST'])
@@ -13407,10 +13552,10 @@ def admin_ads():
         audience = request.form.get('audience', '').strip()
         ad_copy = request.form.get('ad_copy', '').strip()
         creative_url = request.form.get('creative_url', '').strip()
-        destination_url = request.form.get('destination_url', '').strip()
         budget = float(request.form.get('budget', 0) or 0)
         is_platform_ad = placement == 'smarkafrica'
         total_charged = 0.0 if current_user.is_admin else budget
+        product = Product.query.get(product_id) if product_id else None
         campaign = AdCampaign(
             seller_id=current_user.id,
             product_id=product_id,
@@ -13420,7 +13565,8 @@ def admin_ads():
             audience=audience,
             ad_copy=ad_copy,
             creative_url=creative_url,
-            destination_url=destination_url,
+            # House ads follow the same rule as seller ads: the click comes home.
+            destination_url=website_ad_link(product),
             budget=budget,
             admin_commission=0.0,
             total_charged=total_charged,
@@ -13502,20 +13648,59 @@ SOCIAL_AD_PAID_STATUSES = ['pending_approval', 'active', 'approved', 'completed'
 def social_ad_campaign_is_paid(campaign):
     """True when a campaign has cleared payment and may be posted.
 
-    House ads created by an admin carry no charge, so they count as paid.
+    House ads created by an admin carry no charge, so they count as paid. A
+    seller request never does: it is only paid once M-Pesa has moved it off
+    pending_payment, so a zero total on a seller row is treated as unpaid
+    rather than as a free pass onto our accounts.
     """
     if campaign is None:
         return True
+    status = str(campaign.status or '')
+    seller = getattr(campaign, 'seller', None)
+    if seller is not None and not seller.is_admin:
+        return status in SOCIAL_AD_PAID_STATUSES
     if float(campaign.total_charged or 0) <= 0:
         return True
-    return str(campaign.status or '') in SOCIAL_AD_PAID_STATUSES
+    return status in SOCIAL_AD_PAID_STATUSES
+
+
+def social_ad_link(post=None, campaign=None):
+    """The website page a queued post must send its readers to.
+
+    Derived from the product rather than stored, so a post cannot drift onto a
+    stale or off-site URL after the campaign was created.
+    """
+    product = None
+    if post is not None:
+        product = getattr(post, 'product', None)
+        if product is None and getattr(post, 'product_id', None):
+            product = db.session.get(Product, post.product_id)
+        if campaign is None:
+            campaign = getattr(post, 'campaign', None)
+    if product is None and campaign is not None:
+        product = campaign.product
+    return website_ad_link(product)
+
+
+def social_ad_blocker(campaign):
+    """Why this campaign may not go out on our accounts, or '' when it may."""
+    if campaign is None:
+        return ''
+    seller = getattr(campaign, 'seller', None)
+    if seller is not None and not seller.is_admin:
+        reason = social_ad_request_error(seller)
+        if reason:
+            return f'{seller.username} is not a verified seller or approved storefront.'
+    if not social_ad_campaign_is_paid(campaign):
+        return 'This campaign has not been paid for yet.'
+    return ''
 
 
 def social_ad_hashtag_count(value):
     return len([tag for tag in re.findall(r'#\w+', value or '')])
 
 
-def apply_social_ad_form(post):
+def apply_social_ad_form(post, campaign=None):
     """Read the composer onto a post. Returns an error string or None."""
     platform = (request.form.get('platform', 'instagram') or 'instagram').strip().lower()
     if platform not in SOCIAL_AD_PLATFORMS:
@@ -13523,8 +13708,20 @@ def apply_social_ad_form(post):
     caption = (request.form.get('caption', '') or '').strip()
     if not caption:
         return 'Write a caption before saving.'
+
+    # product_id has to land before the link is derived, or a post whose product
+    # was just changed would carry the previous product's URL.
+    post.product_id = request.form.get('product_id', type=int)
+
+    # Appended rather than merely checked: the ad carries our name, so an admin
+    # trimming the caption must not be able to publish a post with no way back
+    # to the website.
+    link = social_ad_link(post, campaign)
+    if link and link not in caption:
+        caption = f'{caption}\n\n{link}'
     if len(caption) > SOCIAL_AD_CAPTION_LIMIT:
-        return f'Instagram captions cap at {SOCIAL_AD_CAPTION_LIMIT} characters. Yours is {len(caption)}.'
+        return (f'Captions cap at {SOCIAL_AD_CAPTION_LIMIT} characters once the '
+                f'{len(link)}-character website link is added. Yours is {len(caption)}.')
 
     hashtags = (request.form.get('hashtags', '') or '').strip()[:600]
     if social_ad_hashtag_count(hashtags) > 30:
@@ -13550,7 +13747,6 @@ def apply_social_ad_form(post):
     post.creative_url = (request.form.get('creative_url', '') or '').strip()[:500]
     post.scheduled_for = scheduled_for
     post.notes = (request.form.get('notes', '') or '').strip()[:2000]
-    post.product_id = request.form.get('product_id', type=int)
     if post.status not in ['posted', 'archived']:
         post.status = status
     return None
@@ -13561,19 +13757,26 @@ def social_ad_queue_context(editing=None):
     posts = SocialAdPost.query.order_by(SocialAdPost.created_at.desc()).limit(100).all()
     posted_campaign_ids = {p.campaign_id for p in posts if p.campaign_id and p.status != 'archived'}
 
-    # Social campaigns a seller has paid for that nobody has drafted a post for yet.
+    # Social campaigns nobody has drafted a post for yet, split on money. Only a
+    # request that has actually been paid for reaches the compose queue; the rest
+    # sit in their own list where the single available action is to record the
+    # payment, so an unpaid ad cannot reach our accounts by misreading a row.
     candidates = AdCampaign.query.filter(
         AdCampaign.placement != 'smarkafrica'
     ).order_by(AdCampaign.created_at.desc()).limit(100).all()
-    awaiting = [c for c in candidates if c.id not in posted_campaign_ids]
+    pending = [c for c in candidates if c.id not in posted_campaign_ids]
+    awaiting = [c for c in pending if not social_ad_blocker(c)]
+    blocked = [(c, social_ad_blocker(c)) for c in pending if social_ad_blocker(c)]
 
     return {
         'posts': posts,
         'awaiting': awaiting,
+        'blocked': blocked,
         'editing': editing,
         'platforms': SOCIAL_AD_PLATFORMS,
         'caption_limit': SOCIAL_AD_CAPTION_LIMIT,
         'campaign_is_paid': social_ad_campaign_is_paid,
+        'ad_link': social_ad_link,
         'products': Product.query.filter_by(is_active=True).order_by(Product.name).limit(300).all(),
     }
 
@@ -13593,13 +13796,14 @@ def admin_social_ad_new():
     campaign_id = request.values.get('campaign_id', type=int)
     campaign = AdCampaign.query.get(campaign_id) if campaign_id else None
 
-    if campaign and not social_ad_campaign_is_paid(campaign):
-        flash('This campaign has not been paid for yet. Mark it paid on the Ads screen first.', 'warning')
+    blocker = social_ad_blocker(campaign)
+    if blocker:
+        flash(f'{blocker} It cannot be posted on the SMARKAFRICA accounts yet.', 'warning')
         return redirect(url_for('admin_social_ads'))
 
     if request.method == 'POST':
         post = SocialAdPost(campaign_id=campaign.id if campaign else None)
-        error = apply_social_ad_form(post)
+        error = apply_social_ad_form(post, campaign)
         if error:
             # Re-render with what they typed rather than making them start over.
             flash(error, 'danger')
@@ -13614,12 +13818,18 @@ def admin_social_ad_new():
         return redirect(url_for('admin_social_ads'))
 
     # Pre-fill from the campaign the seller already paid for, so the admin is
-    # editing their words rather than retyping them.
+    # editing their words rather than retyping them. The website link is seeded
+    # into the caption here too, so the admin sees it in the preview instead of
+    # discovering it appended after they save.
+    seed_caption = (campaign.ad_copy if campaign else '') or ''
+    seed_link = social_ad_link(campaign=campaign)
+    if seed_link and seed_link not in seed_caption:
+        seed_caption = f'{seed_caption}\n\n{seed_link}'.strip()
     draft = SocialAdPost(
         campaign_id=campaign.id if campaign else None,
         product_id=campaign.product_id if campaign else None,
         platform='instagram',
-        caption=(campaign.ad_copy if campaign else '') or '',
+        caption=seed_caption,
         creative_url=(campaign.creative_url if campaign else '') or
                      (campaign.product.image_url if campaign and campaign.product else ''),
         status='draft',
@@ -13635,7 +13845,7 @@ def admin_social_ad_new():
 def admin_social_ad_edit(post_id):
     post = SocialAdPost.query.get_or_404(post_id)
     if request.method == 'POST':
-        error = apply_social_ad_form(post)
+        error = apply_social_ad_form(post, post.campaign)
         if error:
             flash(error, 'danger')
         else:
@@ -13652,8 +13862,9 @@ def admin_social_ad_edit(post_id):
 @admin_required
 def admin_social_ad_mark_posted(post_id):
     post = SocialAdPost.query.get_or_404(post_id)
-    if not social_ad_campaign_is_paid(post.campaign):
-        flash('That campaign has not been paid for. Mark it paid before recording a live post.', 'danger')
+    blocker = social_ad_blocker(post.campaign)
+    if blocker:
+        flash(f'{blocker} Resolve that before recording a live post.', 'danger')
         return redirect(url_for('admin_social_ads'))
 
     posted_url = (request.form.get('posted_url', '') or '').strip()
@@ -16309,6 +16520,13 @@ def before_request():
         pass
 
 
+# The pages that legitimately read the device's position. Marked on the view
+# itself rather than sniffed from the path, so a route rename cannot quietly
+# re-block the driver's GPS.
+for _view in (driver_console, admin_dispatch, track_order):
+    allows_geolocation(_view)
+
+
 @app.after_request
 def add_security_headers(response):
     """Add security headers"""
@@ -16316,7 +16534,8 @@ def add_security_headers(response):
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-XSS-Protection'] = '1; mode=block'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
-    response.headers['Permissions-Policy'] = 'microphone=(), geolocation=()'
+    # Permissions-Policy is deliberately absent: Talisman writes it after this
+    # hook runs, so setting it here would be silently discarded.
     return response
 
 

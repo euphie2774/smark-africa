@@ -50,6 +50,16 @@
                         </div>
                         {% endif %}
 
+                        <!-- The link is derived from the product, not typed: an ad from our
+                             own accounts always sends the click back to this site. -->
+                        <label class="form-label">Links to</label>
+                        <div class="input-group mb-3">
+                            <input type="text" class="form-control bg-light" id="adLink" readonly
+                                   value="{{ ad_link(editing, campaign) }}">
+                            <button type="button" class="btn btn-outline-secondary" id="copyLink"
+                                    title="Copy the destination link"><i class="fas fa-copy"></i></button>
+                        </div>
+
                         <label class="form-label">Platform</label>
                         <select name="platform" class="form-select mb-3">
                             {% for platform in platforms %}
@@ -151,7 +161,7 @@
         <div class="col-xl-7">
             <div class="card border-0 shadow-sm mb-4">
                 <div class="card-header bg-white d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0">Campaigns waiting for a post</h5>
+                    <h5 class="mb-0">Paid requests waiting for a post</h5>
                     <span class="text-muted small">{{ awaiting|length }}</span>
                 </div>
                 <div class="table-responsive">
@@ -175,33 +185,21 @@
                                 </td>
                                 <td class="small">{{ item.seller.username if item.seller else '—' }}</td>
                                 <td>
-                                    {% if campaign_is_paid(item) %}
                                     <span class="badge bg-success">
                                         KSh {{ '{:,.0f}'.format(item.total_charged or 0) }}
                                     </span>
-                                    {% else %}
-                                    <span class="badge bg-warning text-dark">Unpaid</span>
-                                    {% endif %}
                                 </td>
                                 <td class="text-end">
-                                    {% if campaign_is_paid(item) %}
                                     <a href="{{ url_for('admin_social_ad_new', campaign_id=item.id) }}"
                                        class="btn btn-sm btn-success">
                                         <i class="fas fa-pen-nib me-1"></i>Compose
                                     </a>
-                                    {% else %}
-                                    <form method="POST" class="d-inline"
-                                          action="{{ url_for('admin_mark_ad_paid', ad_id=item.id) }}">
-                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                        <button class="btn btn-sm btn-outline-warning">Mark paid</button>
-                                    </form>
-                                    {% endif %}
                                 </td>
                             </tr>
                             {% else %}
                             <tr>
                                 <td colspan="4" class="text-center text-muted py-4">
-                                    No campaigns waiting. Sellers request these from their ads page.
+                                    No paid requests waiting. Sellers request these from their ads page.
                                 </td>
                             </tr>
                             {% endfor %}
@@ -209,6 +207,56 @@
                     </table>
                 </div>
             </div>
+
+            {% if blocked %}
+            <!-- Deliberately its own list with no Compose button. A request only
+                 becomes postable once it is paid and the seller is verified. -->
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Not yet eligible</h5>
+                    <span class="text-muted small">{{ blocked|length }}</span>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Campaign</th>
+                                <th>Seller</th>
+                                <th>Blocked because</th>
+                                <th class="text-end">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item, reason in blocked %}
+                            <tr>
+                                <td>
+                                    <div class="fw-semibold">#{{ item.id }} {{ item.platform }}</div>
+                                    <div class="small text-muted">
+                                        KSh {{ '{:,.0f}'.format(item.total_charged or 0) }}
+                                        &middot; <code>{{ item.status }}</code>
+                                    </div>
+                                </td>
+                                <td class="small">{{ item.seller.username if item.seller else '—' }}</td>
+                                <td class="small text-danger">{{ reason }}</td>
+                                <td class="text-end">
+                                    {% if not campaign_is_paid(item) %}
+                                    <form method="POST" class="d-inline"
+                                          action="{{ url_for('admin_mark_ad_paid', ad_id=item.id) }}">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button class="btn btn-sm btn-outline-warning">Mark paid</button>
+                                    </form>
+                                    {% else %}
+                                    <a href="{{ url_for('admin_users', search=item.seller.username) if item.seller else '#' }}"
+                                       class="btn btn-sm btn-outline-secondary">Review seller</a>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
 
             <div class="card border-0 shadow-sm">
                 <div class="card-header bg-white"><h5 class="mb-0">Posts</h5></div>
@@ -259,6 +307,10 @@
                                     {% else %}
                                     <span class="text-muted">—</span>
                                     {% endif %}
+                                    <div class="text-muted text-truncate" style="max-width:220px;"
+                                         title="{{ ad_link(post) }}">
+                                        <i class="fas fa-link me-1"></i>{{ ad_link(post) }}
+                                    </div>
                                 </td>
                                 <td class="text-end">
                                     <a href="{{ url_for('admin_social_ad_edit', post_id=post.id) }}"
@@ -343,7 +395,10 @@
     refresh();
 
     document.getElementById('copyCaption')?.addEventListener('click', async function () {
-        const payload = [caption.value || '', hashtags.value || ''].filter(Boolean).join('\n\n');
+        // The caption already carries the website link - it is appended on save
+        // and seeded into the draft - so copying the caption copies the link.
+        const payload = [caption.value || '', hashtags.value || '']
+            .filter(Boolean).join('\n\n');
         try {
             await navigator.clipboard.writeText(payload);
             this.innerHTML = '<i class="fas fa-check me-1"></i>Copied';
@@ -352,6 +407,18 @@
             }, 2000);
         } catch (err) {
             alert('Could not copy automatically. Select the caption and copy it manually.');
+        }
+    });
+
+    document.getElementById('copyLink')?.addEventListener('click', async function () {
+        const link = document.getElementById('adLink');
+        if (!link) return;
+        try {
+            await navigator.clipboard.writeText(link.value);
+            this.innerHTML = '<i class="fas fa-check"></i>';
+            setTimeout(() => { this.innerHTML = '<i class="fas fa-copy"></i>'; }, 2000);
+        } catch (err) {
+            link.select();
         }
     });
 })();

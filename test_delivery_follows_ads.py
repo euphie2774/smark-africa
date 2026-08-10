@@ -35,6 +35,10 @@ def _scratch_database():
 SCRATCH_DB = _scratch_database()
 os.environ['DATABASE_URL'] = 'sqlite:///' + SCRATCH_DB.replace('\\', '/')
 os.environ['FLASK_ENV'] = 'development'
+# The settings dict is cached for 60s in a FileSystemCache under .cache, which
+# outlives the process - a previous run could otherwise hand this one stale
+# toggles. Tests get no cache at all.
+os.environ['CACHE_TYPE'] = 'NullCache'
 os.environ.setdefault('SECRET_KEY', 'smoke-test-key')
 
 import main  # noqa: E402
@@ -97,11 +101,12 @@ with app.app_context():
     db.session.commit()
 
     storefront = BusinessStorefront(owner_id=seller.id, business_name='DFA Test Shop',
-                                    status='approved')
+                                    slug='dfa-test-shop', status='approved')
     db.session.add(storefront)
     db.session.commit()
 
     product = Product(name='DFA Solar Lantern', slug='dfa-solar-lantern',
+                      description='Solar lantern for the delivery tests.',
                       selling_price=2500.0, buying_price=1500.0, stock=5,
                       seller_id=seller.id, category_id=category.id,
                       is_active=True, review_status='approved',

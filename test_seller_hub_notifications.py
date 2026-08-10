@@ -35,6 +35,10 @@ def _scratch_database():
 SCRATCH_DB = _scratch_database()
 os.environ['DATABASE_URL'] = 'sqlite:///' + SCRATCH_DB.replace('\\', '/')
 os.environ['FLASK_ENV'] = 'development'
+# The app caches the settings dict for 60s in a FileSystemCache under .cache,
+# which outlives the process - so a previous run could hand this one a stale
+# seller_signup_enabled and blank the navbar. Tests get no cache at all.
+os.environ['CACHE_TYPE'] = 'NullCache'
 os.environ.setdefault('SECRET_KEY', 'smoke-test-key')
 
 import main  # noqa: E402
@@ -172,7 +176,6 @@ with app.test_client() as client:
     r = client.post('/storefront/apply',
                     data={'about': 'We stock phones, laptops and do repairs.',
                           'specialties': 'Phones, Laptops, Repairs',
-                          'opening_hours': 'Mon-Sat 8am - 6pm',
                           'contact_phone': '+254712345678',
                           'contact_email': 'hub@test.local',
                           'physical_address': 'Kimathi Street, Nairobi',
@@ -187,8 +190,9 @@ with app.app_context():
           storefront.about)
     check('specialties persisted', storefront.specialties == 'Phones, Laptops, Repairs',
           storefront.specialties)
-    check('opening_hours persisted', storefront.opening_hours == 'Mon-Sat 8am - 6pm',
-          storefront.opening_hours)
+    # Opening hours are no longer asked for on this form - the field was dropped
+    # from the shop-details page, so there is nothing to round-trip. The column
+    # stays on the model for the older storefronts that already filled it in.
 
 with app.test_client() as client:
     login(client, seller_id)

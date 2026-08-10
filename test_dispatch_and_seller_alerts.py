@@ -36,12 +36,16 @@ def _scratch_database():
 SCRATCH_DB = _scratch_database()
 os.environ['DATABASE_URL'] = 'sqlite:///' + SCRATCH_DB.replace('\\', '/')
 os.environ['FLASK_ENV'] = 'development'
+# The settings dict is cached for 60s in a FileSystemCache under .cache, which
+# outlives the process - a previous run could otherwise hand this one stale
+# toggles. Tests get no cache at all.
+os.environ['CACHE_TYPE'] = 'NullCache'
 os.environ.setdefault('SECRET_KEY', 'smoke-test-key')
 
 import main  # noqa: E402
 from models import (db, User, Product, Category, Order, OrderItem,  # noqa: E402
                     DriverProfile, DriverLocationPing, DeliveryAssignment,
-                    CustomerNotification)
+                    CustomerNotification, BusinessStorefront)
 
 app = main.app
 app.config['TESTING'] = True
@@ -401,6 +405,14 @@ with app.app_context():
     check('SMS is the fallback that always fires', result['sms'] is True, SENT_SMS)
     check('WhatsApp honestly reports not-configured', result['whatsapp'] is False)
 
+    # The hand-off copy has to agree with how tracking now works: the driver
+    # opens the link once and carries on using the phone.
+    handoff = SENT_SMS[-1][1]
+    check('the text no longer tells the driver to sit on the page',
+          'page open' not in handoff, handoff)
+    check('the text says they can keep using the phone',
+          'using your phone' in handoff, handoff)
+
     note = CustomerNotification.query.filter_by(
         user_id=rider.user_id, notification_type='driver_link').first()
     check('the note is on the driver\'s account', note is not None,
@@ -657,6 +669,246 @@ check('stacked cells print their column name', 'content: attr(data-label)' in di
 check('action cell allowed to wrap', 'td.dispatch-actions { white-space: normal; }' in dispatch_html)
 check('a clipped table shades its edge instead of hiding silently',
       '.dispatch-scroll.is-clipped::after' in dispatch_html)
+
+print('\n== social ads only leave on paid, eligible requests ==')
+with app.app_context():
+    # Three would-be advertisers: a verified seller, a plain customer, and a
+    # customer whose only credential is an approved storefront.
+    storefront_user = User(username='frontonly', email='frontonly@test.local',
+                           password_hash='dummy')
+    db.session.add(storefront_user)
+    db.session.commit()
+    db.session.add(BusinessStorefront(owner_id=storefront_user.id,
+                                      business_name='Front Only Traders',
+                                      slug='front-only-traders', status='approved'))
+    db.session.commit()
+
+    seller_obj = db.session.get(User, seller_id)
+    buyer_obj = db.session.get(User, buyer_id)
+    check('a verified seller may ask', main.social_ad_request_error(seller_obj) == '',
+          main.social_ad_request_error(seller_obj))
+    check('an approved storefront may ask too',
+          main.social_ad_request_error(storefront_user) == '',
+          main.social_ad_request_error(storefront_user))
+    check('a plain customer may not', main.social_ad_request_error(buyer_obj) != '')
+    check('and is told why', 'verified' in main.social_ad_request_error(buyer_obj).lower())
+
+    base = main.public_base_url()
+    product_obj = db.session.get(Product, product_id)
+    link = main.website_ad_link(product_obj)
+    check('the ad link is absolute, not localhost',
+          link.startswith(base) and 'localhost' not in link, link)
+    check('and lands on the product page here', product_obj.slug in link, link)
+
+    paid = main.AdCampaign(seller_id=seller_id, product_id=product_id,
+                           platform='Facebook / Instagram', budget=500,
+                           total_charged=500, placement='social',
+                           destination_url=link, ad_copy='Loud and portable.',
+                           status='active')
+    unpaid = main.AdCampaign(seller_id=seller_id, product_id=product_id,
+                             platform='TikTok', budget=500, total_charged=500,
+                             placement='social', destination_url=link,
+                             ad_copy='Still unpaid.', status='pending_payment')
+    ineligible = main.AdCampaign(seller_id=buyer_id, product_id=product_id,
+                                 platform='TikTok', budget=500, total_charged=500,
+                                 placement='social', destination_url=link,
+                                 ad_copy='Not a seller.', status='active')
+    db.session.add_all([paid, unpaid, ineligible])
+    db.session.commit()
+    paid_id, unpaid_id, ineligible_id = paid.id, unpaid.id, ineligible.id
+
+    check('a paid request from a verified seller is clear',
+          main.social_ad_blocker(paid) == '', main.social_ad_blocker(paid))
+    check('an unpaid request is blocked', 'paid' in main.social_ad_blocker(unpaid).lower(),
+          main.social_ad_blocker(unpaid))
+    check('a paid request from a non-seller is still blocked',
+          main.social_ad_blocker(ineligible) != '', main.social_ad_blocker(ineligible))
+    # A zero-charge row on a seller account must not read as "free, go ahead".
+    unpaid.total_charged = 0
+    check('a zero total does not make a seller request free',
+          main.social_ad_campaign_is_paid(unpaid) is False)
+    unpaid.total_charged = 500
+    db.session.commit()
+
+with app.test_client() as client:
+    login(client, admin_id)
+    html = client.get('/admin/social-ads').get_data(as_text=True)
+    check('the queue renders', 'Paid requests waiting' in html)
+    check('the paid request is offered for composing',
+          f'campaign_id={paid_id}' in html, paid_id)
+    check('the unpaid one is not', f'campaign_id={unpaid_id}' not in html, unpaid_id)
+    check('nor is the non-seller one', f'campaign_id={ineligible_id}' not in html)
+    check('both sit in the ineligible list instead', 'Not yet eligible' in html)
+
+    # The gate has to hold on the route itself, not only in the markup: a
+    # hand-typed URL is exactly how an unpaid ad would otherwise slip out.
+    r = client.get(f'/admin/social-ads/new?campaign_id={unpaid_id}')
+    check('composing an unpaid campaign is refused', r.status_code == 302, r.status_code)
+    r = client.get(f'/admin/social-ads/new?campaign_id={ineligible_id}')
+    check('composing a non-seller campaign is refused', r.status_code == 302, r.status_code)
+    r = client.get(f'/admin/social-ads/new?campaign_id={paid_id}')
+    check('composing a paid seller campaign is allowed', r.status_code == 200, r.status_code)
+    compose = r.get_data(as_text=True)
+    check('the caption is seeded with the website link',
+          main.public_base_url() in compose, None)
+    check('the destination is shown read-only, not typed',
+          'id="adLink"' in compose and 'readonly' in compose)
+    check('no free-text destination field survives',
+          'name="destination_url"' not in compose)
+
+with app.app_context():
+    # Saving must append the link even when an admin trims it out of the caption.
+    with app.test_request_context('/admin/social-ads/new', method='POST', data={
+        'platform': 'instagram', 'caption': 'No link in here at all.',
+        'product_id': str(product_id), 'status': 'draft',
+    }):
+        post = main.SocialAdPost(campaign_id=paid_id)
+        error = main.apply_social_ad_form(post, db.session.get(main.AdCampaign, paid_id))
+        check('the draft saves', error is None, error)
+        check('the website link is appended for the admin',
+              main.public_base_url() in (post.caption or ''), post.caption)
+
+with app.test_client() as client:
+    login(client, admin_id)
+    with app.app_context():
+        blocked_post = main.SocialAdPost(campaign_id=unpaid_id, platform='tiktok',
+                                         caption='Unpaid draft.', status='draft')
+        db.session.add(blocked_post)
+        db.session.commit()
+        blocked_post_id = blocked_post.id
+    r = client.post(f'/admin/social-ads/{blocked_post_id}/mark-posted',
+                    data={'posted_url': 'https://tiktok.com/@smarkafrica/1'})
+    check('an unpaid draft cannot be recorded as live', r.status_code == 302, r.status_code)
+    with app.app_context():
+        again = db.session.get(main.SocialAdPost, blocked_post_id)
+        check('and its status is untouched', again.status == 'draft', again.status)
+        check('with no live URL stored', not again.posted_url, again.posted_url)
+
+print('\n== the seller ads page ==')
+with app.app_context():
+    main.Setting.set('seller_ads_enabled', '1')
+with app.test_client() as client:
+    login(client, seller_id)
+    r = client.get('/seller/ads')
+    check('a verified seller reaches the page', r.status_code == 200, r.status_code)
+    html = r.get_data(as_text=True)
+    check('the product choice is mandatory',
+          'name="product_id"' in html and 'required' in html)
+    check('the destination is shown, not asked for',
+          'name="destination_url"' not in html and main.public_base_url() in html)
+    check('social placement is offered', 'SMARKAFRICA social accounts' in html)
+
+    login(client, buyer_id)
+    r = client.get('/seller/ads')
+    check('a plain customer is turned away', r.status_code == 302, r.status_code)
+    check('and sent to apply', '/seller/apply' in (r.headers.get('Location') or ''),
+          r.headers.get('Location'))
+
+print('\n== the driver keeps tracking off the console page ==')
+with app.app_context():
+    # The rotate-token check above changed it, so read the live one.
+    driver_token = db.session.get(DriverProfile, driver_id).tracking_token
+with app.test_client() as client:
+    r = client.get(f'/driver/{driver_token}')
+    check('the console renders', r.status_code == 200, r.status_code)
+    console = r.get_data(as_text=True)
+
+    # A blanket geolocation=() would kill watchPosition without so much as a
+    # permission prompt, so the header has to open up on exactly these pages.
+    policy = r.headers.get('Permissions-Policy') or ''
+    check('the console is allowed to read the device position',
+          'geolocation=(self)' in policy, policy)
+    home_policy = client.get('/').headers.get('Permissions-Policy') or ''
+    check('but the rest of the site still is not',
+          'geolocation=()' in home_policy, home_policy)
+    check('and the microphone stays shut everywhere',
+          'microphone=()' in policy and 'microphone=()' in home_policy)
+
+    # What the user asked to be gone, and nothing put in its place.
+    check('no instruction to stay on the page',
+          'Keep this page open' not in console and 'Leave sharing on' not in console)
+    check('no statusLine element left behind', 'id="statusLine"' not in console)
+    check('no replacement sentence under the button',
+          console.split('id="shareBtn"')[1].split('</button>')[1].strip().startswith('<div class="row'))
+
+    # Tracking survives the driver switching apps.
+    check('sharing state is remembered between visits', 'localStorage' in console
+          and 'SHARE_KEY' in console)
+    check('and resumes by itself on load', 'function resumeSharing' in console
+          and 'resumeSharing()' in console)
+    check('nothing tears sharing down on unload', 'beforeunload' not in console)
+    check('the screen wake lock is requested', "navigator.wakeLock.request('screen')" in console)
+    check('and re-taken when the page comes back',
+          'visibilitychange' in console and 'armWatch();' in console)
+    check('fixes are buffered rather than dropped', 'BUFFER_KEY' in console)
+    check('and flushed with a beacon when the tab is hidden',
+          'navigator.sendBeacon' in console and 'pagehide' in console)
+    check('a lost fix does not stop sharing, only a refusal does',
+          'err.code === 1' in console)
+
+    # The travelled line.
+    check('the trail is seeded server-side', 'const TRAIL' in console
+          and '-1.27' in console.split('const TRAIL')[1].split(';')[0])
+    check('drawn as a line layer', "id: 'trail', type: 'line'" in console)
+    check('and extended as new fixes arrive', 'function pushTrail' in console)
+    check('jitter while parked is ignored', 'TRAIL_MIN_M' in console)
+
+print('\n== batched pings rebuild an unbroken line ==')
+with app.test_client() as client:
+    with app.app_context():
+        before = DriverLocationPing.query.filter_by(driver_id=driver_id).count()
+    # Stamped after the newest fixture breadcrumb (now - 1 min) so these three
+    # are unambiguously the tail of the line.
+    stamp = datetime.utcnow() - timedelta(seconds=45)
+    r = client.post(f'/api/driver/{driver_token}/ping', json={'points': [
+        {'lat': -1.2710, 'lng': 36.8010, 'accuracy_m': 12, 'speed_kph': 20.0,
+         'at': (stamp).isoformat() + 'Z'},
+        {'lat': -1.2720, 'lng': 36.8020, 'accuracy_m': 9, 'speed_kph': 24.0,
+         'at': (stamp + timedelta(seconds=15)).isoformat() + 'Z'},
+        {'lat': -1.2730, 'lng': 36.8030, 'accuracy_m': 8, 'speed_kph': 26.0,
+         'at': (stamp + timedelta(seconds=30)).isoformat() + 'Z'},
+    ]})
+    check('the batch is accepted', r.status_code == 200, r.status_code)
+    payload = r.get_json()
+    check('all three fixes stored', payload.get('accepted') == 3, payload.get('accepted'))
+    with app.app_context():
+        after = DriverLocationPing.query.filter_by(driver_id=driver_id).count()
+        check('three new breadcrumbs on record', after - before == 3, after - before)
+        moved = db.session.get(DriverProfile, driver_id)
+        # The dispatch map reads the denormalised position, so it must follow the
+        # newest fix in the batch and not the first one written.
+        check('the profile follows the newest fix in the batch',
+              round(moved.last_lat, 4) == -1.2730, moved.last_lat)
+        replayed = main.driver_trail(driver_id, order_id)
+        check('the trail replays in travel order, not arrival order',
+              [round(p['lat'], 4) for p in replayed][-3:] == [-1.2710, -1.2720, -1.2730],
+              [round(p['lat'], 4) for p in replayed][-3:])
+
+    # A single fix, the shape an older client sends, still works.
+    r = client.post(f'/api/driver/{driver_token}/ping',
+                    json={'lat': -1.2740, 'lng': 36.8040})
+    check('a lone fix is still accepted', r.status_code == 200
+          and r.get_json().get('accepted') == 1, r.get_json())
+    # Junk must not land in the trail as a point in the Gulf of Guinea.
+    r = client.post(f'/api/driver/{driver_token}/ping',
+                    json={'points': [{'lat': 'x', 'lng': None}]})
+    check('unusable coordinates are rejected', r.status_code == 400, r.status_code)
+    r = client.post('/api/driver/unknown-token-xyz/ping', json={'lat': -1.0, 'lng': 36.0})
+    check('an unknown token gets nothing', r.status_code == 404, r.status_code)
+
+with app.app_context():
+    now_utc = datetime.utcnow()
+    check('a phone clock an hour behind is trusted',
+          main.parse_client_timestamp((now_utc - timedelta(hours=1)).isoformat()) is not None)
+    check('but next week is not', main.parse_client_timestamp(
+        (now_utc + timedelta(days=7)).isoformat()) is None)
+    check('nor is last year', main.parse_client_timestamp(
+        (now_utc - timedelta(days=365)).isoformat()) is None)
+    check('nor is nonsense', main.parse_client_timestamp('yesterday afternoon') is None)
+    check('a missing timestamp falls back to server time',
+          main.parse_client_timestamp(None) is None)
+    check('the batch is bounded', main.DRIVER_PING_BATCH_LIMIT <= 200,
+          main.DRIVER_PING_BATCH_LIMIT)
 
 print('\n== WhatsApp settings are admin-editable ==')
 with app.test_client() as client:
