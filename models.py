@@ -227,6 +227,9 @@ class Order(db.Model):
     amount_paid = db.Column(db.Float, nullable=False)
     shipping_cost = db.Column(db.Float, default=0.0)
     discount_amount = db.Column(db.Float, default=0.0)
+    # Set at checkout, honoured at payment: the referral owner is only paid once
+    # the money actually lands, so an abandoned order credits nobody.
+    promo_code_id = db.Column(db.Integer, db.ForeignKey('promo_codes.id'), nullable=True)
     mpesa_receipt = db.Column(db.String(100))
     mpesa_phone = db.Column(db.String(20))
     payment_status = db.Column(db.String(20), default='pending')  # pending, completed, failed
@@ -1082,6 +1085,66 @@ class Discount(db.Model):
 
     product = db.relationship('Product', lazy=True)
     creator = db.relationship('User', lazy=True)
+
+
+class PromoCode(db.Model):
+    """A referral code the MVP hands to one customer to share.
+
+    The customer named by `owner_id` is the person being thanked; anyone else
+    who spends `min_order_amount` or more gets `discount_percent` off their
+    goods, and the owner is paid coins for the introduction. Delivery is never
+    discounted, so the platform is not subsidising couriers.
+    """
+    __tablename__ = 'promo_codes'
+    __table_args__ = (
+        db.Index('ix_promo_codes_owner_active', 'owner_id', 'is_active'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    code = db.Column(db.String(24), unique=True, nullable=False)
+    owner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    discount_percent = db.Column(db.Float, default=10.0)
+    min_order_amount = db.Column(db.Float, default=1000.0)
+    owner_coins = db.Column(db.Integer, default=0)
+    # Why this customer was picked. The MVP types it and it stays on the record.
+    reason = db.Column(db.String(300))
+    # Blank means the code keeps running; a number caps lifetime redemptions.
+    max_redemptions = db.Column(db.Integer)
+    times_used = db.Column(db.Integer, default=0)
+    total_discount_given = db.Column(db.Float, default=0.0)
+    total_coins_awarded = db.Column(db.Integer, default=0)
+    is_active = db.Column(db.Boolean, default=True)
+    expires_at = db.Column(db.DateTime)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    owner = db.relationship('User', lazy=True, foreign_keys=[owner_id])
+    creator = db.relationship('User', lazy=True, foreign_keys=[created_by])
+
+
+class PromoCodeRedemption(db.Model):
+    """One shopper's use of a code, written only once the order is paid.
+
+    The unique index on (promo_code_id, order_id) is what makes awarding coins
+    safe to retry: the M-Pesa callback and the status poll can both finalize the
+    same order, and the second one loses the race rather than paying twice.
+    """
+    __tablename__ = 'promo_code_redemptions'
+    __table_args__ = (
+        db.UniqueConstraint('promo_code_id', 'order_id', name='uq_promo_redemption_order'),
+        db.Index('ix_promo_redemptions_code_user', 'promo_code_id', 'user_id'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    promo_code_id = db.Column(db.Integer, db.ForeignKey('promo_codes.id'), nullable=False)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    discount_amount = db.Column(db.Float, default=0.0)
+    order_subtotal = db.Column(db.Float, default=0.0)
+    coins_awarded = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    promo_code = db.relationship('PromoCode', lazy=True)
+    order = db.relationship('Order', lazy=True)
+    user = db.relationship('User', lazy=True)
 
 
 class Setting(db.Model):

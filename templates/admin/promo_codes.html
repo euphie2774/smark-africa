@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title %}Promo Codes - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-gift me-2"></i>Customer Promo Codes</h2>
+            <div class="small text-muted">
+                Pick a customer, say why, and hand them a code to share. Whoever they pass it to
+                gets money off their goods, and the customer who introduced them earns coins.
+            </div>
+        </div>
+        <a href="{{ url_for('admin_users') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-users me-1"></i>All users
+        </a>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-xl-5">
+            <div class="card border-0 shadow-sm mb-4">
+                <div class="card-body">
+                    <h5 class="fw-bold mb-3">1. Find the customer</h5>
+                    <form method="GET" action="{{ url_for('admin_promo_codes') }}">
+                        <div class="input-group">
+                            <input type="text" class="form-control" name="search" value="{{ search }}"
+                                   placeholder="Username, email or phone" autocomplete="off">
+                            <button class="btn btn-primary" type="submit">
+                                <i class="fas fa-search"></i>
+                            </button>
+                        </div>
+                    </form>
+
+                    {% if search and not candidates %}
+                    <div class="alert alert-warning small mt-3 mb-0">
+                        No customer matched "{{ search }}".
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if candidates %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="fw-bold mb-3">2. Issue the code</h5>
+                    <form method="POST" action="{{ url_for('admin_promo_code_issue') }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold">Customer</label>
+                            <select class="form-select" name="owner_id" required>
+                                {% for candidate in candidates %}
+                                <option value="{{ candidate.id }}">
+                                    {{ candidate.username }} - {{ candidate.email }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold">Why this customer</label>
+                            <textarea class="form-control" name="reason" rows="2" required
+                                      placeholder="Loyal buyer since launch, brought in three sellers, resolved a bad delivery gracefully..."></textarea>
+                            <div class="form-text">Kept on the record so the reason is not lost.</div>
+                        </div>
+
+                        <div class="row g-2">
+                            <div class="col-6">
+                                <label class="form-label small fw-semibold">Discount %</label>
+                                <input type="number" class="form-control" name="discount_percent"
+                                       value="{{ "%.0f"|format(default_percent) }}" min="0" max="100" step="1">
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label small fw-semibold">Minimum spend (KES)</label>
+                                <input type="number" class="form-control" name="min_order_amount"
+                                       value="{{ "%.0f"|format(default_min_order) }}" min="0" step="100">
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label small fw-semibold">Coins to owner</label>
+                                <input type="number" class="form-control" name="owner_coins"
+                                       value="{{ default_coins }}" min="0" step="1">
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label small fw-semibold">Max uses</label>
+                                <input type="number" class="form-control" name="max_redemptions"
+                                       placeholder="Unlimited" min="0" step="1">
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label small fw-semibold">Expires (optional)</label>
+                                <input type="date" class="form-control" name="expires_at">
+                            </div>
+                        </div>
+
+                        <div class="alert alert-light border small mt-3">
+                            The discount comes off goods only - delivery is always charged in full,
+                            and the minimum spend is measured on goods too. A customer cannot use
+                            their own code, and each shopper can use a given code once.
+                        </div>
+
+                        <button class="btn btn-success w-100" type="submit">
+                            <i class="fas fa-gift me-1"></i>Issue code
+                        </button>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="col-xl-7">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="fw-bold mb-3">Issued codes</h5>
+
+                    {% if not codes %}
+                    <div class="text-center text-muted py-5">
+                        <i class="fas fa-gift fa-2x mb-3 d-block"></i>
+                        No codes issued yet. Search for a customer to give the first one.
+                    </div>
+                    {% else %}
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th>Code</th>
+                                    <th>Customer</th>
+                                    <th class="text-end">Used</th>
+                                    <th class="text-end">Given away</th>
+                                    <th class="text-end">Coins paid</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for promo in codes %}
+                                <tr>
+                                    <td>
+                                        <span class="fw-bold font-monospace">{{ promo.code }}</span>
+                                        <div class="small text-muted">
+                                            {{ "%.0f"|format(promo.discount_percent or 0) }}% off over
+                                            KES {{ "{:,.0f}".format(promo.min_order_amount or 0) }}
+                                        </div>
+                                        {% if promo.reason %}
+                                        <div class="small text-muted fst-italic">{{ promo.reason[:80] }}</div>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {{ promo.owner.username if promo.owner else 'Unknown' }}
+                                        <div class="small text-muted">
+                                            {% if not promo.is_active %}
+                                            <span class="badge bg-secondary">Off</span>
+                                            {% elif promo.expires_at and promo.expires_at <= now %}
+                                            <span class="badge bg-warning text-dark">Expired</span>
+                                            {% elif promo.max_redemptions and promo.times_used >= promo.max_redemptions %}
+                                            <span class="badge bg-warning text-dark">Limit reached</span>
+                                            {% else %}
+                                            <span class="badge bg-success">Active</span>
+                                            {% endif %}
+                                        </div>
+                                    </td>
+                                    <td class="text-end">
+                                        {{ promo.times_used or 0 }}{% if promo.max_redemptions %}/{{ promo.max_redemptions }}{% endif %}
+                                    </td>
+                                    <td class="text-end">KES {{ "{:,.0f}".format(promo.total_discount_given or 0) }}</td>
+                                    <td class="text-end">{{ promo.total_coins_awarded or 0 }}</td>
+                                    <td class="text-end">
+                                        <form method="POST" class="d-inline"
+                                              action="{{ url_for('admin_promo_code_toggle', promo_id=promo.id) }}">
+                                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                            <button class="btn btn-sm btn-outline-secondary" type="submit">
+                                                {{ 'Switch off' if promo.is_active else 'Switch on' }}
+                                            </button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

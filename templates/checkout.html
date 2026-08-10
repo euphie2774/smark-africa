@@ -52,8 +52,17 @@
                 <hr>
                 <div class="d-flex justify-content-between fw-bold">
                     <span>Subtotal</span>
-                    <span>KSh {{ "%.2f"|format(total) }}</span>
+                    <span>KSh {{ "%.2f"|format(subtotal) }}</span>
                 </div>
+
+                {# Referral code. The discount comes off goods only, so it sits
+                   above the shipping line rather than below the total. #}
+                {% if promo and promo.discount %}
+                <div class="d-flex justify-content-between text-success">
+                    <span>Promo {{ promo.code }} ({{ "%.0f"|format(promo.percent) }}% off)</span>
+                    <span>- KSh {{ "%.2f"|format(promo.discount) }}</span>
+                </div>
+                {% endif %}
 
                 <!-- Shipping cost -->
                 {% if shipping_required %}
@@ -91,6 +100,27 @@
                     <span>Total</span>
                     <span id="grand-total" class="text-success">KSh {{ "%.2f"|format(total + (delivery_preview.total_amount if delivery_preview else 0)) }}</span>
                 </div>
+
+                {# Applying reloads this page with the code in the query string;
+                   the POST below re-checks it against the cart it charges. #}
+                <form method="GET" action="{{ url_for('checkout') }}" class="mt-3">
+                    <label for="promo_code_input" class="form-label small fw-semibold mb-1">
+                        Promo code
+                    </label>
+                    <div class="input-group input-group-sm">
+                        <input type="text" class="form-control text-uppercase" id="promo_code_input"
+                               name="promo_code" value="{{ promo.code if promo else '' }}"
+                               placeholder="Enter a code" autocomplete="off" maxlength="24">
+                        <button class="btn btn-outline-secondary" type="submit">Apply</button>
+                    </div>
+                    {% if promo and promo.error %}
+                    <div class="small text-danger mt-1">{{ promo.error }}</div>
+                    {% elif promo and promo.discount %}
+                    <div class="small text-success mt-1">
+                        Code applied - you saved KSh {{ "%.2f"|format(promo.discount) }}.
+                    </div>
+                    {% endif %}
+                </form>
             </div>
         </div>
     </div>
@@ -104,6 +134,9 @@
 
                 <form method="POST" action="{{ url_for('checkout') }}" id="checkout-form">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    {# Carries the code the shopper applied above. Re-validated
+                       server-side, so editing this buys nothing. #}
+                    <input type="hidden" name="promo_code" value="{{ promo.code if promo and promo.discount else '' }}">
 
                     <div class="mb-3">
                         <label for="phone" class="form-label">M-Pesa Phone Number</label>

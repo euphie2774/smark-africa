@@ -135,6 +135,7 @@
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_carriers') }}"><i class="fas fa-truck-plane me-2"></i>Carrier Partners</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_phase_two') }}"><i class="fas fa-scale-balanced me-2"></i>Protection Desk</a></li>
                             {% if auth_user.admin_level == 'mvp' %}
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_promo_codes') }}"><i class="fas fa-gift me-2"></i>Promo Codes</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_intelligent_architecture') }}"><i class="fas fa-network-wired me-2"></i>Intelligent Architecture</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_disbursements') }}"><i class="fas fa-money-bill-transfer me-2"></i>Payment Disbursements</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_print_documentation') }}"><i class="fas fa-book me-2"></i>Print Documentation</a></li>

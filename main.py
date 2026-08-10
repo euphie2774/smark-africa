@@ -21,7 +21,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash
 from sqlalchemy import func, extract, and_, or_, text, case, inspect as sa_inspect
 from sqlalchemy.orm import joinedload
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError, IntegrityError
 
 try:
     import qrcode
@@ -51,7 +51,7 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     PromotedListing, AffiliateLink, AffiliateConversion, SellerSubscription, SponsoredBanner, \
     EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue, AuditLog, \
     ShippingZone, ShippingQuote, DriverProfile, DriverLocationPing, DeliveryAssignment, \
-    StorefrontFollow, SocialAdPost
+    StorefrontFollow, SocialAdPost, PromoCode, PromoCodeRedemption
 
 from geo import GeoPoint, get_router, get_geocoder
 from geo.cache import cached_route, cached_geocode, cached_reverse
@@ -7205,6 +7205,10 @@ def finalize_paid_order(order):
     if paid_product_ids:
         Cart.query.filter(Cart.user_id == order.user_id,
                           Cart.product_id.in_(paid_product_ids)).delete(synchronize_session=False)
+
+    # Now the money is real, the introducer gets their coins. Guarded against a
+    # double credit inside the helper, since this function is reachable twice.
+    record_promo_redemption(order)
     return True
 
 
@@ -7277,12 +7281,25 @@ def checkout():
 
         total = subtotal + shipping_cost
 
+        # A referral code takes its cut of the goods only, and is re-checked
+        # here against the real cart: the preview on the page is a convenience,
+        # not the authority, so a stale or hand-edited form cannot buy a
+        # discount the shopper does not qualify for.
+        promo_state = evaluate_promo_code(request.form.get('promo_code'), current_user, subtotal)
+        if promo_state['error']:
+            flash(promo_state['error'], 'warning')
+        promo = promo_state['promo']
+        discount_amount = promo_state['discount']
+        total = max(0.0, round(total - discount_amount, 2))
+
         # Create order
         order = Order(
             user_id=current_user.id,
             order_number=generate_order_number(),
             amount_paid=total,
             shipping_cost=shipping_cost,
+            discount_amount=discount_amount,
+            promo_code_id=promo.id if promo else None,
             shipping_address=shipping_address,
             shipping_country=shipping_country,
             shipping_city=shipping_city,
@@ -7368,9 +7385,15 @@ def checkout():
     delivery_preview = quote_cart_delivery(cart_items, user=current_user)
     total = subtotal  # before shipping
 
+    # Let the shopper try a code before committing. Nothing is written here -
+    # the POST re-runs the same check against the cart it actually charges.
+    promo_state = evaluate_promo_code(request.args.get('promo_code'), current_user, subtotal)
+    total = max(0.0, round(total - promo_state['discount'], 2))
+
     return render_template('checkout.html', cart_items=cart_items, subtotal=subtotal,
                            total=total, weight_kg=billable_weight, shipping_required=total_weight > 0,
                            delivery_preview=delivery_preview,
+                           promo=promo_state,
                            address_book=checkout_address_book(),
                            launch_soon_message=LAUNCH_SOON_MESSAGE,
                            show_country_launch_popup=Setting.get('show_country_launch_popup', '1') == '1')
@@ -8734,12 +8757,19 @@ def coins_page():
     if getattr(current_user, 'is_admin', False):
         leaderboard = coin_leaderboard()
 
+    # Any referral codes the MVP handed this shopper, newest first, so they can
+    # see what they were given and what it has earned them.
+    my_promos = PromoCode.query.filter_by(owner_id=current_user.id).order_by(
+        PromoCode.created_at.desc()).all()
+
     return render_template('coins.html',
                            balance=balance,
                            streak=streak,
                            checked_in_today=checked_in_today,
                            transactions=transactions,
                            leaderboard=leaderboard,
+                           my_promos=my_promos,
+                           promo_share_base=public_base_url(),
                            coin_settings={
                                'daily_login': coin_setting('coins_daily_login', 5),
                                'purchase_per_1000': coin_setting('coins_purchase_per_1000', 10),
@@ -13421,6 +13451,185 @@ def seller_withdrawals():
                            available_balance=seller_available_balance(current_user.id))
 
 
+# ========================================================================
+# REFERRAL PROMO CODES
+# ========================================================================
+# The MVP thanks a customer by handing them a code. Whoever they pass it to
+# gets money off, and the customer who introduced them is paid in coins. The
+# rules live here rather than in the checkout view so the admin preview, the
+# checkout POST and the tests all judge a code the same way.
+
+PROMO_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'  # no O/0, no I/1
+PROMO_DEFAULT_PERCENT = 10.0
+PROMO_DEFAULT_MIN_ORDER = 1000.0
+PROMO_MAX_PERCENT = 100.0
+
+
+def promo_default_coins():
+    """Coins the introducer earns per paid order.
+
+    Reuses the existing coins_referral_bonus knob on the admin coins page - a
+    referral is exactly what this is, so a second setting would only give the
+    two ways to disagree.
+    """
+    try:
+        return max(0, int(float(Setting.get('coins_referral_bonus', '50') or 0)))
+    except (TypeError, ValueError):
+        return 50
+
+
+def generate_promo_code(prefix='SMK'):
+    """A short, unambiguous code that is safe to read down a phone line."""
+    prefix = re.sub(r'[^A-Z0-9]', '', (prefix or 'SMK').upper())[:6] or 'SMK'
+    for _ in range(40):
+        body = ''.join(secrets.choice(PROMO_CODE_ALPHABET) for _ in range(6))
+        code = f'{prefix}{body}'
+        if not PromoCode.query.filter_by(code=code).first():
+            return code
+    # Astronomically unlikely; fall back to something certainly unique rather
+    # than handing back a duplicate that would trip the unique index later.
+    return f'{prefix}{secrets.token_hex(5).upper()}'
+
+
+def normalize_promo_code(raw):
+    return re.sub(r'[^A-Z0-9]', '', str(raw or '').upper())[:24]
+
+
+def find_promo_code(raw):
+    code = normalize_promo_code(raw)
+    if not code:
+        return None
+    return PromoCode.query.filter_by(code=code).first()
+
+
+def promo_code_is_exhausted(promo):
+    cap = promo.max_redemptions or 0
+    return cap > 0 and (promo.times_used or 0) >= cap
+
+
+def promo_code_error(promo, user, subtotal):
+    """Why this shopper cannot use this code right now, or None if they can.
+
+    `subtotal` is goods only. Delivery is deliberately excluded from both the
+    minimum spend and the discount: a shopper should not clear the threshold on
+    courier charges, and the platform should not discount a fee it pays out.
+    """
+    if promo is None:
+        return 'That promo code was not recognised.'
+    if not promo.is_active:
+        return 'That promo code is no longer active.'
+    if promo.expires_at and promo.expires_at <= utcnow():
+        return 'That promo code has expired.'
+    if user is None or not getattr(user, 'id', None):
+        return 'Sign in to use a promo code.'
+    if promo.owner_id == user.id:
+        # The whole point is introducing somebody new, so self-use is not a
+        # discount we are willing to fund.
+        return 'This is your own code - share it with someone else to earn coins.'
+    if promo_code_is_exhausted(promo):
+        return 'That promo code has reached its limit.'
+    already = PromoCodeRedemption.query.filter_by(
+        promo_code_id=promo.id, user_id=user.id).first()
+    if already:
+        return 'You have already used that promo code.'
+    minimum = promo.min_order_amount or 0
+    if minimum and (subtotal or 0) < minimum:
+        short = minimum - (subtotal or 0)
+        return (f'Spend KES {minimum:,.0f} or more on items to use this code - '
+                f'add KES {short:,.0f} to qualify.')
+    return None
+
+
+def promo_discount_amount(promo, subtotal):
+    """The cash taken off, rounded to whole cents and never below zero."""
+    if promo is None:
+        return 0.0
+    percent = promo.discount_percent
+    if percent is None:
+        percent = PROMO_DEFAULT_PERCENT
+    percent = max(0.0, min(float(percent), PROMO_MAX_PERCENT))
+    return round(max(0.0, float(subtotal or 0)) * percent / 100.0, 2)
+
+
+def evaluate_promo_code(raw, user, subtotal):
+    """Judge a typed code against a goods subtotal.
+
+    Returns {promo, code, error, discount, percent}. Callers show `error` and
+    charge full price, or apply `discount`.
+    """
+    code = normalize_promo_code(raw)
+    if not code:
+        return {'promo': None, 'code': '', 'error': None, 'discount': 0.0, 'percent': 0.0}
+    promo = find_promo_code(code)
+    error = promo_code_error(promo, user, subtotal)
+    if error:
+        return {'promo': None, 'code': code, 'error': error, 'discount': 0.0, 'percent': 0.0}
+    return {
+        'promo': promo,
+        'code': promo.code,
+        'error': None,
+        'discount': promo_discount_amount(promo, subtotal),
+        'percent': promo.discount_percent or PROMO_DEFAULT_PERCENT,
+    }
+
+
+def record_promo_redemption(order):
+    """Credit the introducer once the order is genuinely paid.
+
+    Called from finalize_paid_order, which a callback and a status poll can both
+    reach, so this has to be safe to run twice. The unique index on
+    (promo_code_id, order_id) is the guard: a repeat insert is rolled back to a
+    savepoint and the coins are not paid a second time.
+    """
+    promo_id = getattr(order, 'promo_code_id', None)
+    if not promo_id:
+        return None
+    promo = db.session.get(PromoCode, promo_id)
+    if promo is None or promo.owner_id == order.user_id:
+        return None
+    if PromoCodeRedemption.query.filter_by(
+            promo_code_id=promo.id, order_id=order.id).first():
+        return None
+
+    discount = round(float(order.discount_amount or 0), 2)
+    goods = round(float(order.amount_paid or 0) - float(order.shipping_cost or 0) + discount, 2)
+    coins = promo.owner_coins if promo.owner_coins is not None else promo_default_coins()
+    coins = max(0, int(coins))
+
+    try:
+        with db.session.begin_nested():
+            db.session.add(PromoCodeRedemption(
+                promo_code_id=promo.id,
+                order_id=order.id,
+                user_id=order.user_id,
+                discount_amount=discount,
+                order_subtotal=goods,
+                coins_awarded=coins,
+            ))
+    except IntegrityError:
+        # Another finalize call got there first. Nothing to do.
+        return None
+
+    promo.times_used = (promo.times_used or 0) + 1
+    promo.total_discount_given = round((promo.total_discount_given or 0) + discount, 2)
+    promo.total_coins_awarded = (promo.total_coins_awarded or 0) + coins
+
+    if coins:
+        award_coins(promo.owner_id, coins, 'referral',
+                    f'Promo code {promo.code} used on order {order.order_number}',
+                    str(order.id))
+    # The order number keeps each notification distinct - the dedupe in
+    # create_customer_notification matches on title+body, so without it the
+    # second person to use the code would notify nobody.
+    create_customer_notification(
+        promo.owner_id,
+        'Someone used your promo code',
+        f'{promo.code} was used on paid order {order.order_number}. '
+        + (f'You earned {coins} coins.' if coins else 'Thanks for spreading the word.'),
+        'promo_code')
+    return promo
+
+
 def website_ad_link(product=None):
     """The public URL an ad clicks through to - always back into the website.
 
@@ -14903,6 +15112,119 @@ def admin_coins_settings():
 
 
 # ========================================================================
+# MVP PROMO CODES
+# ========================================================================
+
+
+@app.route('/admin/promo-codes')
+@login_required
+@mvp_required
+def admin_promo_codes():
+    search = request.args.get('search', '').strip()
+    codes = PromoCode.query.order_by(PromoCode.created_at.desc()).limit(200).all()
+
+    # Only look people up once the MVP has typed something. Listing the whole
+    # user base here would be a long page and a pointless query on every visit.
+    candidates = []
+    if search:
+        candidates = User.query.filter(
+            User.is_admin.isnot(True),
+            or_(User.username.ilike(f'%{search}%'),
+                User.email.ilike(f'%{search}%'),
+                User.phone.ilike(f'%{search}%'))
+        ).order_by(User.created_at.desc()).limit(25).all()
+
+    return render_template('admin/promo_codes.html',
+                           codes=codes,
+                           candidates=candidates,
+                           search=search,
+                           default_percent=PROMO_DEFAULT_PERCENT,
+                           default_min_order=PROMO_DEFAULT_MIN_ORDER,
+                           default_coins=promo_default_coins())
+
+
+@app.route('/admin/promo-codes/issue', methods=['POST'])
+@login_required
+@mvp_required
+def admin_promo_code_issue():
+    owner_id = request.form.get('owner_id', type=int)
+    owner = db.session.get(User, owner_id) if owner_id else None
+    if owner is None:
+        flash('Pick a customer to give the code to.', 'danger')
+        return redirect(url_for('admin_promo_codes'))
+    if owner.is_admin:
+        flash('Promo codes are for customers, not admin accounts.', 'danger')
+        return redirect(url_for('admin_promo_codes'))
+
+    reason = request.form.get('reason', '').strip()
+    if not reason:
+        flash('Say why this customer is getting a code - it stays on the record.', 'danger')
+        return redirect(url_for('admin_promo_codes', search=owner.username))
+
+    def _number(field, fallback, cast=float):
+        raw = request.form.get(field, '').strip()
+        if not raw:
+            return fallback
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            return fallback
+
+    percent = max(0.0, min(_number('discount_percent', PROMO_DEFAULT_PERCENT), PROMO_MAX_PERCENT))
+    min_order = max(0.0, _number('min_order_amount', PROMO_DEFAULT_MIN_ORDER))
+    coins = max(0, _number('owner_coins', promo_default_coins(), int))
+    cap = _number('max_redemptions', 0, int)
+    cap = int(cap) if cap and cap > 0 else None
+
+    expires_at = None
+    raw_expiry = request.form.get('expires_at', '').strip()
+    if raw_expiry:
+        try:
+            expires_at = datetime.strptime(raw_expiry, '%Y-%m-%d')
+        except ValueError:
+            flash('Ignored an expiry date that was not in YYYY-MM-DD form.', 'warning')
+
+    promo = PromoCode(
+        code=generate_promo_code(),
+        owner_id=owner.id,
+        discount_percent=percent,
+        min_order_amount=min_order,
+        owner_coins=coins,
+        reason=reason,
+        max_redemptions=cap,
+        expires_at=expires_at,
+        created_by=current_user.id,
+    )
+    db.session.add(promo)
+    db.session.commit()
+
+    create_customer_notification(
+        owner.id,
+        'You have a promo code to share',
+        f'Your code {promo.code} gives another shopper {percent:.0f}% off orders of '
+        f'KES {min_order:,.0f} or more'
+        + (f', and earns you {coins} coins every time it is used.' if coins else '.'),
+        'promo_code')
+    log_admin_action('issue_promo_code', 'promo_code', promo.id,
+                     f'{promo.code} to {owner.username}: {reason}')
+    flash(f'Code {promo.code} issued to {owner.username}.', 'success')
+    return redirect(url_for('admin_promo_codes'))
+
+
+@app.route('/admin/promo-codes/<int:promo_id>/toggle', methods=['POST'])
+@login_required
+@mvp_required
+def admin_promo_code_toggle(promo_id):
+    promo = PromoCode.query.get_or_404(promo_id)
+    promo.is_active = not promo.is_active
+    db.session.commit()
+    log_admin_action('toggle_promo_code', 'promo_code', promo.id,
+                     'activated' if promo.is_active else 'deactivated')
+    flash(f'{promo.code} is now {"active" if promo.is_active else "switched off"}.', 'success')
+    return redirect(url_for('admin_promo_codes'))
+
+
+# ========================================================================
 # MVP DOCUMENTATION PRINT
 # ========================================================================
 
@@ -15524,6 +15846,7 @@ def phase_two_schema_spec():
             ('delivery_method', "delivery_method VARCHAR(30) DEFAULT 'doorstep'"),
             ('pickup_station', 'pickup_station VARCHAR(160)'),
             ('estimated_minutes_to_destination', 'estimated_minutes_to_destination INTEGER'),
+            ('promo_code_id', 'promo_code_id INTEGER'),
         ],
         'customer_feedback': [
             ('admin_status', "admin_status VARCHAR(20) DEFAULT 'new'"),
