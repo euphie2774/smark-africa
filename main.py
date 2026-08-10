@@ -244,7 +244,8 @@ SENSITIVE_AUDIT_FIELDS = {
     'password', 'admin_password', 'admin_current_password', 'admin_confirm_password',
     'daraja_consumer_secret', 'daraja_passkey', 'smtp_password', 'mail_password',
     'flutterwave_secret_key', 'flutterwave_encryption_key', 'paystack_secret_key',
-    'pesapal_consumer_secret', 'dpo_company_token', 'resend_api_key', 'csrf_token'
+    'pesapal_consumer_secret', 'dpo_company_token', 'resend_api_key', 'csrf_token',
+    'whatsapp_access_token'
 }
 
 
@@ -767,6 +768,97 @@ def send_sms_notification(phone_number, message):
         return False
     except Exception as e:
         logger.error(f'SMS sending failed to {phone_number}: {e}')
+        return False
+
+
+# ========== WHATSAPP ==========
+#
+# Two ways a message reaches a WhatsApp number, in order of preference:
+#
+#   1. Meta's Cloud API, when whatsapp_access_token and whatsapp_phone_number_id
+#      are set. Fully automatic - nobody has to press anything.
+#   2. A wa.me deep link. Always available, needs no account and no config, but
+#      a human still has to tap send.
+#
+# Meta only permits free-form text inside a 24 hour service window. Someone
+# being onboarded has almost certainly never messaged the business, so set
+# whatsapp_template_name to an approved template to reach them cold.
+
+WHATSAPP_API_VERSION = 'v21.0'
+
+
+def whatsapp_number(phone_number):
+    """Digits-only international form - all wa.me and Meta will accept."""
+    return ''.join(ch for ch in normalize_mpesa_phone(phone_number) if ch.isdigit())
+
+
+def whatsapp_share_url(phone_number, message):
+    """One-tap "open WhatsApp with this already typed out" link.
+
+    Never fails and never sends by itself, which is exactly why it is the
+    fallback: the link still reaches the driver even with nothing configured.
+    """
+    from urllib.parse import quote
+    number = whatsapp_number(phone_number)
+    return f'https://wa.me/{number}?text={quote(message or "")}' if number else ''
+
+
+def send_whatsapp_message(phone_number, message, template_params=None):
+    """Send a WhatsApp message through Meta's Cloud API.
+
+    Returns False (and logs why) when unconfigured or refused, so callers fall
+    back to SMS and the share link instead of claiming a send that never was.
+    """
+    number = whatsapp_number(phone_number)
+    if not number:
+        return False
+
+    token = setting_value('whatsapp_access_token', app.config.get('WHATSAPP_ACCESS_TOKEN', ''))
+    phone_id = setting_value('whatsapp_phone_number_id', app.config.get('WHATSAPP_PHONE_NUMBER_ID', ''))
+    if not token or not phone_id:
+        logger.info(f'WhatsApp (not configured, share link only) to {number}: {message}')
+        return False
+
+    version = setting_value('whatsapp_api_version', WHATSAPP_API_VERSION)
+    template = setting_value('whatsapp_template_name', '')
+    if template:
+        payload = {
+            'messaging_product': 'whatsapp',
+            'to': number,
+            'type': 'template',
+            'template': {
+                'name': template,
+                'language': {'code': setting_value('whatsapp_template_language', 'en')},
+                'components': [{
+                    'type': 'body',
+                    'parameters': [{'type': 'text', 'text': p}
+                                   for p in (template_params or [message])],
+                }],
+            },
+        }
+    else:
+        payload = {
+            'messaging_product': 'whatsapp',
+            'to': number,
+            'type': 'text',
+            'text': {'preview_url': True, 'body': message},
+        }
+
+    try:
+        resp = requests.post(
+            f'https://graph.facebook.com/{version}/{phone_id}/messages',
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+            json=payload,
+            timeout=15,
+        )
+        body = resp.json() if resp.content else {}
+        if resp.ok and body.get('messages'):
+            logger.info(f'WhatsApp sent to {number}')
+            return True
+        logger.warning(f'WhatsApp to {number} refused: {resp.status_code} {body}')
+        return False
+    except Exception as e:
+        logger.error(f'WhatsApp sending failed to {number}: {e}')
         return False
 
 
@@ -12119,6 +12211,141 @@ def recalculate_assignment_eta(assignment, driver=None):
     return assignment
 
 
+def driver_tracking_url(driver):
+    """Absolute driver console link, or '' when there is no token to hand out.
+
+    Built on the configured public base URL rather than the request host: a link
+    texted to a driver has to work on their handset, and request.host_url is
+    whatever the admin happened to be browsing - localhost during development,
+    an internal hostname behind a proxy. Falls back to url_for when nothing is
+    configured, and works outside a request context either way.
+    """
+    if not driver or not driver.tracking_token:
+        return ''
+    path = f'/driver/{driver.tracking_token}'
+    try:
+        base = public_base_url()
+        if base:
+            return base + path
+    except Exception:
+        pass
+    try:
+        return url_for('driver_console', token=driver.tracking_token, _external=True)
+    except Exception:
+        return path
+
+
+def driver_link_message(driver, reason='created'):
+    """The exact words sent to a driver, shared by every channel.
+
+    Built once so the WhatsApp API message, the wa.me deep link and the SMS all
+    say the same thing - a driver comparing two of them should see one message.
+    """
+    link = driver_tracking_url(driver)
+    if not link:
+        return ''
+    name = driver.display_name or (driver.user.username if driver.user else 'there')
+    opening = ('Your SMARKAFRICA driver tracking link is ready'
+               if reason == 'created' else
+               'Your SMARKAFRICA driver tracking link has been regenerated')
+    return (f'Hi {name}. {opening}:\n\n{link}\n\n'
+            'Open it on the phone you deliver with, allow location and leave the '
+            'page open - dispatch follows you on the map from there. '
+            'Keep the link to yourself; it reports your position as you.')
+
+
+def notify_driver_tracking_link(driver, reason='created'):
+    """Hand a driver their tracking link the moment it is minted.
+
+    Every channel we have, because a link nobody opens tracks nothing: WhatsApp
+    first (it is what drivers actually read), SMS as the fallback that lands on
+    any handset, plus an in-app note and an email for the record. The returned
+    dict says which channels genuinely delivered, so the admin is told what
+    really went out rather than a hopeful "sent!".
+    """
+    result = {'link': driver_tracking_url(driver), 'share_url': '',
+              'whatsapp': False, 'sms': False, 'email': False, 'in_app': False}
+    message = driver_link_message(driver, reason)
+    if not message:
+        return result
+
+    result['share_url'] = whatsapp_share_url(driver.phone, message)
+
+    if driver.user_id:
+        note = create_customer_notification(
+            driver.user_id,
+            'Your driver tracking link is ready' if reason == 'created'
+            else 'Your driver tracking link changed',
+            message,
+            'driver_link',
+        )
+        result['in_app'] = note is not None
+        try:
+            db.session.commit()
+        except SQLAlchemyError:
+            db.session.rollback()
+            app.logger.exception('Driver link notification failed for driver %s', driver.id)
+            result['in_app'] = False
+
+    if driver.phone:
+        result['whatsapp'] = send_whatsapp_message(driver.phone, message)
+        # SMS goes out either way: it is the one channel that lands without
+        # WhatsApp installed, and a duplicate costs less than an untracked run.
+        result['sms'] = send_sms_notification(normalize_mpesa_phone(driver.phone), message)
+
+    user = driver.user
+    if user and user.email:
+        name = driver.display_name or user.username
+        link = result['link']
+        html = f"""
+        <h2>Your driver tracking link</h2>
+        <p>Hi {name},</p>
+        <p>Open this on the phone you deliver with, allow location, and leave the
+           page open. Dispatch follows your position on the map from there.</p>
+        <p><a href="{link}" style="background:#0d6efd;color:#fff;padding:10px 18px;
+           border-radius:6px;text-decoration:none;display:inline-block">Open my driver console</a></p>
+        <p style="font-size:12px;color:#666">{link}</p>
+        <p><strong>Keep this link private.</strong> Anyone holding it can report a position as you.</p>
+        <br><p>SMARKAFRICA Dispatch</p>
+        """
+        try:
+            send_email(user.email, 'Your SMARKAFRICA driver tracking link', html)
+            result['email'] = True
+        except Exception:
+            app.logger.exception('Driver link email failed for driver %s', driver.id)
+
+    return result
+
+
+def flash_driver_link_result(driver, result, prefix):
+    """Report the channel outcomes in one honest sentence."""
+    who = driver.display_name or (driver.user.username if driver.user else 'the driver')
+    sent = [label for label, key in (('WhatsApp', 'whatsapp'), ('SMS', 'sms'),
+                                     ('email', 'email'), ('in-app', 'in_app'))
+            if result.get(key)]
+    if result.get('whatsapp'):
+        flash(f'{prefix} Tracking link sent to {who} on {", ".join(sent)}.', 'success')
+    elif sent:
+        flash(f'{prefix} Tracking link sent to {who} by {", ".join(sent)}. WhatsApp is not '
+              f'connected, so tap "WhatsApp" on their card to send it there too.', 'success')
+    elif result.get('share_url'):
+        flash(f'{prefix} Nothing could be sent automatically. Tap "WhatsApp" on '
+              f'{who}\'s card to share the link in one tap.', 'warning')
+    else:
+        flash(f'{prefix} No phone or email on file for {who}, so the link could not be '
+              f'sent - add a phone number, or copy the link from their card.', 'warning')
+
+
+def driver_link_redirect(driver, result):
+    """Back to dispatch, flagging whether the admin still has to press send.
+
+    wa=1 means the Cloud API did not carry the message, so the page offers the
+    one-tap wa.me hand-off instead of pretending WhatsApp already has it.
+    """
+    return redirect(url_for('admin_dispatch', share=driver.id,
+                            wa=0 if result.get('whatsapp') else 1))
+
+
 @app.route('/admin/dispatch')
 @login_required
 @admin_required
@@ -12146,6 +12373,9 @@ def admin_dispatch():
         ~Order.id.in_(live_assignment_orders),
     ).order_by(Order.created_at.desc()).limit(50).all()
     origin_point, origin_label = shipping_origin_point()
+    # One-tap WhatsApp hand-off per driver, prebuilt server side because the
+    # message body carries that driver's own console link.
+    share_links = {d.id: whatsapp_share_url(d.phone, driver_link_message(d)) for d in drivers}
     return render_template(
         'admin/dispatch.html',
         drivers=drivers,
@@ -12155,6 +12385,9 @@ def admin_dispatch():
         origin_lng=origin_point.lng,
         origin_label=origin_label,
         map_style_url=map_style_url(),
+        share_links=share_links,
+        share_driver_id=request.args.get('share', type=int),
+        share_prompt_whatsapp=request.args.get('wa') == '1',
     )
 
 
@@ -12164,6 +12397,8 @@ def admin_dispatch():
 def admin_save_driver():
     driver_id = (request.form.get('driver_id') or '').strip()
     driver = DriverProfile.query.get(int(driver_id)) if driver_id.isdigit() else None
+    is_new = driver is None
+    previous_phone = (driver.phone or '') if driver else ''
 
     if driver is None:
         username = (request.form.get('username') or '').strip()
@@ -12184,8 +12419,30 @@ def admin_save_driver():
     driver.is_active = form_bool('is_active')
     db.session.commit()
     log_admin_action('driver_saved', 'driver_profile', driver.id, {'name': driver.display_name})
+
+    # A fresh profile means a fresh link, and a phone number arriving late means
+    # the link was minted with nowhere to send it. Both deserve a send.
+    phone_arrived = bool(driver.phone) and driver.phone != previous_phone
+    if is_new or phone_arrived:
+        result = notify_driver_tracking_link(driver, 'created')
+        flash_driver_link_result(driver, result, 'Driver saved.')
+        return driver_link_redirect(driver, result)
+
     flash('Driver saved.', 'success')
     return redirect(url_for('admin_dispatch'))
+
+
+@app.route('/admin/dispatch/drivers/<int:driver_id>/send-link', methods=['POST'])
+@login_required
+@admin_required
+def admin_send_driver_link(driver_id):
+    """Resend an existing link - phone swapped, message deleted, new handset."""
+    driver = DriverProfile.query.get_or_404(driver_id)
+    result = notify_driver_tracking_link(driver, 'created')
+    log_admin_action('driver_link_sent', 'driver_profile', driver.id,
+                     {k: v for k, v in result.items() if k in ('whatsapp', 'sms', 'email', 'in_app')})
+    flash_driver_link_result(driver, result, 'Link resent.')
+    return driver_link_redirect(driver, result)
 
 
 @app.route('/admin/dispatch/drivers/<int:driver_id>/rotate-token', methods=['POST'])
@@ -12196,8 +12453,11 @@ def admin_rotate_driver_token(driver_id):
     driver.tracking_token = secrets.token_urlsafe(32)[:64]
     db.session.commit()
     log_admin_action('driver_token_rotated', 'driver_profile', driver.id, {})
-    flash('Tracking link regenerated. Send the driver their new link.', 'success')
-    return redirect(url_for('admin_dispatch'))
+    # The old link died the moment that commit landed, so the new one has to go
+    # out now or the driver silently drops off the map.
+    result = notify_driver_tracking_link(driver, 'rotated')
+    flash_driver_link_result(driver, result, 'Link regenerated.')
+    return driver_link_redirect(driver, result)
 
 
 @app.route('/admin/dispatch/assign', methods=['POST'])
@@ -12323,10 +12583,12 @@ def api_dispatch_drivers():
                 'destination_lat': active.destination_lat,
                 'destination_lng': active.destination_lng,
             }
-            # Breadcrumbs only for a driver actually carrying something: an idle
-            # phone's wanderings are not dispatch's business, and skipping them
-            # keeps this poll to one extra query per live delivery.
-            trail = driver_trail(driver.id, active.order_id)
+        # Breadcrumbs for anyone whose phone is reporting, scoped to the delivery
+        # when there is one. A driver who has only just opened their link has no
+        # assignment yet, and watching that first walk is the whole point of
+        # sending it - so this cannot be gated on being assigned.
+        if driver.has_fix:
+            trail = driver_trail(driver.id, active.order_id if active else None)
             item['trail'] = trail
             if trail:
                 item['speed_kph'] = trail[-1].get('speed_kph')
@@ -14020,6 +14282,12 @@ def admin_settings():
             'didit_workflow_id': DIDIT_WORKFLOW_ID_DEFAULT,
             'kyc_system_only_enabled': '0',
             'sms_otp_enabled': '0',
+            # WhatsApp Cloud API. Empty means the dispatch page falls back to a
+            # one-tap wa.me share link instead of sending by itself.
+            'whatsapp_access_token': os.environ.get('WHATSAPP_ACCESS_TOKEN', ''),
+            'whatsapp_phone_number_id': os.environ.get('WHATSAPP_PHONE_NUMBER_ID', ''),
+            'whatsapp_template_name': '',
+            'whatsapp_template_language': 'en',
         }
 
         mvp_content_keys = {'about_content', 'terms_content', 'user_agreement_content'}

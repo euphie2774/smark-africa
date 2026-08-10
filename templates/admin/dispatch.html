@@ -4,12 +4,14 @@
 {% block head %}
 <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
 <style>
-/* The "Move to" column used to be `text-nowrap` with four inline buttons in a
-   row. That forced the table wider than its card, so Order / Driver /
-   Destination sat off to the left behind the horizontal scroll - information
-   hidden with no hint it was there. The buttons now wrap into a compact block
-   and the table only scrolls as a last resort. */
-.dispatch-table { min-width: 720px; }
+/* The active deliveries table used to live in the col-xl-8 column beside the
+   drivers list, so on any normal laptop seven columns were squeezed into
+   two-thirds of the page and Order / Driver / Destination sat off-screen behind
+   a horizontal scrollbar. It now spans the full container, and below the xl
+   breakpoint each row becomes a labelled block instead of scrolling at all.
+   `.dispatch-scroll` is the last-resort backstop: if the table still cannot
+   fit, it says so out loud rather than clipping in silence. */
+.dispatch-table { min-width: 0; }
 
 .dispatch-table td.dispatch-actions { white-space: normal; }
 
@@ -24,11 +26,20 @@
 .dispatch-live .dot.live { color: #198754; }
 .dispatch-live .dot.stale { color: #adb5bd; }
 
-@media (max-width: 991.98px) {
-    /* Below the xl breakpoint the card is full width but seven columns still do
-       not fit honestly, so each delivery becomes a labelled block. Nothing ends
-       up behind a scrollbar and the row reads top to bottom on a phone. */
-    .dispatch-table { min-width: 0; }
+.dispatch-scroll { position: relative; }
+.dispatch-scroll.is-clipped::after {
+    content: '';
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: 34px;
+    pointer-events: none;
+    background: linear-gradient(to right, rgba(0, 0, 0, 0), rgba(0, 0, 0, .16));
+}
+
+@media (max-width: 1199.98px) {
+    /* Seven columns do not fit honestly under ~1200px even at full width, so
+       each delivery reads top to bottom as a labelled card. Nothing ends up
+       behind a scrollbar and no column has to be guessed at. */
     .dispatch-table thead { display: none; }
     .dispatch-table,
     .dispatch-table tbody,
@@ -56,6 +67,12 @@
 
     /* Remaining and ETA read as a pair rather than two stacked one-liners. */
     .dispatch-table td.dispatch-metric { display: inline-block; width: auto; min-width: 8rem; }
+}
+
+/* The card the admin was just sent back to, so the WhatsApp button is obvious. */
+.driver-highlight {
+    background: rgba(25, 135, 84, .07);
+    box-shadow: inset 3px 0 0 #198754;
 }
 </style>
 {% endblock %}
@@ -94,136 +111,6 @@
                     <span><i class="fas fa-circle text-success me-1"></i>Live fix</span>
                     <span><i class="fas fa-circle text-secondary me-1"></i>Stale (no ping in 10 min)</span>
                     <span><i class="fas fa-grip-lines text-primary me-1"></i>Path the phone has travelled</span>
-                </div>
-            </div>
-
-            <!-- Active deliveries -->
-            <div class="card border-0 shadow-sm mt-4">
-                <div class="card-header bg-white">
-                    <h5 class="mb-0"><i class="fas fa-route me-2"></i>Active deliveries
-                        <span class="badge bg-primary ms-1">{{ assignments | length }}</span>
-                    </h5>
-                </div>
-                <div class="table-responsive">
-                    <table class="table table-hover align-middle mb-0 dispatch-table">
-                        <thead class="table-light">
-                            <tr>
-                                <th>Order</th><th>Driver &amp; live position</th><th>Destination</th>
-                                <th class="text-end">Remaining</th><th class="text-end">ETA</th>
-                                <th>Status</th><th>Move to</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                        {% for a in assignments %}
-                            <tr>
-                                <td data-label="Order">
-                                    <a href="{{ url_for('admin_order_detail', order_id=a.order_id) }}"
-                                       class="fw-semibold text-decoration-none">
-                                        {{ a.order.order_number if a.order else a.order_id }}
-                                    </a>
-                                    <div class="small text-muted">
-                                        {{ a.assigned_at.strftime('%d %b %H:%M') if a.assigned_at else '' }}
-                                    </div>
-                                </td>
-                                <td data-label="Driver">
-                                    <div>{{ a.driver.display_name if a.driver else '-' }}</div>
-                                    <div class="small text-muted">{{ a.driver.vehicle_registration or a.driver.vehicle_type if a.driver else '' }}</div>
-                                    {% if a.driver %}
-                                    <div class="small dispatch-live d-flex flex-wrap align-items-center gap-2 mt-1"
-                                         data-live="{{ a.driver.id }}">
-                                        <span class="text-muted">Waiting for a phone fix&hellip;</span>
-                                    </div>
-                                    <button type="button" class="btn btn-outline-primary btn-track mt-1"
-                                            data-track="{{ a.driver.id }}"
-                                            title="Centre the map on this driver's phone">
-                                        <i class="fas fa-location-crosshairs me-1"></i>Follow on map
-                                    </button>
-                                    {% endif %}
-                                </td>
-                                <td class="small" data-label="Destination">{{ a.destination_label or 'Unknown' }}</td>
-                                <td class="text-end small dispatch-metric" data-label="Remaining">
-                                    {% if a.distance_remaining_km is not none %}
-                                        {{ '%.1f'|format(a.distance_remaining_km) }} km
-                                    {% else %}<span class="text-muted">&mdash;</span>{% endif %}
-                                </td>
-                                <td class="text-end small dispatch-metric" data-label="ETA">
-                                    {% if a.eta_minutes is not none %}
-                                        <span class="fw-semibold">{{ a.eta_minutes | round | int }} min</span>
-                                    {% else %}<span class="text-muted">&mdash;</span>{% endif %}
-                                </td>
-                                <td data-label="Status">
-                                    <span class="badge bg-{{ {'assigned':'secondary','picked_up':'info','in_transit':'primary'}.get(a.status, 'light') }}">
-                                        {{ a.status.replace('_', ' ') }}
-                                    </span>
-                                </td>
-                                <td class="dispatch-actions" data-label="Move to">
-                                    <div class="d-flex flex-wrap gap-1">
-                                    {% for next_status, label, style in [
-                                        ('picked_up', 'Picked up', 'info'),
-                                        ('in_transit', 'In transit', 'primary'),
-                                        ('delivered', 'Delivered', 'success'),
-                                        ('failed', 'Failed', 'danger')] %}
-                                        {% if a.status != next_status %}
-                                        <form method="POST"
-                                              action="{{ url_for('admin_update_assignment_status', assignment_id=a.id) }}">
-                                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                            <input type="hidden" name="status" value="{{ next_status }}">
-                                            <button class="btn btn-outline-{{ style }} text-nowrap">{{ label }}</button>
-                                        </form>
-                                        {% endif %}
-                                    {% endfor %}
-                                    </div>
-                                </td>
-                            </tr>
-                        {% else %}
-                            <tr><td colspan="7" class="text-center text-muted py-4">Nothing out for delivery.</td></tr>
-                        {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- Assign -->
-            <div class="card border-0 shadow-sm mt-4">
-                <div class="card-header bg-white">
-                    <h5 class="mb-0"><i class="fas fa-people-carry-box me-2"></i>Assign an order</h5>
-                    <small class="text-muted">Paid orders awaiting dispatch.</small>
-                </div>
-                <div class="card-body">
-                    <form method="POST" action="{{ url_for('admin_assign_delivery') }}" class="row g-2 align-items-end">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                        <div class="col-md-6">
-                            <label class="form-label small">Order</label>
-                            <select name="order_id" class="form-select" required>
-                                <option value="">Select an order&hellip;</option>
-                                {% for o in pending_orders %}
-                                <option value="{{ o.id }}">
-                                    {{ o.order_number }} &mdash;
-                                    {{ o.shipping_city or o.shipping_state or 'no city' }}
-                                    ({{ o.shipping_status }})
-                                </option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small">Driver</label>
-                            <select name="driver_id" class="form-select" required>
-                                <option value="">Select a driver&hellip;</option>
-                                {% for d in drivers %}
-                                <option value="{{ d.id }}">
-                                    {{ d.display_name or d.id }}
-                                    ({{ d.status.replace('_', ' ') }}{{ ' - ' ~ d.vehicle_type if d.vehicle_type }})
-                                </option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div class="col-md-2">
-                            <button class="btn btn-primary w-100"><i class="fas fa-paper-plane me-1"></i>Assign</button>
-                        </div>
-                    </form>
-                    {% if not pending_orders %}
-                        <p class="text-muted small mb-0 mt-2">No paid orders are waiting for a driver.</p>
-                    {% endif %}
                 </div>
             </div>
         </div>
@@ -292,7 +179,9 @@
 
                 <div class="list-group list-group-flush" id="driverList">
                 {% for d in drivers %}
-                    <div class="list-group-item" data-driver="{{ d.id }}">
+                    <div class="list-group-item {{ 'driver-highlight' if share_driver_id == d.id }}"
+                         data-driver="{{ d.id }}"
+                         {% if share_driver_id == d.id %}data-just-linked="1"{% endif %}>
                         <div class="d-flex justify-content-between align-items-start">
                             <div>
                                 <div class="fw-semibold">
@@ -330,14 +219,39 @@
                                 <i class="fas fa-pen"></i>
                             </button>
                         </div>
-                        <form method="POST" class="mt-1"
-                              action="{{ url_for('admin_rotate_driver_token', driver_id=d.id) }}"
-                              onsubmit="return confirm('Regenerate the link? The old one stops working immediately.');">
-                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                            <button class="btn btn-sm btn-link text-danger p-0 small">
-                                <i class="fas fa-rotate me-1"></i>Regenerate link
-                            </button>
-                        </form>
+
+                        <div class="d-flex flex-wrap align-items-center gap-2 mt-2">
+                            {% if share_links.get(d.id) %}
+                            <!-- Opens WhatsApp with the driver's number and the message
+                                 already typed. Works with nothing configured; when the
+                                 WhatsApp Cloud API credentials are set the send already
+                                 happened server side and this is just a resend. -->
+                            <a class="btn btn-sm btn-success" target="_blank" rel="noopener"
+                               data-whatsapp="{{ d.id }}" href="{{ share_links[d.id] }}"
+                               title="Open WhatsApp to {{ d.phone }} with the link ready to send">
+                                <i class="fab fa-whatsapp me-1"></i>WhatsApp
+                            </a>
+                            {% else %}
+                            <span class="small text-muted" title="Add a phone number to share the link">
+                                <i class="fab fa-whatsapp me-1"></i>No phone on file
+                            </span>
+                            {% endif %}
+                            <form method="POST" action="{{ url_for('admin_send_driver_link', driver_id=d.id) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                <button class="btn btn-sm btn-outline-secondary"
+                                        title="Send the link again by WhatsApp, SMS and email">
+                                    <i class="fas fa-paper-plane me-1"></i>Resend
+                                </button>
+                            </form>
+                            <form method="POST"
+                                  action="{{ url_for('admin_rotate_driver_token', driver_id=d.id) }}"
+                                  onsubmit="return confirm('Regenerate the link? The old one stops working immediately and the new one is sent to the driver.');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                <button class="btn btn-sm btn-link text-danger p-0 small">
+                                    <i class="fas fa-rotate me-1"></i>Regenerate
+                                </button>
+                            </form>
+                        </div>
                     </div>
                 {% else %}
                     <div class="list-group-item text-center text-muted py-4">
@@ -348,6 +262,143 @@
             </div>
         </div>
     </div>
+
+    <!-- Active deliveries -------------------------------------------------
+         Full page width on purpose. Seven columns crammed into the col-xl-8
+         beside the drivers list is what pushed Order, Driver and Destination
+         off behind a horizontal scrollbar with no hint they were there. -->
+    <div class="card border-0 shadow-sm mt-4">
+        <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <h5 class="mb-0"><i class="fas fa-route me-2"></i>Active deliveries
+                <span class="badge bg-primary ms-1">{{ assignments | length }}</span>
+            </h5>
+            <small class="text-muted d-none" data-scroll-hint>
+                <i class="fas fa-arrows-left-right me-1"></i>Scroll sideways for the last columns
+            </small>
+        </div>
+        <div class="table-responsive dispatch-scroll">
+            <table class="table table-hover align-middle mb-0 dispatch-table">
+                <thead class="table-light">
+                    <tr>
+                        <th>Order</th><th>Driver &amp; live position</th><th>Destination</th>
+                        <th class="text-end">Remaining</th><th class="text-end">ETA</th>
+                        <th>Status</th><th>Move to</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for a in assignments %}
+                    <tr>
+                        <td data-label="Order">
+                            <a href="{{ url_for('admin_order_detail', order_id=a.order_id) }}"
+                               class="fw-semibold text-decoration-none">
+                                {{ a.order.order_number if a.order else a.order_id }}
+                            </a>
+                            <div class="small text-muted">
+                                {{ a.assigned_at.strftime('%d %b %H:%M') if a.assigned_at else '' }}
+                            </div>
+                        </td>
+                        <td data-label="Driver">
+                            <div>{{ a.driver.display_name if a.driver else '-' }}</div>
+                            <div class="small text-muted">{{ a.driver.vehicle_registration or a.driver.vehicle_type if a.driver else '' }}</div>
+                            {% if a.driver %}
+                            <div class="small dispatch-live d-flex flex-wrap align-items-center gap-2 mt-1"
+                                 data-live="{{ a.driver.id }}">
+                                <span class="text-muted">Waiting for a phone fix&hellip;</span>
+                            </div>
+                            <button type="button" class="btn btn-outline-primary btn-track mt-1"
+                                    data-track="{{ a.driver.id }}"
+                                    title="Centre the map on this driver's phone">
+                                <i class="fas fa-location-crosshairs me-1"></i>Follow on map
+                            </button>
+                            {% endif %}
+                        </td>
+                        <td class="small" data-label="Destination">{{ a.destination_label or 'Unknown' }}</td>
+                        <td class="text-end small dispatch-metric" data-label="Remaining">
+                            {% if a.distance_remaining_km is not none %}
+                                {{ '%.1f'|format(a.distance_remaining_km) }} km
+                            {% else %}<span class="text-muted">&mdash;</span>{% endif %}
+                        </td>
+                        <td class="text-end small dispatch-metric" data-label="ETA">
+                            {% if a.eta_minutes is not none %}
+                                <span class="fw-semibold">{{ a.eta_minutes | round | int }} min</span>
+                            {% else %}<span class="text-muted">&mdash;</span>{% endif %}
+                        </td>
+                        <td data-label="Status">
+                            <span class="badge bg-{{ {'assigned':'secondary','picked_up':'info','in_transit':'primary'}.get(a.status, 'light') }}">
+                                {{ a.status.replace('_', ' ') }}
+                            </span>
+                        </td>
+                        <td class="dispatch-actions" data-label="Move to">
+                            <div class="d-flex flex-wrap gap-1">
+                            {% for next_status, label, style in [
+                                ('picked_up', 'Picked up', 'info'),
+                                ('in_transit', 'In transit', 'primary'),
+                                ('delivered', 'Delivered', 'success'),
+                                ('failed', 'Failed', 'danger')] %}
+                                {% if a.status != next_status %}
+                                <form method="POST"
+                                      action="{{ url_for('admin_update_assignment_status', assignment_id=a.id) }}">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                    <input type="hidden" name="status" value="{{ next_status }}">
+                                    <button class="btn btn-outline-{{ style }} text-nowrap">{{ label }}</button>
+                                </form>
+                                {% endif %}
+                            {% endfor %}
+                            </div>
+                        </td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="7" class="text-center text-muted py-4">Nothing out for delivery.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Assign -->
+    <div class="card border-0 shadow-sm mt-4">
+        <div class="card-header bg-white">
+            <h5 class="mb-0"><i class="fas fa-people-carry-box me-2"></i>Assign an order</h5>
+            <small class="text-muted">Paid orders awaiting dispatch.</small>
+        </div>
+        <div class="card-body">
+            <form method="POST" action="{{ url_for('admin_assign_delivery') }}" class="row g-2 align-items-end">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="col-md-6">
+                    <label class="form-label small">Order</label>
+                    <select name="order_id" class="form-select" required>
+                        <option value="">Select an order&hellip;</option>
+                        {% for o in pending_orders %}
+                        <option value="{{ o.id }}">
+                            {{ o.order_number }} &mdash;
+                            {{ o.shipping_city or o.shipping_state or 'no city' }}
+                            ({{ o.shipping_status }})
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small">Driver</label>
+                    <select name="driver_id" class="form-select" required>
+                        <option value="">Select a driver&hellip;</option>
+                        {% for d in drivers %}
+                        <option value="{{ d.id }}">
+                            {{ d.display_name or d.id }}
+                            ({{ d.status.replace('_', ' ') }}{{ ' - ' ~ d.vehicle_type if d.vehicle_type }})
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-primary w-100"><i class="fas fa-paper-plane me-1"></i>Assign</button>
+                </div>
+            </form>
+            {% if not pending_orders %}
+                <p class="text-muted small mb-0 mt-2">No paid orders are waiting for a driver.</p>
+            {% endif %}
+        </div>
+    </div>
+
 </div>
 {% endblock %}
 
@@ -356,6 +407,9 @@
 <script>
 const ORIGIN = [{{ origin_lng }}, {{ origin_lat }}];
 const STYLE_URL = {{ (map_style_url or '') | tojson }};
+// True only when the server could not send on WhatsApp itself, so the browser
+// offers the one-tap hand-off instead of duplicating a message already sent.
+const SHARE_PROMPT = {{ 'true' if share_prompt_whatsapp else 'false' }};
 const DRIVER_DATA = {
 {% for d in drivers %}
     {{ d.id }}: {
@@ -588,9 +642,11 @@ async function refreshDrivers() {
             const position = [driver.lng, driver.lat];
             lastKnown[driver.id] = position;
 
-            // Trails belong to a live delivery; once it is dropped off the line
-            // stops being useful clutter on the map.
-            if (driver.assignment) updateTrail(driver); else clearTrail(driver.id);
+            // Draw whatever breadcrumbs the server sent. A driver who has just
+            // opened their link has no assignment yet, and that first movement
+            // is exactly what confirms the link is working.
+            if (driver.trail && driver.trail.length) updateTrail(driver);
+            else clearTrail(driver.id);
 
             if (!map) return;
             if (markers[driver.id]) {
@@ -606,6 +662,10 @@ async function refreshDrivers() {
         });
         document.getElementById('refreshStamp').textContent =
             'Updated ' + new Date().toLocaleTimeString();
+        // The live cells above just grew from "waiting" to a coordinate pair, so
+        // a table that fitted a moment ago may not fit now. Re-check, or the
+        // "scroll sideways" hint stays hidden over freshly hidden columns.
+        markClippedTables();
     } catch (err) {
         /* transient network blip - the next tick retries */
     }
@@ -615,6 +675,33 @@ function copyLink(id) {
     const field = document.getElementById('link_' + id);
     field.select();
     navigator.clipboard.writeText(field.value);
+}
+
+/* --- nothing hidden without saying so -------------------------------- */
+
+function markClippedTables() {
+    document.querySelectorAll('.dispatch-scroll').forEach(box => {
+        // A couple of pixels of slack: sub-pixel layout rounding otherwise
+        // reports a scrollbar on a table that fits perfectly.
+        const clipped = box.scrollWidth - box.clientWidth > 2;
+        box.classList.toggle('is-clipped', clipped);
+        const card = box.closest('.card');
+        const hint = card && card.querySelector('[data-scroll-hint]');
+        if (hint) hint.classList.toggle('d-none', !clipped);
+    });
+}
+
+/* --- the driver we just minted a link for ---------------------------- */
+
+function openWhatsAppShare() {
+    const card = document.querySelector('[data-just-linked]');
+    if (!card) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (!SHARE_PROMPT) return;
+    const link = card.querySelector('[data-whatsapp]');
+    // A popup blocker may refuse this - harmless, the green WhatsApp button on
+    // the card is right there and does the same thing on a real click.
+    if (link) window.open(link.href, '_blank', 'noopener');
 }
 
 function resetDriverForm() {
@@ -647,6 +734,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const button = event.target.closest('[data-track]');
         if (button) trackDriver(parseInt(button.dataset.track, 10));
     });
+    markClippedTables();
+    window.addEventListener('resize', markClippedTables);
+    openWhatsAppShare();
     refreshDrivers();
     setInterval(refreshDrivers, 15000);
 });

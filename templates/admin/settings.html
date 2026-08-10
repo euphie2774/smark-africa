@@ -366,6 +366,49 @@
 
         <div class="card border-0 shadow-sm mb-4">
             <div class="card-header bg-white">
+                <h5 class="mb-0"><i class="fab fa-whatsapp text-success me-2"></i>WhatsApp (Meta Cloud API)</h5>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-info small">
+                    Optional. Fill these in and driver tracking links are sent to WhatsApp
+                    automatically the moment they are created. Leave them empty and the
+                    dispatch page still offers a one-tap share button that opens WhatsApp
+                    with the message ready &mdash; you just press send yourself.
+                    <br>
+                    Meta only allows free-form text within 24 hours of the recipient
+                    messaging you. To reach a driver who never has, name an approved
+                    template below; it is sent with the link as its first body variable.
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Access Token</label>
+                        <input type="password" name="whatsapp_access_token" class="form-control"
+                               value="{{ settings.whatsapp_access_token or '' }}"
+                               placeholder="Permanent token from your Meta app">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Phone Number ID</label>
+                        <input name="whatsapp_phone_number_id" class="form-control"
+                               value="{{ settings.whatsapp_phone_number_id or '' }}"
+                               placeholder="Numeric ID, not the phone number">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Message Template Name <span class="text-muted">(optional)</span></label>
+                        <input name="whatsapp_template_name" class="form-control"
+                               value="{{ settings.whatsapp_template_name or '' }}"
+                               placeholder="e.g. driver_tracking_link">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Template Language</label>
+                        <input name="whatsapp_template_language" class="form-control"
+                               value="{{ settings.whatsapp_template_language or 'en' }}" placeholder="en">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card border-0 shadow-sm mb-4">
+            <div class="card-header bg-white">
                 <h5 class="mb-0">SEO & Google Tools</h5>
             </div>
             <div class="card-body">
