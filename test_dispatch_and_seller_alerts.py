@@ -508,6 +508,42 @@ with app.test_client() as client:
     # actually stamped on a card.
     check('and no card is highlighted', 'data-just-linked="1"' not in html)
 
+print('\n== the map is actually allowed to render ==')
+with app.test_client() as client:
+    login(client, admin_id)
+    r = client.get('/admin/dispatch')
+    csp = dict(
+        (part.strip().split(' ')[0], part.strip())
+        for part in (r.headers.get('Content-Security-Policy') or '').split(';')
+        if part.strip()
+    )
+    check('a CSP is being sent at all', bool(csp), r.headers.get('Content-Security-Policy'))
+    # maplibre-gl.css is what absolutely-positions the canvas, markers and
+    # popups. Blocked, the map still "loads" but its children fall into normal
+    # flow and land on top of the tables below.
+    check('the map stylesheet host is allowed',
+          'unpkg.com' in csp.get('style-src', ''), csp.get('style-src'))
+    check('the map script host is allowed',
+          'unpkg.com' in csp.get('script-src', ''), csp.get('script-src'))
+    # MapLibre decodes tiles in a worker built from a blob: URL.
+    check('blob: workers permitted', 'blob:' in csp.get('worker-src', ''), csp.get('worker-src'))
+    # Tiles are fetched over XHR, so img-src alone is not enough.
+    check('the tile host is reachable over XHR',
+          'tile.openstreetmap.org' in csp.get('connect-src', ''), csp.get('connect-src'))
+    check('same-origin XHR still allowed', "'self'" in csp.get('connect-src', ''))
+    # Regression guard: these were dropped once while reworking the policy.
+    check('fonts still allowed', 'fonts.gstatic.com' in csp.get('font-src', ''), csp.get('font-src'))
+    check('product images still allowed', 'https:' in csp.get('img-src', ''), csp.get('img-src'))
+    check('framing still denied', "'none'" in csp.get('frame-ancestors', ''))
+
+    html = r.get_data(as_text=True)
+    check('the map box clips its own children',
+          '#map {' in html and 'overflow: hidden;' in html)
+    check('following a driver resizes before flying',
+          'map.resize();' in html and 'map.flyTo(' in html)
+    check('the scroll target clears the sticky navbar',
+          'navbar.sticky-top' in html and 'scrollIntoView' not in html.split('function trackDriver')[1].split('async function')[0])
+
 print('\n== seller is told their listing went live ==')
 with app.app_context():
     SENT_EMAILS.clear()

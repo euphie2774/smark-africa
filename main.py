@@ -98,6 +98,32 @@ limiter = Limiter(
 )
 
 # Security Headers with Flask-Talisman
+#
+# MapLibre needs four separate permissions and silently half-works if any one of
+# them is missing: its script, its stylesheet, a blob: web worker, and XHR access
+# to the tile host. Missing the stylesheet is the nastiest of the four - the map
+# still "loads", but markers and popups lose their absolute positioning and fall
+# into normal document flow, landing on top of whatever follows the map.
+MAP_ASSET_HOST = 'https://unpkg.com'
+
+# Tiles and vector style JSON are fetched over XHR, so the hosts have to be
+# reachable from connect-src, not just img-src.
+MAP_TILE_HOSTS = [
+    'https://tile.openstreetmap.org',
+    'https://*.tile.openstreetmap.org',
+    'https://api.maptiler.com',
+    'https://demotiles.maplibre.org',
+]
+
+# A self-hosted or paid provider set through MAP_STYLE_URL has to be allowed too,
+# or switching provider silently produces a blank map.
+_style_url = (os.environ.get('MAP_STYLE_URL') or '').strip()
+if _style_url.startswith('https://'):
+    from urllib.parse import urlparse as _urlparse
+    _style_origin = f'https://{_urlparse(_style_url).netloc}'
+    if _style_origin and _style_origin not in MAP_TILE_HOSTS:
+        MAP_TILE_HOSTS.append(_style_origin)
+
 csp = {
     'default-src': "'self'",
     'script-src': [
@@ -113,20 +139,27 @@ csp = {
         "'unsafe-inline'",  # Required for inline styles
         "https://cdn.jsdelivr.net",
         "https://stackpath.bootstrapcdn.com",
+        MAP_ASSET_HOST,  # maplibre-gl.css - without it markers land over the page
         "https://fonts.googleapis.com"
     ],
+    # MapLibre runs its tile decoding in a worker created from a blob: URL.
+    # Without these it throws on construction and the map never appears.
+    'worker-src': ["'self'", "blob:"],
+    'child-src': ["'self'", "blob:"],
     'img-src': [
         "'self'",
         "data:",
+        "blob:",
         "https:",
         "http:"  # Allow external images for products
     ],
+    'connect-src': ["'self'"] + MAP_TILE_HOSTS,
     'font-src': [
         "'self'",
+        "data:",
         "https://fonts.gstatic.com",
         "https://cdn.jsdelivr.net"
     ],
-    'connect-src': "'self'",
     'frame-ancestors': "'none'",
     'base-uri': "'self'",
     'form-action': "'self'"

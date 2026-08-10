@@ -74,6 +74,22 @@
     background: rgba(25, 135, 84, .07);
     box-shadow: inset 3px 0 0 #198754;
 }
+
+/* Belt and braces for the map box. MapLibre positions its canvas, markers and
+   popups from maplibre-gl.css; if that stylesheet is ever blocked or slow, they
+   fall into normal flow and pile on top of the tables below instead of staying
+   in the map. Clipping to the box means a broken map reads as an empty map. */
+#map {
+    position: relative;
+    overflow: hidden;
+    contain: layout paint;
+}
+
+#map canvas { display: block; }
+
+/* Popups belong above the map's own controls but below Bootstrap's modals
+   and the sticky navbar, so nothing gets trapped underneath a dialog. */
+.maplibregl-popup { z-index: 3; }
 </style>
 {% endblock %}
 
@@ -609,13 +625,26 @@ function trackDriver(driverId) {
         return;
     }
     if (!map) return;
+
+    // Scroll first, then fly. MapLibre reads the container size when it renders,
+    // so moving the page mid-flight can leave the canvas offset by the scroll
+    // distance - which looks exactly like the marker sitting outside the map.
+    const box = document.getElementById('map');
+    // 'start' with a nudge for the sticky navbar, not 'center': a 520px map
+    // centred in a shorter viewport pushes its top - and the marker - up
+    // underneath the navbar.
+    const navbar = document.querySelector('.navbar.sticky-top');
+    const offset = (navbar ? navbar.getBoundingClientRect().height : 0) + 12;
+    const top = box.getBoundingClientRect().top + window.pageYOffset - offset;
+    window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+
+    map.resize();
     map.flyTo({ center: position, zoom: 14, speed: 1.2 });
     const marker = markers[driverId];
     if (marker) {
         const popup = marker.getPopup();
         if (popup && !popup.isOpen()) marker.togglePopup();
     }
-    document.getElementById('map').scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 async function refreshDrivers() {
