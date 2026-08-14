@@ -142,6 +142,7 @@ const STATUS_URL = {{ url_for('api_driver_status', token=token) | tojson }};
 const PING_MS    = {{ ping_seconds }} * 1000;
 const STYLE_URL  = {{ (map_style_url or '') | tojson }};
 const TRAIL      = {{ trail | tojson }};
+const TRAIL_PATH = {{ trail_path | tojson }};
 const START = [
     {{ driver.last_lng if driver.last_lng is not none else 36.817223 }},
     {{ driver.last_lat if driver.last_lat is not none else -1.286389 }}
@@ -170,7 +171,19 @@ const RASTER_STYLE = {
 
 let map = null, meMarker = null, watchId = null, timer = null, lastFix = null, sharing = false;
 let wakeLock = null;
-let trailCoords = (TRAIL || []).map(p => [p.lng, p.lat]);
+// Seeded from the server's road-matched path so the line already follows the
+// streets on load. Live fixes are appended raw between pings - on your own phone
+// an instantly-drawn line beats a snapped one that lags a round trip - and the
+// next page load replaces the lot with matched geometry.
+let matchedRoad = ((TRAIL_PATH || {}).coordinates || []).filter(
+    c => Array.isArray(c) && c.length === 2 && c[0] != null && c[1] != null);
+let trailCoords = matchedRoad.length >= 2
+    ? matchedRoad.slice()
+    : (TRAIL || []).map(p => [p.lng, p.lat]);
+// The driver's own GPS fixes, drawn as dots over the line.
+let fixCoords = (TRAIL || [])
+    .filter(p => p.lat != null && p.lng != null)
+    .map(p => [p.lng, p.lat]);
 let buffer = loadBuffer();
 
 function loadBuffer() {
@@ -210,16 +223,29 @@ function trailData() {
     };
 }
 
+function fixData() {
+    return {
+        type: 'FeatureCollection',
+        features: fixCoords.map(c => ({
+            type: 'Feature', properties: {},
+            geometry: { type: 'Point', coordinates: c }
+        }))
+    };
+}
+
 function drawTrail() {
     if (!map || !map.getSource || !map.getSource('trail')) return;
     map.getSource('trail').setData(trailData());
+    if (map.getSource('fixes')) map.getSource('fixes').setData(fixData());
 }
 
 function pushTrail(lng, lat) {
     const last = trailCoords[trailCoords.length - 1];
     if (last && metresBetween(last[1], last[0], lat, lng) < TRAIL_MIN_M) return;
     trailCoords.push([lng, lat]);
+    fixCoords.push([lng, lat]);
     if (trailCoords.length > TRAIL_MAX) trailCoords = trailCoords.slice(-TRAIL_MAX);
+    if (fixCoords.length > TRAIL_MAX) fixCoords = fixCoords.slice(-TRAIL_MAX);
     drawTrail();
 }
 
@@ -234,10 +260,26 @@ function initMap() {
         map.addControl(new maplibregl.NavigationControl(), 'top-right');
         map.on('load', () => {
             map.addSource('trail', { type: 'geojson', data: trailData() });
+            map.addSource('fixes', { type: 'geojson', data: fixData() });
             map.addLayer({
                 id: 'trail', type: 'line', source: 'trail',
                 layout: { 'line-cap': 'round', 'line-join': 'round' },
-                paint: { 'line-color': '#198754', 'line-width': 4, 'line-opacity': .85 }
+                paint: {
+                    'line-color': '#198754', 'line-width': 4, 'line-opacity': .85,
+                    // Dashed until a matcher confirms the road, matching the
+                    // dispatch map's convention for an unsnapped trace.
+                    'line-dasharray': (TRAIL_PATH && TRAIL_PATH.is_road_matched) ? [1] : [2, 1.5]
+                }
+            });
+            map.addLayer({
+                id: 'fixes', type: 'circle', source: 'fixes',
+                paint: {
+                    'circle-radius': 3,
+                    'circle-color': '#ffffff',
+                    'circle-stroke-color': '#0f5132',
+                    'circle-stroke-width': 1.2,
+                    'circle-opacity': .95
+                }
             });
         });
         {% for a in assignments %}

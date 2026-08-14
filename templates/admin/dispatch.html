@@ -544,27 +544,72 @@ function agoText(iso) {
 
 /* --- trail layers ---------------------------------------------------- */
 
+// The drawn line is the server's road-matched path when a matcher is
+// configured, so it follows the streets the driver actually used rather than
+// cutting between 20-second-apart fixes. Without a matcher the server sends the
+// cleaned-up fixes instead and flags them, and we dash the line to say so.
 function trailData(driver) {
-    const coords = (driver.trail || [])
-        .filter(p => p.lat != null && p.lng != null)
-        .map(p => [p.lng, p.lat]);
+    const path = driver.trail_path || {};
+    let coords = (path.coordinates || []).filter(
+        c => Array.isArray(c) && c.length === 2 && c[0] != null && c[1] != null);
+
+    // Fall back to the raw fixes if the path came back empty, so a matcher
+    // hiccup degrades to the old straight line rather than a blank map.
+    if (coords.length < 2) {
+        coords = (driver.trail || [])
+            .filter(p => p.lat != null && p.lng != null)
+            .map(p => [p.lng, p.lat]);
+    }
     // A LineString needs two points; anything less is drawn as nothing.
     if (coords.length < 2) return { type: 'FeatureCollection', features: [] };
     return {
         type: 'FeatureCollection',
-        features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }]
+        features: [{
+            type: 'Feature',
+            properties: { matched: path.is_road_matched ? 1 : 0 },
+            geometry: { type: 'LineString', coordinates: coords }
+        }]
     };
+}
+
+// The raw GPS fixes, kept visible on top of the snapped line: when a match goes
+// wrong and picks a parallel street, the dots are what show it.
+function fixData(driver) {
+    return {
+        type: 'FeatureCollection',
+        features: (driver.trail || [])
+            .filter(p => p.lat != null && p.lng != null)
+            .map(p => ({
+                type: 'Feature',
+                properties: {},
+                geometry: { type: 'Point', coordinates: [p.lng, p.lat] }
+            }))
+    };
+}
+
+function isMatched(driver) {
+    return !!(driver.trail_path && driver.trail_path.is_road_matched);
 }
 
 function updateTrail(driver) {
     if (!map || !mapReady) return;
     const src = 'trail-' + driver.id;
+    const fixSrc = 'fix-' + driver.id;
     const data = trailData(driver);
+    const matched = isMatched(driver);
+
     if (map.getSource(src)) {
         map.getSource(src).setData(data);
+        if (map.getSource(fixSrc)) map.getSource(fixSrc).setData(fixData(driver));
+        // A driver can gain or lose a matched path mid-shift (matcher restart,
+        // or the first ping of a trip), so the dashes have to follow.
+        map.setPaintProperty(src + '-line', 'line-dasharray', matched ? [1] : [2, 1.5]);
+        map.setPaintProperty(src + '-line', 'line-color', matched ? '#0d6efd' : '#6f42c1');
         return;
     }
+
     map.addSource(src, { type: 'geojson', data: data });
+    map.addSource(fixSrc, { type: 'geojson', data: fixData(driver) });
     // White casing first so the blue line stays legible over busy map tiles;
     // MapLibre paints later layers on top.
     map.addLayer({
@@ -575,15 +620,31 @@ function updateTrail(driver) {
     map.addLayer({
         id: src + '-line', type: 'line', source: src,
         layout: { 'line-cap': 'round', 'line-join': 'round' },
-        paint: { 'line-color': '#0d6efd', 'line-width': 3.5 }
+        paint: {
+            'line-color': matched ? '#0d6efd' : '#6f42c1',
+            'line-width': 3.5,
+            'line-dasharray': matched ? [1] : [2, 1.5]
+        }
+    });
+    map.addLayer({
+        id: fixSrc + '-dots', type: 'circle', source: fixSrc,
+        paint: {
+            'circle-radius': 3,
+            'circle-color': '#ffffff',
+            'circle-stroke-color': '#0b3d91',
+            'circle-stroke-width': 1.2,
+            'circle-opacity': 0.95
+        }
     });
 }
 
 function clearTrail(driverId) {
     if (!map || !mapReady) return;
     const src = 'trail-' + driverId;
-    [src + '-line', src + '-casing'].forEach(id => { if (map.getLayer(id)) map.removeLayer(id); });
-    if (map.getSource(src)) map.removeSource(src);
+    const fixSrc = 'fix-' + driverId;
+    [src + '-line', src + '-casing', fixSrc + '-dots'].forEach(
+        id => { if (map.getLayer(id)) map.removeLayer(id); });
+    [src, fixSrc].forEach(id => { if (map.getSource(id)) map.removeSource(id); });
 }
 
 /* --- table row readouts ---------------------------------------------- */
@@ -607,10 +668,16 @@ function renderLiveCell(driver) {
     const moving = movementText(driver);
     if (moving) bits.push('<span class="text-muted"><i class="fas fa-gauge-high me-1"></i>' + moving + '</span>');
 
-    const covered = driver.trail && driver.trail.length > 1 ? trailKm(driver.trail) : 0;
+    // Prefer the matched road distance: summing straight chords between fixes
+    // always understates a journey, and by more the twistier the route.
+    const path = driver.trail_path || {};
+    const covered = (path.is_road_matched && path.distance_km)
+        ? path.distance_km
+        : (driver.trail && driver.trail.length > 1 ? trailKm(driver.trail) : 0);
     if (covered >= 0.1) {
         bits.push('<span class="text-muted"><i class="fas fa-route me-1"></i>' +
-                  covered.toFixed(1) + ' km travelled</span>');
+                  covered.toFixed(1) + ' km travelled' +
+                  (path.is_road_matched ? '' : ' (approx)') + '</span>');
     }
 
     cell.innerHTML = bits.join('');

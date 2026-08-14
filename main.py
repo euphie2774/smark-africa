@@ -53,8 +53,8 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     ShippingZone, ShippingQuote, DriverProfile, DriverLocationPing, DeliveryAssignment, \
     StorefrontFollow, SocialAdPost, PromoCode, PromoCodeRedemption
 
-from geo import GeoPoint, get_router, get_geocoder
-from geo.cache import cached_route, cached_geocode, cached_reverse
+from geo import GeoPoint, TracePoint, get_router, get_geocoder
+from geo.cache import cached_route, cached_geocode, cached_reverse, cached_match
 
 # Import security utilities
 from validators import (RegisterSchema, LoginSchema, ProductSchema, ReviewSchema,
@@ -12262,11 +12262,72 @@ def driver_trail(driver_id, order_id=None, minutes=DRIVER_TRAIL_MINUTES, limit=D
             'lat': row.lat,
             'lng': row.lng,
             'at': row.created_at.isoformat() if row.created_at else None,
+            # Accuracy and an epoch are what let the matcher decide how far a fix
+            # may be moved and whether a gap is travel or a bad reading.
+            'accuracy_m': row.accuracy_m,
+            'epoch_seconds': row.created_at.replace(tzinfo=timezone.utc).timestamp()
+                             if row.created_at else None,
             'speed_kph': row.speed_kph,
             'heading': row.heading,
         }
         for row in reversed(rows)
     ]
+
+
+# OSRM's /match service takes 100 coordinates per request by default, so the
+# 120-point trail is trimmed from the tail before it is sent anywhere.
+DRIVER_TRACE_MAX_POINTS = 100
+
+
+def driver_trail_path(trail):
+    """Road-following geometry for a breadcrumb trail.
+
+    Raw pings joined end to end cut across blocks and buildings, because a fix
+    every ~20s says nothing about the road taken in between. Map matching snaps
+    the sequence onto the network so the drawn line is the route actually driven.
+
+    Returns the shape the map layers consume::
+
+        {'coordinates': [[lng, lat], ...], 'is_road_matched': bool,
+         'provider': str, 'distance_km': float}
+
+    `is_road_matched` is False when no matcher is configured (the default) - the
+    coordinates are then the driver's own fixes with the obviously-bad ones
+    removed, and the map draws them dashed to say so. Never raises: the dispatch
+    poll refreshes every 15s and a matching outage must not take it down.
+    """
+    points = [
+        TracePoint(
+            lat=entry['lat'],
+            lng=entry['lng'],
+            accuracy_m=entry.get('accuracy_m'),
+            epoch_seconds=entry.get('epoch_seconds'),
+        )
+        for entry in (trail or [])
+        if entry.get('lat') is not None and entry.get('lng') is not None
+    ]
+    points = points[-DRIVER_TRACE_MAX_POINTS:]
+
+    if len(points) < 2:
+        return {'coordinates': [], 'is_road_matched': False,
+                'provider': 'none', 'distance_km': 0.0}
+
+    try:
+        result = cached_match(cache, points)
+        return {
+            'coordinates': result.coordinates,
+            'is_road_matched': result.is_road_matched,
+            'provider': result.provider,
+            'distance_km': round(result.distance_km or 0.0, 3),
+        }
+    except Exception:  # noqa: BLE001 - never let the map lose its trace
+        app.logger.exception('driver trace matching failed')
+        return {
+            'coordinates': [[p.lng, p.lat] for p in points],
+            'is_road_matched': False,
+            'provider': 'error',
+            'distance_km': 0.0,
+        }
 
 
 def active_assignment_for_order(order_id):
@@ -12681,6 +12742,9 @@ def api_dispatch_drivers():
         if driver.has_fix:
             trail = driver_trail(driver.id, active.order_id if active else None)
             item['trail'] = trail
+            # Road-snapped geometry for the drawn line; the raw trail above is
+            # still what the fix dots and the movement readouts use.
+            item['trail_path'] = driver_trail_path(trail)
             if trail:
                 item['speed_kph'] = trail[-1].get('speed_kph')
                 item['heading'] = trail[-1].get('heading')
@@ -12747,6 +12811,9 @@ def driver_console(token):
         DeliveryAssignment.driver_id == driver.id,
         DeliveryAssignment.status.in_(['assigned', 'picked_up', 'in_transit'])
     ).order_by(DeliveryAssignment.assigned_at.asc()).all()
+    # Seeded so the road already travelled is on the map the moment the page
+    # opens - after a reload, or after the driver comes back from another app.
+    trail = driver_trail(driver.id, assignments[0].order_id if assignments else None)
     return render_template(
         'driver_console.html',
         driver=driver,
@@ -12754,9 +12821,8 @@ def driver_console(token):
         token=token,
         map_style_url=map_style_url(),
         ping_seconds=int(shipping_setting_float('driver_ping_seconds', 20) or 20),
-        # Seeded so the road already travelled is on the map the moment the page
-        # opens - after a reload, or after the driver comes back from another app.
-        trail=driver_trail(driver.id, assignments[0].order_id if assignments else None),
+        trail=trail,
+        trail_path=driver_trail_path(trail),
     )
 
 

@@ -1,12 +1,16 @@
-"""Zero-dependency routing and geocoding.
+"""Zero-dependency routing, geocoding and trace cleanup.
 
-Used when no Valhalla/Pelias instance is configured. Distances are great-circle
-(haversine) inflated by a road-winding factor, which is good enough to price a
-delivery but is always flagged `is_estimate=True`.
+Used when no Valhalla/Pelias/OSRM instance is configured. Distances are
+great-circle (haversine) inflated by a road-winding factor, which is good enough
+to price a delivery but is always flagged `is_estimate=True`.
 
 The gazetteer covers all 47 Kenyan county headquarters plus major towns and the
 East/Central African capitals the marketplace ships to. It is intentionally a
 plain dict - no network, no index build, no service to keep alive.
+
+`FilteredTraceMatcher` is the same idea for GPS traces: it cannot say which road
+a driver used (that needs a road network), so it only throws away the fixes that
+are provably wrong and reports `is_road_matched=False`.
 """
 
 import math
@@ -16,9 +20,12 @@ import re
 from .provider import (
     RoutingProvider,
     GeocodingProvider,
+    MapMatchingProvider,
     GeoPoint,
+    TracePoint,
     RouteResult,
     GeocodeResult,
+    MatchResult,
 )
 
 EARTH_RADIUS_KM = 6371.0088
@@ -29,6 +36,14 @@ DEFAULT_ROAD_FACTOR = 1.32
 
 # Average door-to-door speed including stops, used only when no router is up.
 DEFAULT_AVG_SPEED_KMH = 45.0
+
+# --- GPS trace cleanup thresholds (all env-tunable) ---
+# A consumer phone fix worse than this is too vague to place on a street.
+DEFAULT_MAX_ACCURACY_M = 100.0
+# Faster than any delivery vehicle in traffic => a bad fix, not travel.
+DEFAULT_MAX_SPEED_KPH = 200.0
+# Below this, movement is indistinguishable from a stationary phone's jitter.
+DEFAULT_MIN_MOVE_M = 15.0
 
 
 def _f(name, default):
@@ -233,6 +248,92 @@ class HaversineRouter(RoutingProvider):
             provider=self.name,
             is_estimate=True,
             geometry=[[origin.lng, origin.lat], [destination.lng, destination.lat]],
+        )
+
+
+def clean_trace(points):
+    """Drop GPS fixes that are provably wrong, keeping chronological order.
+
+    Shared by every matcher, remote ones included: feeding a 500 m-accuracy fix
+    or a mid-trace teleport to a map-matcher is how a snapped line ends up
+    confidently drawn down the wrong street.
+
+    Three filters, cheapest first:
+
+    1. Accuracy gate - a fix with a huge error radius could be anywhere.
+    2. Speed gate - if the implied speed between two fixes is impossible, the
+       later fix is noise. Only applied when both carry timestamps, since
+       without them a long gap is indistinguishable from a teleport.
+    3. Min-move collapse - a parked phone reports the same spot with jitter,
+       which draws a knot. Keep the first fix of a cluster, skip the rest.
+
+    Filters never empty the result: if everything looks bad, the least-bad fixes
+    are still returned, because an empty map is worse than an approximate line.
+    """
+    usable = [p for p in (points or []) if p is not None and p.is_valid()]
+    if len(usable) < 2:
+        return usable
+
+    max_accuracy = _f('GEO_TRACE_MAX_ACCURACY_M', DEFAULT_MAX_ACCURACY_M)
+    max_speed = _f('GEO_TRACE_MAX_SPEED_KPH', DEFAULT_MAX_SPEED_KPH)
+    min_move_km = _f('GEO_TRACE_MIN_MOVE_M', DEFAULT_MIN_MOVE_M) / 1000.0
+
+    # 1. Accuracy. Skipped wholesale if it would leave too little to draw -
+    # a fleet of cheap phones reporting 150 m should still show a trace.
+    if max_accuracy > 0:
+        precise = [p for p in usable if p.accuracy_m is None or p.accuracy_m <= max_accuracy]
+        if len(precise) >= 2:
+            usable = precise
+
+    kept = [usable[0]]
+    for current in usable[1:]:
+        previous = kept[-1]
+        gap_km = haversine_km(previous.point, current.point)
+
+        # 2. Speed, only when both ends are timestamped and time moved forward.
+        if (max_speed > 0 and previous.epoch_seconds is not None
+                and current.epoch_seconds is not None):
+            elapsed_h = (current.epoch_seconds - previous.epoch_seconds) / 3600.0
+            if elapsed_h > 0 and (gap_km / elapsed_h) > max_speed:
+                continue
+
+        # 3. Jitter. Always keep the final fix: it is the driver's live position
+        # and the marker has to sit on the end of the line.
+        if gap_km < min_move_km and current is not usable[-1]:
+            continue
+
+        kept.append(current)
+
+    return kept if len(kept) >= 2 else usable
+
+
+def trace_distance_km(points):
+    """Great-circle length along a fix sequence."""
+    total = 0.0
+    for previous, current in zip(points, points[1:]):
+        total += haversine_km(previous.point, current.point)
+    return total
+
+
+class FilteredTraceMatcher(MapMatchingProvider):
+    """Cleans a GPS trace without snapping it to roads.
+
+    The always-available matcher. There is no road network in-process, so this
+    deliberately reports `is_road_matched=False` rather than implying the line
+    follows a street - the dispatch map draws an unmatched trace dashed so staff
+    can tell the difference.
+    """
+
+    name = 'filtered'
+
+    def match(self, points) -> MatchResult:
+        cleaned = clean_trace(points)
+        return MatchResult(
+            coordinates=[[p.lng, p.lat] for p in cleaned],
+            distance_km=trace_distance_km(cleaned),
+            provider=self.name,
+            is_road_matched=False,
+            points_used=len(cleaned),
         )
 
 
