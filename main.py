@@ -4,7 +4,7 @@ Flask Application with M-Pesa STK Push, Digital & Physical Products
 SECURITY ENHANCED VERSION
 """
 
-import os, json, uuid, base64, datetime, hashlib, requests, traceback, re, html, mimetypes, logging, csv, socket, hmac
+import os, json, uuid, base64, datetime, hashlib, requests, traceback, re, html, mimetypes, logging, csv, socket, hmac, sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO, StringIO
 from datetime import datetime, timedelta, timezone
@@ -52,6 +52,27 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue, AuditLog, \
     ShippingZone, ShippingQuote, DriverProfile, DriverLocationPing, DeliveryAssignment, \
     StorefrontFollow, SocialAdPost, PromoCode, PromoCodeRedemption
+
+from scale import (CACHE_MISS, CounterBuffer, JobLease, TTLCache, bool_env, float_env,
+                   int_env, worker_identity)
+from runtime import (acquire_lease, drain_outbound, enqueue, enqueue_detached, enqueue_email,
+                     enqueue_many, enqueue_sms, ephemeral_delete, ephemeral_get,
+                     ephemeral_get_json, ephemeral_set, fanout_notifications, housekeeping,
+                     mark_lease_run, register_sender, release_lease)
+
+# A scanner handoff is a live conversation between a phone and a till: useful for
+# the seconds it takes the console to poll, worthless after that. Short enough
+# that an abandoned scan cannot resurface in a later session.
+SCAN_HANDOFF_TTL_SECONDS = int_env('SCAN_HANDOFF_TTL_SECONDS', 180)
+
+# How long a processed webhook id is remembered so a provider retry is ignored
+# instead of applied twice. Providers retry over minutes or hours, never weeks.
+WEBHOOK_DEDUPE_TTL_SECONDS = int_env('WEBHOOK_DEDUPE_TTL_SECONDS', 30 * 24 * 3600)
+
+# Email and SMS go through the outbound queue. The switch exists so a deployment
+# that cannot run the drain worker can fall back to sending inline rather than
+# have messages pile up unsent - set OUTBOUND_QUEUE_ENABLED=0 for that.
+OUTBOUND_QUEUE_ENABLED = bool_env('OUTBOUND_QUEUE_ENABLED', True)
 
 from geo import GeoPoint, TracePoint, get_router, get_geocoder
 from geo.cache import cached_route, cached_geocode, cached_reverse, cached_match
@@ -454,10 +475,71 @@ def award_loyalty_points(user_id, event_type, points, description, reference_id=
     return row
 
 
-def active_shopping_card(user_id):
+def lock_row(model, row_id):
+    """Take a write lock on one row, held until the caller commits.
+
+    Balances live in read-then-write pairs: read the current figure, add or
+    subtract, write the result. Two of those running at once both read the same
+    starting figure and the second overwrites the first, so an award disappears or
+    a spend that should have been refused goes through. Call this before the read.
+
+    On PostgreSQL and MySQL it is SELECT ... FOR UPDATE. SQLite has no such clause
+    and, contrary to what its file-level locking suggests, does not save us: it
+    serialises the writes but not the reads that decided what to write, so every
+    racing thread still reads the same starting balance and writes the same total.
+    A no-op UPDATE promotes the transaction to a writer there and then, which makes
+    the other connections block until this one commits - the same ordering.
+
+    That UPDATE is deliberately raw SQL: routing it through the mapper would fire
+    the onupdate on columns like updated_at, and a lock has no business editing the
+    row it is protecting. Table and column names come from our own metadata, not
+    from anything a caller supplies.
+
+    A dialect that rejects the lock falls through unlocked rather than failing the
+    request, the same way the outbound claim path does.
+    """
+    if not row_id:
+        return
+    try:
+        dialect = db.session.get_bind().dialect.name
+    except Exception:
+        return
+    try:
+        if dialect == 'sqlite':
+            table = model.__table__.name
+            db.session.execute(
+                db.text(f'UPDATE "{table}" SET id = id WHERE id = :row_id'),
+                {'row_id': row_id})
+        else:
+            db.session.query(model.id).filter(
+                model.id == row_id).with_for_update().first()
+    except Exception:
+        app.logger.debug('Could not lock %s row %s', model.__name__, row_id)
+
+
+def locked(obj):
+    """Lock ``obj``'s row and re-read it, so what we read is what we act on.
+
+    The re-read matters as much as the lock: whatever wrote while we were waiting
+    for it committed changes we would otherwise still be holding the stale version
+    of. Returns the same object, refreshed, or None.
+    """
+    if obj is None:
+        return None
+    lock_row(type(obj), obj.id)
+    try:
+        db.session.refresh(obj)
+    except Exception:
+        return obj
+    return obj
+
+
+def active_shopping_card(user_id, for_update=False):
     if not user_id:
         return None
-    return ShoppingCard.query.filter_by(user_id=user_id, status='active').order_by(ShoppingCard.created_at.desc()).first()
+    card = ShoppingCard.query.filter_by(user_id=user_id, status='active').order_by(
+        ShoppingCard.created_at.desc()).first()
+    return locked(card) if for_update else card
 
 
 def loyalty_credit_balance(user_id):
@@ -579,7 +661,7 @@ def create_shopping_card(user, display_name='', issue_fee_paid=0, issued_by=None
 
 
 def credit_shopping_card(user_id, credits=0, cash_amount=0, transaction_type='credit', reference_type='', reference_id='', note='', created_by=None):
-    card = active_shopping_card(user_id)
+    card = active_shopping_card(user_id, for_update=True)
     if not card:
         return None
     credits = int(credits or 0)
@@ -604,7 +686,11 @@ def credit_shopping_card(user_id, credits=0, cash_amount=0, transaction_type='cr
 
 def redeem_shopping_card(card_number, pin, amount_kes, reference_type='pos_sale', reference_id='', created_by=None):
     clean_number = re.sub(r'\D', '', card_number or '')
-    card = ShoppingCard.query.filter_by(card_number=clean_number, status='active').first()
+    # Locked for the same reason spend_coins is: this reads a balance, checks it
+    # covers the sale and then subtracts. Two terminals swiping the same card at
+    # once would otherwise both clear the check and spend the money twice.
+    card = locked(
+        ShoppingCard.query.filter_by(card_number=clean_number, status='active').first())
     if not card:
         raise ValueError('Shopping card not recognized.')
     if not card.check_pin(pin or ''):
@@ -789,7 +875,57 @@ def decline_card_authorization(auth_request_id, user_id):
     return True, 'Payment declined'
 
 
+def queue_outbound(channel, recipient, subject=None, body=None):
+    """Put a message on the outbound queue. True when it is safely recorded.
+
+    Which connection the row goes on depends on what the caller is doing, and
+    both branches matter:
+
+      * The session already has pending writes, so the caller is inside a unit of
+        work and will commit it. Attach to that, and the message becomes part of
+        the same transaction - a receipt for an order that rolls back is never
+        sent. Opening a second connection here would also deadlock on SQLite,
+        which cannot have two writers in the same file at once.
+      * The session is clean, so the caller may well never commit - a "resend my
+        link" handler reads and sends and commits nothing. That message has to go
+        on its own connection or it would silently disappear.
+    """
+    pending = bool(db.session.new or db.session.dirty or db.session.deleted)
+    if not pending:
+        try:
+            enqueue_detached(channel, recipient=recipient, subject=subject, body=body)
+            return True
+        except Exception as exc:
+            logger.warning('Detached %s queue insert failed (%s); using the request session',
+                           channel, exc)
+    try:
+        enqueue(channel, recipient=recipient, subject=subject, body=body, commit=False)
+        return True
+    except Exception:
+        logger.exception('Could not queue %s to %s', channel, recipient)
+        return False
+
+
 def send_sms_notification(phone_number, message):
+    """Queue an SMS. Returns True when it was accepted for delivery.
+
+    Queued rather than sent here because an Africa's Talking call is a network
+    round trip on a worker thread: fine at ten messages an hour, and a hard stop
+    at ten thousand, since every one of those threads is a customer waiting. The
+    drain worker sends it within seconds and retries with backoff if the provider
+    is down, which the old inline version could not do at all - a failed send was
+    a log line and nothing more.
+    """
+    if not phone_number:
+        return False
+    if not OUTBOUND_QUEUE_ENABLED:
+        return deliver_sms_now(phone_number, message)
+    if queue_outbound('sms', phone_number, body=message):
+        return True
+    return deliver_sms_now(phone_number, message)
+
+
+def deliver_sms_now(phone_number, message):
     """Send SMS via Africa's Talking or log if not configured."""
     at_username = Setting.get('africastalking_username', app.config.get('AFRICASTALKING_USERNAME', ''))
     at_api_key = Setting.get('africastalking_api_key', app.config.get('AFRICASTALKING_API_KEY', ''))
@@ -1221,6 +1357,140 @@ def upload_to_cloudinary(source, folder='products', public_id=None):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Private object storage for paid digital files.
+#
+# The public folders above upload as ordinary Cloudinary assets, which is right
+# for a product photo and wrong for a file someone paid for: an ordinary upload
+# URL is readable by anyone holding it, forever. That is why paid digital goods
+# have stayed on local disk - and local disk is precisely what stops a second web
+# instance from being added, because the buyer whose download lands on the machine
+# that did not receive the upload gets a 404 that reads like a missing file.
+#
+# Cloudinary's 'authenticated' delivery type answers both halves: the asset has no
+# working public URL at all, and a signed, expiring one is minted per download,
+# after this app's own purchase check has already passed. It uses the same three
+# credentials that are already configured, so there is nothing new to obtain.
+#
+# Deliberately NOT extended to seller_docs. KYC documents and selfies are read
+# back off local disk immediately after upload by verify_kyc_faces and
+# verify_document_quality, which need a real file for OpenCV and PIL; moving them
+# would break face matching, and the honest fix there is a bigger change than a
+# storage swap. They stay local on purpose.
+CLOUDINARY_PRIVATE_FOLDERS = {'digital'}
+
+# Stored references carry a scheme, so one column serves both eras: a local static
+# path from before this existed, and a Cloudinary asset from after. No local path
+# begins with it, so the two can never be mistaken for each other, and every
+# existing helper that tests for the static prefix keeps returning "not local"
+# rather than mangling it.
+CLOUDINARY_REF_PREFIX = 'cloudinary:'
+
+
+def private_uploads_enabled():
+    """Off unless explicitly switched on, and only where Cloudinary works.
+
+    Default-off because the local path already works: this changes where *new*
+    digital files land, and an operator should be able to upload one file and
+    download it back before the platform depends on it. Existing files keep
+    serving from wherever they already are either way.
+    """
+    return bool_env('CLOUDINARY_PRIVATE_UPLOADS', False) and cloudinary_enabled()
+
+
+def cloudinary_private_allowed_for(subfolder):
+    return private_uploads_enabled() and str(subfolder or '') in CLOUDINARY_PRIVATE_FOLDERS
+
+
+def make_cloudinary_reference(result):
+    """Build a stored reference out of what the upload API actually returned.
+
+    Reads public_id, resource_type and format off the response rather than
+    predicting them. Cloudinary's conventions differ between image and raw assets
+    - a raw public_id may or may not carry the extension - and the signing call
+    later needs the same values the asset was actually created with, so the
+    response is the only trustworthy source for them.
+    """
+    public_id = str((result or {}).get('public_id') or '').strip()
+    if not public_id:
+        return ''
+    resource_type = str(result.get('resource_type') or 'raw').strip()
+    fmt = str(result.get('format') or '').strip()
+    if not fmt and '.' in public_id.rsplit('/', 1)[-1]:
+        fmt = public_id.rsplit('.', 1)[-1]
+    return f'{CLOUDINARY_REF_PREFIX}{resource_type}:{fmt}:{public_id}'
+
+
+def parse_cloudinary_reference(value):
+    """(resource_type, format, public_id) for a stored reference, else None."""
+    text = str(value or '')
+    if not text.startswith(CLOUDINARY_REF_PREFIX):
+        return None
+    body = text[len(CLOUDINARY_REF_PREFIX):]
+    parts = body.split(':', 2)
+    if len(parts) != 3 or not parts[2]:
+        return None
+    return parts[0] or 'raw', parts[1], parts[2]
+
+
+def is_cloudinary_reference(value):
+    return parse_cloudinary_reference(value) is not None
+
+
+def upload_private_to_cloudinary(source, subfolder='digital', filename=None):
+    """Upload as an authenticated asset; return a stored reference or None.
+
+    Returns None on any failure so the caller falls back to local storage. A
+    Cloudinary outage should cost a seller nothing worse than a file that lives on
+    one machine, which is exactly where every file lived before this.
+    """
+    client = cloudinary_client()
+    if client is None:
+        return None
+    try:
+        import cloudinary.uploader
+        stem = os.path.splitext(os.path.basename(filename or ''))[0]
+        result = cloudinary.uploader.upload(
+            source,
+            folder=f'smarkafrica/{subfolder}',
+            public_id=f'{uuid.uuid4().hex[:12]}_{secure_filename(stem)}' if stem else None,
+            resource_type='auto',
+            # The whole point: no working public URL is ever created for this file.
+            type='authenticated',
+            overwrite=False,
+        )
+        return make_cloudinary_reference(result) or None
+    except Exception:
+        app.logger.warning('Private Cloudinary upload failed; storing locally instead',
+                           exc_info=True)
+        return None
+
+
+def signed_private_download_url(reference, download_name=None, ttl_seconds=None):
+    """A short-lived signed URL for a stored reference, or None.
+
+    Only ever called after the caller's own gate has passed. The expiry is short
+    because the link is followed immediately by the redirect that produced it; a
+    link that leaks afterwards is a link that has already stopped working. The
+    signature is derived from the API secret, which never appears in the URL.
+    """
+    parsed = parse_cloudinary_reference(reference)
+    if not parsed or cloudinary_client() is None:
+        return None
+    resource_type, fmt, public_id = parsed
+    ttl = max(30, int(ttl_seconds or int_env('PRIVATE_DOWNLOAD_TTL_SECONDS', 300)))
+    try:
+        import cloudinary.utils
+        import time
+        return cloudinary.utils.private_download_url(
+            public_id, fmt, resource_type=resource_type, type='authenticated',
+            attachment=download_name or True,
+            expires_at=int(time.time()) + ttl)
+    except Exception:
+        app.logger.warning('Could not sign a private download URL', exc_info=True)
+        return None
+
+
 def cloudinary_status():
     """Diagnostics for the admin settings panel."""
     creds = cloudinary_credentials()
@@ -1235,6 +1505,10 @@ def cloudinary_status():
         'has_key': bool(creds['api_key']),
         'has_secret': bool(creds['api_secret']),
         'enabled': cloudinary_enabled(),
+        # Named separately from 'enabled' because they are different questions: one
+        # asks whether product photos are hosted, the other whether paid files are.
+        'private_uploads': private_uploads_enabled(),
+        'private_folders': sorted(CLOUDINARY_PRIVATE_FOLDERS),
     }
 
 
@@ -1275,6 +1549,17 @@ def save_uploaded_file(file, subfolder='products'):
         hosted = upload_to_cloudinary(file, folder=subfolder)
         if hosted:
             return hosted
+        file.stream.seek(0)
+
+    # Paid files take the authenticated path instead, which yields a reference
+    # rather than a URL: there is no URL for this asset that works without a
+    # signature. Falls through to local storage on any failure.
+    if cloudinary_private_allowed_for(subfolder):
+        file.stream.seek(0)
+        reference = upload_private_to_cloudinary(file, subfolder=subfolder,
+                                                 filename=filename)
+        if reference:
+            return reference
         file.stream.seek(0)
 
     file.save(target_path)
@@ -1348,6 +1633,12 @@ def allowed_digital_file_signature(file):
         'pdf': [b'%PDF-'],
         'zip': [b'PK\x03\x04', b'PK\x05\x06', b'PK\x07\x08'],
         'epub': [b'PK\x03\x04'],
+        # Office XML files are zip containers, so the signature is the zip one. The
+        # macro-carrying variants are excluded by extension, not by header - they
+        # look identical from the first 32 bytes.
+        'docx': [b'PK\x03\x04'],
+        'pptx': [b'PK\x03\x04'],
+        'xlsx': [b'PK\x03\x04'],
         'mobi': [b'BOOKMOBI'],
         'jpg': [b'\xff\xd8\xff'],
         'jpeg': [b'\xff\xd8\xff'],
@@ -1398,6 +1689,13 @@ def image_profile(path):
 def product_file_extension(product):
     if not product or not product.file_path:
         return ''
+    # A Cloudinary reference carries its format in a field of its own, because a
+    # raw public_id need not end in an extension. Everything downstream - the
+    # preview's media kind, the download's filename - reads the extension through
+    # here, so this is the one place that has to know about both shapes.
+    parsed = parse_cloudinary_reference(product.file_path)
+    if parsed:
+        return (parsed[1] or '').lower()
     return os.path.basename(product.file_path).rsplit('.', 1)[-1].lower() if '.' in product.file_path else ''
 
 
@@ -1419,9 +1717,33 @@ def is_music_category(category):
     return any(token in value for token in ['music', 'audio', 'beat', 'mix'])
 
 
+VOICEOVER_TOKENS = ('voice over', 'voiceover', 'voice-over', 'narration', 'voice artist')
+
+
 def is_voiceover_listing(product):
     value = f'{product.name} {product.short_description or ""} {product.description or ""}'.lower()
-    return any(token in value for token in ['voice over', 'voiceover', 'voice-over', 'narration', 'voice artist'])
+    return any(token in value for token in VOICEOVER_TOKENS)
+
+
+def voiceover_listings(category_id, limit=12):
+    """Voice-over listings in one category, matched in the database not in Python.
+
+    The category page used to load every product it had and sieve them through
+    is_voiceover_listing, so finding a handful of voice-over sellers cost as much
+    as the whole category. Same tokens over the same three fields - the match just
+    happens where the rows already are, and stops at ``limit``.
+    """
+    clauses = []
+    for token in VOICEOVER_TOKENS:
+        pattern = f'%{token}%'
+        clauses.extend([Product.name.ilike(pattern),
+                        Product.short_description.ilike(pattern),
+                        Product.description.ilike(pattern)])
+    return (Product.query
+            .filter(Product.category_id == category_id, Product.is_active.is_(True))
+            .filter(or_(*clauses))
+            .order_by(Product.admin_priority.desc(), Product.created_at.desc())
+            .limit(limit).all())
 
 
 REAL_ONLINE_FALLBACK_IMAGES = {
@@ -2735,6 +3057,29 @@ def check_payment_status(checkout_request_id):
 
 
 def send_email(to_email, subject, body_html):
+    """Queue an email. Returns True when it was accepted for delivery.
+
+    The signature is unchanged and every existing call site keeps working; what
+    changed is that the provider call no longer happens while a customer waits.
+    An SMTP handshake is one to twenty seconds of a worker thread, a Resend call
+    is up to thirty, and pages that send several emails paid for each one in
+    series. Under real traffic that is how a worker pool fills up and the site
+    stops answering.
+
+    Queuing also buys retries: a provider blip used to lose the email with a log
+    line, and now backs off and tries again.
+    """
+    if not to_email:
+        return False
+    if not OUTBOUND_QUEUE_ENABLED:
+        return deliver_email_now(to_email, subject, body_html)
+    if queue_outbound('email', to_email, subject=subject, body=body_html):
+        return True
+    # Queuing failed outright, so the choice is send inline or lose the message.
+    return deliver_email_now(to_email, subject, body_html)
+
+
+def deliver_email_now(to_email, subject, body_html):
     """Send email via Resend HTTP API (preferred) or SMTP fallback."""
     # Get API key - prefer env var for security
     resend_key = os.environ.get('RESEND_API_KEY', '') or Setting.get('resend_api_key', '')
@@ -2806,6 +3151,51 @@ def send_email(to_email, subject, body_html):
     except Exception as e:
         logger.error(f'Email sending failed: {e}')
         return False
+
+
+# ---------------------------------------------------------------------------
+# Outbound queue senders
+#
+# The queue holds channel names; these are the implementations behind them.
+# Registered here rather than imported by runtime.py, because they read the
+# credentials out of the settings table and runtime.py must stay free of Flask.
+# ---------------------------------------------------------------------------
+
+def email_provider_configured():
+    if os.environ.get('RESEND_API_KEY') or Setting.get('resend_api_key', ''):
+        return True
+    return bool(Setting.get('smtp_server', Setting.get('mail_server', app.config.get('MAIL_SERVER') or '')))
+
+
+def sms_provider_configured():
+    username = Setting.get('africastalking_username', app.config.get('AFRICASTALKING_USERNAME', ''))
+    api_key = Setting.get('africastalking_api_key', app.config.get('AFRICASTALKING_API_KEY', ''))
+    return bool(username and api_key)
+
+
+def _outbound_email_sender(message):
+    # Unconfigured is terminal, not a failure to retry: five attempts with
+    # backoff against a provider that was never set up is pure noise, and the row
+    # would sit in the queue looking like a transient outage.
+    if not email_provider_configured():
+        message.status = 'dead'
+        message.last_error = 'No email provider configured'
+        logger.info('Email to %s dropped: no provider configured', message.recipient)
+        return True
+    return deliver_email_now(message.recipient, message.subject or '', message.body or '')
+
+
+def _outbound_sms_sender(message):
+    if not sms_provider_configured():
+        message.status = 'dead'
+        message.last_error = 'No SMS provider configured'
+        logger.info('SMS to %s dropped: no provider configured', message.recipient)
+        return True
+    return deliver_sms_now(message.recipient, message.body or '')
+
+
+register_sender('email', _outbound_email_sender)
+register_sender('sms', _outbound_sms_sender)
 
 
 def send_order_confirmation(order):
@@ -4114,11 +4504,19 @@ def auto_disbursement_due():
     return not last_run or last_run <= utcnow() - wait
 
 
+# News generation used to be guarded by a settings row holding '0' or '1'. A run
+# that died mid-flight left it on '1' and the button stayed dead until someone
+# hit ?refresh=1, which is why that escape hatch exists. A lease expires on its
+# own, so the same crash costs one lease term instead of forever, and it is
+# visible in job_locks rather than buried in the settings table.
+MARKET_NEWS_LOCK = 'market_news_generation'
+MARKET_NEWS_LEASE = JobLease(ttl_seconds=int_env('MARKET_NEWS_LOCK_TTL_SECONDS', 600))
+
+
 def generate_market_news_if_due(force=False):
-    if force and Setting.get('market_news_generation_lock', '0') == '1':
+    if force and not acquire_lease(MARKET_NEWS_LOCK, MARKET_NEWS_LEASE):
         raise OperationalError('market_news', {}, 'Generation is already running')
     if force:
-        Setting.set('market_news_generation_lock', '1')
         MarketNews.query.filter(
             MarketNews.is_cleared == False,
             MarketNews.generated_by.in_(['marketplace_intelligence', 'product_price_signal'])
@@ -4250,7 +4648,7 @@ def generate_market_news_if_due(force=False):
         raise
     finally:
         if force:
-            Setting.set('market_news_generation_lock', '0')
+            release_lease(MARKET_NEWS_LOCK)
     return len(pending_news)
 
 
@@ -4402,11 +4800,16 @@ def pos_terminal_key(user_id=None):
     return f'pos_terminal_cart_{uid}'
 
 
+# A till cart has to outlive a long shift but not the week. Held in the ephemeral
+# store rather than the settings table: it is rewritten on every scan, and the
+# settings table is read-cached, which would hand the till a cart from thirty
+# seconds ago.
+POS_CART_TTL_SECONDS = int_env('POS_CART_TTL_SECONDS', 12 * 3600)
+
+
 def pos_terminal_cart(user_id=None):
-    raw = Setting.get(pos_terminal_key(user_id), '[]')
-    try:
-        data = json.loads(raw or '[]')
-    except Exception:
+    data = ephemeral_get_json(pos_terminal_key(user_id), [])
+    if not isinstance(data, list):
         data = []
     return [line for line in data if line.get('product_id') and line.get('quantity')]
 
@@ -4418,7 +4821,8 @@ def save_pos_terminal_cart(lines, user_id=None):
         quantity = max(1, int(line.get('quantity') or 1))
         if product_id:
             clean_lines.append({'product_id': product_id, 'quantity': quantity})
-    Setting.set(pos_terminal_key(user_id), json.dumps(clean_lines))
+    ephemeral_set(pos_terminal_key(user_id), clean_lines,
+                  ttl_seconds=POS_CART_TTL_SECONDS)
 
 
 def pos_product_out_of_stock(product):
@@ -4507,6 +4911,10 @@ def scanner_pairing_key(token):
     return f'pos_scanner_pair_{token}'
 
 
+# One pairing covers a working day at the till.
+SCANNER_PAIRING_TTL_SECONDS = int_env('SCANNER_PAIRING_TTL_SECONDS', 8 * 3600)
+
+
 def local_network_base_url():
     configured = Setting.get('pos_public_base_url', '').strip()
     if configured:
@@ -4531,10 +4939,14 @@ def create_pos_scanner_pairing(user_id=None):
     payload = {
         'user_id': user_id,
         'created_at': utcnow().isoformat(),
-        'expires_at': (utcnow() + timedelta(hours=8)).isoformat(),
+        'expires_at': (utcnow() + timedelta(seconds=SCANNER_PAIRING_TTL_SECONDS)).isoformat(),
         'terminal': f'POS-{user_id}',
     }
-    Setting.set(scanner_pairing_key(token), json.dumps(payload))
+    # Ephemeral rather than a settings row: a pairing is a live session, and the
+    # store's own expiry means an abandoned pairing is swept instead of sitting in
+    # the settings table forever.
+    ephemeral_set(scanner_pairing_key(token), payload,
+                  ttl_seconds=SCANNER_PAIRING_TTL_SECONDS)
     scanner_url = local_network_base_url().rstrip('/') + url_for('pos_pair_scanner', token=token)
     return {'token': token, 'scanner_url': scanner_url, **payload}
 
@@ -4543,16 +4955,18 @@ def scanner_pairing_payload(token):
     clean_token = re.sub(r'[^A-Fa-f0-9]', '', (token or '').strip())[:32].upper()
     if not clean_token:
         return None
-    raw = Setting.get(scanner_pairing_key(clean_token), '')
-    if not raw:
+    payload = ephemeral_get_json(scanner_pairing_key(clean_token))
+    if not payload:
         return None
+    # The store expires the row on its own; this second check keeps the payload's
+    # own deadline authoritative, so shortening the window takes effect for
+    # pairings already handed out.
     try:
-        payload = json.loads(raw)
         expires_at = datetime.fromisoformat(payload.get('expires_at'))
     except Exception:
         return None
     if expires_at < utcnow():
-        Setting.set(scanner_pairing_key(clean_token), '')
+        ephemeral_delete(scanner_pairing_key(clean_token))
         return None
     payload['token'] = clean_token
     return payload
@@ -4874,6 +5288,107 @@ def invalidate_product_cache():
         cache.delete('hot_sale_pop_product_id')
 
 
+# How many reviews one page of a listing shows. Reviews only ever accumulate, and
+# nobody reads the four hundredth one, so the page shows a page of them.
+REVIEWS_PER_PAGE = int_env('REVIEWS_PER_PAGE', 10)
+
+# Order history and a seller's catalogue both grow for as long as an account is
+# used, so neither can be rendered whole. Bulk digital upload makes the second one
+# urgent: one afternoon of uploading is a few thousand listings.
+ORDERS_PER_PAGE = int_env('ORDERS_PER_PAGE', 20)
+SELLER_PRODUCTS_PER_PAGE = int_env('SELLER_PRODUCTS_PER_PAGE', 25)
+
+# Every product page view used to be a write and a commit on the product row, so
+# the more popular a listing got the more its viewers serialised behind each other
+# on the same lock. Now the deltas are held per worker and written together.
+_product_view_buffer = CounterBuffer(
+    flush_after=int_env('VIEW_COUNT_FLUSH_AFTER', 50),
+    flush_seconds=float_env('VIEW_COUNT_FLUSH_SECONDS', 30),
+    name='product-views')
+
+
+def flush_product_views(pending=None):
+    """Write buffered view counts. Returns the number of products updated.
+
+    One UPDATE per product, and the increment happens in the database rather than
+    in Python, so two workers flushing the same product at the same time add up
+    instead of overwriting each other. coalesce because rows predating the column
+    have NULL there, and NULL + 1 is NULL.
+    """
+    pending = _product_view_buffer.drain() if pending is None else pending
+    if not pending:
+        return 0
+    try:
+        for product_id, delta in pending.items():
+            db.session.query(Product).filter(Product.id == product_id).update(
+                {Product.views_count: func.coalesce(Product.views_count, 0) + delta},
+                synchronize_session=False)
+        db.session.commit()
+        return len(pending)
+    except SQLAlchemyError:
+        # A view count is not worth failing a page render over, and not worth
+        # replaying either - dropping this batch is the whole point of the trade.
+        db.session.rollback()
+        logger.warning('Could not flush %d buffered product view counts', len(pending))
+        return 0
+
+
+def record_product_view(product):
+    """Count one view of ``product`` without writing on every request."""
+    due = _product_view_buffer.add(product.id)
+    if due:
+        flush_product_views(due)
+
+
+# The category nav appears on the home page, the shop and every filter bar, so
+# this is the single most-executed query on the platform - every visitor runs it
+# and every visitor gets the same answer. Cached in-process, which makes the
+# repeat a dict lookup instead of a round trip.
+NAV_CATEGORY_TTL = float_env('NAV_CATEGORY_CACHE_SECONDS', 120)
+_nav_category_cache = TTLCache(ttl_seconds=NAV_CATEGORY_TTL, max_entries=4,
+                               name='nav-categories')
+
+
+class NavCategory:
+    """The three fields templates actually read off a nav category.
+
+    Deliberately not a Category. ORM instances belong to the session that loaded
+    them, so caching them across requests hands the next request detached objects
+    that raise the moment a template touches an unloaded attribute. Plain values
+    have no session to be detached from.
+    """
+
+    __slots__ = ('id', 'name', 'slug')
+
+    def __init__(self, id, name, slug):
+        self.id = id
+        self.name = name
+        self.slug = slug
+
+
+def nav_categories(active_only=True):
+    """The category list for nav bars and filter dropdowns, cached.
+
+    Staleness here is a category appearing in the menu up to NAV_CATEGORY_TTL
+    seconds late, which is worth trading for not asking the database the same
+    question on every page view. Admin edits invalidate it immediately anyway.
+    """
+    key = 'active' if active_only else 'all'
+    found = _nav_category_cache.lookup(key)
+    if found is not CACHE_MISS:
+        return found
+    query = db.session.query(Category.id, Category.name, Category.slug)
+    if active_only:
+        query = query.filter(Category.is_active.is_(True))
+    rows = [NavCategory(row[0], row[1], row[2])
+            for row in query.order_by(Category.name.asc()).all()]
+    return _nav_category_cache.set(key, rows)
+
+
+def invalidate_nav_categories():
+    _nav_category_cache.clear()
+
+
 def cached_product_search_ids(search='', category_slug='', product_type='', sort='newest'):
     key = product_search_cache_key(search, category_slug, product_type, sort)
     if cache:
@@ -4969,8 +5484,9 @@ def seller_critical_mismatch_key(user_id):
 
 
 def increment_seller_critical_mismatch(user, reason='Manual KYC mismatch'):
-    count = int(Setting.get(seller_critical_mismatch_key(user.id), '0') or 0) + 1
-    Setting.set(seller_critical_mismatch_key(user.id), str(count))
+    # Atomic: this counter blacklists a seller at three, so a lost increment is a
+    # fraud signal thrown away.
+    count = Setting.bump_counter(seller_critical_mismatch_key(user.id), commit=False)
     if count >= 3:
         db.session.add(SellerBlacklist(
             legal_name=f'{user.first_name or ""} {user.last_name or ""}'.strip() or user.username,
@@ -5387,45 +5903,148 @@ def seed_quality_and_automation_defaults():
     db.session.commit()
 
 
+PRICE_ALERT_BATCH = int_env('PRICE_ALERT_BATCH', 500)
+PRICE_ALERT_SEARCH_BUDGET = int_env('PRICE_ALERT_SEARCH_BUDGET', 200)
+CATEGORY_DIGEST_BATCH = int_env('CATEGORY_DIGEST_BATCH', 500)
+
+
 def notify_price_alerts():
-    sent = 0
-    alerts = PriceAlert.query.filter_by(status='active').all()
-    for alert in alerts:
-        candidates = [alert.product] if alert.product else [item['product'] for item in smart_product_recommendations(alert.search_query or '', 10)]
-        for product in candidates:
-            if not product:
+    """Queue a price-drop email for every alert whose target has been met.
+
+    Paginated by id, with the product and user joined in up front. The previous
+    shape loaded every active alert at once, lazy-loaded two relationships per
+    alert, and then - for any alert with only a search term - ran the
+    recommendation engine once per alert, even when a thousand people were
+    watching the same phrase. That is not a slow job at a million users, it is a
+    job that never returns.
+
+    Search-term alerts now share a per-run cache keyed by the phrase, and the
+    number of distinct phrases scored in one run is capped, so the worst case is
+    bounded however large the alert table gets.
+    """
+    queued = 0
+    search_cache = {}
+    last_id = 0
+
+    while True:
+        alerts = (PriceAlert.query
+                  .options(joinedload(PriceAlert.product), joinedload(PriceAlert.user))
+                  .filter(PriceAlert.status == 'active', PriceAlert.id > last_id)
+                  .order_by(PriceAlert.id.asc())
+                  .limit(PRICE_ALERT_BATCH)
+                  .all())
+        if not alerts:
+            break
+        last_id = alerts[-1].id
+
+        matched = []
+        for alert in alerts:
+            recipient = getattr(alert.user, 'email', None)
+            if not recipient:
                 continue
-            price = product.discounted_price or product.selling_price or 0
-            if price <= alert.target_price:
-                body = f"<p>{product.name} is now KSh {price:,.2f}, which is within your alert target of KSh {alert.target_price:,.2f}.</p>"
-                if send_email(alert.user.email, 'SMARKAFRICA price alert', body):
-                    alert.last_notified_at = utcnow()
-                    alert.status = 'notified'
-                    sent += 1
-                break
-    db.session.commit()
-    return sent
+            if alert.product:
+                candidates = [alert.product]
+            else:
+                phrase = (alert.search_query or '').strip().lower()
+                if not phrase:
+                    continue
+                if phrase not in search_cache:
+                    if len(search_cache) >= PRICE_ALERT_SEARCH_BUDGET:
+                        continue
+                    search_cache[phrase] = [
+                        item['product']
+                        for item in smart_product_recommendations(alert.search_query or '', 10)
+                    ]
+                candidates = search_cache[phrase]
+            for product in candidates:
+                if not product:
+                    continue
+                price = product.discounted_price or product.selling_price or 0
+                if price <= alert.target_price:
+                    matched.append((alert, recipient, product.name, price))
+                    break
+
+        for alert, recipient, name, price in matched:
+            body = (f"<p>{name} is now KSh {price:,.2f}, which is within your alert "
+                    f"target of KSh {alert.target_price:,.2f}.</p>")
+            # Queued in the same transaction as the status change, so the alert is
+            # never marked notified without the email being recorded, and never
+            # emails twice because the first attempt half-committed.
+            enqueue_email(recipient, 'SMARKAFRICA price alert', body, commit=False)
+            alert.last_notified_at = utcnow()
+            alert.status = 'notified'
+            queued += 1
+        db.session.commit()
+
+    return queued
 
 
 def send_category_follow_updates():
-    sent = 0
-    follows = CategoryFollow.query.filter_by(email_updates=True).all()
-    for follow in follows:
-        if not follow.user or not follow.user.email or not follow.category:
+    """Queue one digest email per category follower. Returns how many were queued.
+
+    One pass per category, not one per follower. The old shape cost four queries
+    for every follower - the follow row, the user, the category, then the product
+    list - so a hundred thousand followers meant four hundred thousand queries.
+    A category's digest reads the same for everyone following it, so the body is
+    built once and the audience is walked in id-ordered batches, which keeps
+    memory flat and makes committing between batches safe.
+    """
+    category_ids = [
+        row[0]
+        for row in db.session.query(CategoryFollow.category_id)
+        .filter(CategoryFollow.email_updates.is_(True))
+        .distinct()
+        .all()
+    ]
+    if not category_ids:
+        return 0
+
+    queued = 0
+    for category_id in category_ids:
+        category = db.session.get(Category, category_id)
+        if not category:
             continue
-        products = Product.query.filter_by(category_id=follow.category_id, is_active=True).order_by(Product.created_at.desc()).limit(5).all()
-        news = MarketNews.query.filter_by(category_id=follow.category_id, is_cleared=False).order_by(MarketNews.created_at.desc()).first()
-        lines = ''.join(f"<li>{p.name} - KSh {(p.discounted_price or p.selling_price):,.2f}</li>" for p in products)
+        products = (Product.query
+                    .filter_by(category_id=category_id, is_active=True)
+                    .order_by(Product.created_at.desc())
+                    .limit(5)
+                    .all())
+        news = (MarketNews.query
+                .filter_by(category_id=category_id, is_cleared=False)
+                .order_by(MarketNews.created_at.desc())
+                .first())
+        lines = ''.join(
+            f"<li>{p.name} - KSh {(p.discounted_price or p.selling_price or 0):,.2f}</li>"
+            for p in products
+        )
         news_line = f"<p><strong>Price intelligence:</strong> {news.body}</p>" if news else ''
+        subject = f'SMARKAFRICA {category.name} update'
         body = f"""
-        <h3>{follow.category.name} update</h3>
+        <h3>{category.name} update</h3>
         {news_line}
         <p>New or relevant products:</p>
         <ul>{lines or '<li>No new products yet.</li>'}</ul>
         """
-        if send_email(follow.user.email, f'SMARKAFRICA {follow.category.name} update', body):
-            sent += 1
-    return sent
+
+        last_follow_id = 0
+        while True:
+            rows = (db.session.query(CategoryFollow.id, User.email)
+                    .join(User, User.id == CategoryFollow.user_id)
+                    .filter(CategoryFollow.category_id == category_id,
+                            CategoryFollow.email_updates.is_(True),
+                            CategoryFollow.id > last_follow_id,
+                            User.email.isnot(None),
+                            User.email != '')
+                    .order_by(CategoryFollow.id.asc())
+                    .limit(CATEGORY_DIGEST_BATCH)
+                    .all())
+            if not rows:
+                break
+            last_follow_id = rows[-1][0]
+            queued += enqueue_many('email', [email for _, email in rows],
+                                   subject=subject, body=body)
+
+    return queued
 
 
 def commission_for_product(product):
@@ -6072,7 +6691,7 @@ def inject_globals():
 # ---------- Error Handlers ----------
 @app.errorhandler(404)
 def not_found(e):
-    categories = Category.query.filter_by(is_active=True).all()
+    categories = nav_categories()
     return render_template('shop.html', error='Page not found', products=[], categories=categories,
                            pagination=None, current_category=None, current_type=''), 404
 
@@ -6080,7 +6699,7 @@ def not_found(e):
 @app.errorhandler(500)
 def server_error(e):
     app.logger.exception('Unhandled server error: %s', e)
-    categories = Category.query.filter_by(is_active=True).all()
+    categories = nav_categories()
     return render_template('shop.html', error='Server error', products=[], categories=categories,
                            pagination=None, current_category=None, current_type=''), 500
 
@@ -6135,7 +6754,7 @@ def test_email():
 @app.route('/')
 def home():
     featured = homepage_featured_products(12)
-    categories = Category.query.filter_by(is_active=True).all()
+    categories = nav_categories()
     return render_template('index.html', featured_products=featured, categories=categories,
                            launch_soon_message=LAUNCH_SOON_MESSAGE)
 
@@ -6143,14 +6762,18 @@ def home():
 @app.route('/categories/<string:slug>')
 def category_products(slug):
     category = Category.query.filter_by(slug=slug).first_or_404()
-    products = Product.query.filter_by(category_id=category.id, is_active=True).order_by(Product.admin_priority.desc(), Product.created_at.desc()).all()
-    categories = Category.query.all()
-    voiceover_experts = []
-    if is_music_category(category):
-        voiceover_experts = [product for product in products if is_voiceover_listing(product)]
-    return render_template('category_products.html', category=category, products=products, categories=categories,
-                           is_music_category=is_music_category(category),
-                           voiceover_experts=voiceover_experts)
+    # Same cached, capped path the shop uses. Loading every active product in a
+    # category worked while a category held dozens; a category holding 40,000
+    # listings would build 40,000 objects to render twelve of them, on a page
+    # anonymous visitors hit constantly.
+    page = request.args.get('page', 1, type=int)
+    product_ids = cached_product_search_ids(category_slug=slug)
+    pagination = paginate_cached_product_ids(product_ids, page=page, per_page=12)
+    music = is_music_category(category)
+    return render_template('category_products.html', category=category,
+                           products=pagination.items, pagination=pagination,
+                           is_music_category=music,
+                           voiceover_experts=voiceover_listings(category.id) if music else [])
 @app.route('/shop')
 def shop():
     page = request.args.get('page', 1, type=int)
@@ -6162,7 +6785,7 @@ def shop():
     _, current_category = build_product_search_query(search, category_slug, product_type, sort)
     product_ids = cached_product_search_ids(search, category_slug, product_type, sort)
     pagination = paginate_cached_product_ids(product_ids, page=page, per_page=12)
-    categories = Category.query.filter_by(is_active=True).all()
+    categories = nav_categories()
 
     return render_template(
         'shop.html',
@@ -6203,7 +6826,7 @@ def smart_shopping():
 def compare_products():
     category_id = request.args.get('category_id', type=int)
     selected_ids = [int(pid) for pid in request.args.getlist('products') if str(pid).isdigit()]
-    categories = Category.query.filter_by(is_active=True).order_by(Category.name.asc()).all()
+    categories = nav_categories()
     product_query = Product.query.filter(Product.is_active == True)
     if category_id:
         product_query = product_query.filter_by(category_id=category_id)
@@ -6270,29 +6893,35 @@ def storefront_follower_count(storefront):
         return 0
 
 
-def notify_storefront_followers(storefront, title, body, product_id=None):
-    """Send one notification per follower. Returns how many were reached.
+def notify_storefront_followers(storefront, title, body, product_id=None, commit=True):
+    """Notify every follower of a shop. Returns how many were reached.
 
-    The shop owner is skipped: a seller following their own shop should not be
-    pinged by their own announcement.
+    Two things make this survive a popular shop. The follower ids come back as a
+    single scalar column read instead of hydrated StorefrontFollow rows, and the
+    notifications go in as one bulk statement instead of one INSERT per
+    follower - a shop with fifty thousand followers is one announcement, not
+    fifty thousand round trips that outlive the worker timeout. Past the inline
+    limit the fan-out is handed to the queue and the request returns at once.
+
+    The owner is filtered out in SQL: a seller following their own shop should
+    not be pinged by their own announcement.
     """
     if not storefront:
         return 0
-    follows = StorefrontFollow.query.filter_by(storefront_id=storefront.id).all()
-    sent = 0
-    for follow in follows:
-        if follow.user_id == storefront.owner_id:
-            continue
-        db.session.add(CustomerNotification(
-            user_id=follow.user_id,
-            product_id=product_id,
-            title=title[:180],
-            body=body,
-            notification_type='storefront',
-            is_read=False,
-        ))
-        sent += 1
-    return sent
+    query = db.session.query(StorefrontFollow.user_id).filter(
+        StorefrontFollow.storefront_id == storefront.id
+    )
+    if storefront.owner_id:
+        query = query.filter(StorefrontFollow.user_id != storefront.owner_id)
+    follower_ids = [row[0] for row in query.all()]
+    return fanout_notifications(
+        follower_ids,
+        title,
+        body,
+        notification_type='storefront',
+        product_id=product_id,
+        commit=commit,
+    )
 
 
 @app.route('/product/<int:product_id>/price-alert', methods=['POST'])
@@ -6330,7 +6959,7 @@ def shop_image_search():
     matches, visual_analysis_available = find_similar_products(uploaded_path, inspo.filename)
     products = [product for _, _, product in matches]
     match_scores = {product.id: {'score': score, 'reason': reason} for score, reason, product in matches}
-    categories = Category.query.filter_by(is_active=True).all()
+    categories = nav_categories()
     summary = (
         'Matched by visual color, image shape, and product catalog keywords.'
         if visual_analysis_available
@@ -6407,10 +7036,20 @@ def delivery_quote_api(product_id):
 @app.route('/product/<slug>')
 def product_page(slug):
     product = Product.query.filter_by(slug=slug, is_active=True).first_or_404()
-    product.views_count = (product.views_count or 0) + 1
-    db.session.commit()
+    record_product_view(product)
 
-    reviews = Review.query.filter_by(product_id=product.id, is_visible=True).order_by(Review.created_at.desc()).all()
+    # Paginated and eager-loaded. Reviews only ever accumulate, and the template
+    # prints review.author.username, so the old unbounded load cost one query per
+    # review on top of the load itself - a listing with 500 reviews ran 501
+    # queries to render a page anyone can request.
+    reviews_page = request.args.get('reviews_page', 1, type=int)
+    review_pagination = (Review.query
+                         .options(joinedload(Review.author))
+                         .filter_by(product_id=product.id, is_visible=True)
+                         .order_by(Review.created_at.desc())
+                         .paginate(page=max(1, reviews_page), per_page=REVIEWS_PER_PAGE,
+                                   error_out=False))
+    reviews = review_pagination.items
     has_reviewed = False
     is_following_category = False
     is_following_storefront = False
@@ -6454,6 +7093,7 @@ def product_page(slug):
     return render_template('product.html',
                            product=product,
                            reviews=reviews,
+                           review_pagination=review_pagination,
                            related=related,
                            has_reviewed=has_reviewed,
                            is_following_category=is_following_category,
@@ -6465,6 +7105,10 @@ def product_page(slug):
                            delivery_location=delivery_location,
                            gallery_images=gallery_images,
                            media_kind=product_media_kind(product),
+                           # A cloud-stored file has no preview to offer, so the
+                           # page must not render a control that would 404.
+                           preview_available=bool(product.is_digital and product.file_path
+                                                  and not is_cloudinary_reference(product.file_path)),
                            is_music_product=is_music_category(product.category),
                            bnpl_policy=bnpl_policy)
 
@@ -6474,6 +7118,14 @@ def preview_digital(pid):
     """Serve a limited preview of digital products."""
     product = Product.query.get_or_404(pid)
     if not product.is_digital or not product.file_path:
+        abort(404)
+
+    # No preview for a cloud-stored file. The preview works by reading the first
+    # slice of the bytes, and the only ways to get those bytes here would be to
+    # fetch the whole asset into the request path or to hand the buyer a signed URL
+    # - and a signed URL to a paid file is the entire file, not a preview of it.
+    # A missing preview costs a listing some appeal; the alternative gives it away.
+    if is_cloudinary_reference(product.file_path):
         abort(404)
 
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], 'digital',
@@ -6842,7 +7494,11 @@ def notifications():
 @app.route('/cart')
 @login_required
 def cart():
-    items = Cart.query.filter_by(user_id=current_user.id).all()
+    # joinedload because the loop below reads item.product on every line, and the
+    # template reads more of it again - one query for the cart instead of one per
+    # line. Carts are small, but this is the page shoppers refresh most.
+    items = (Cart.query.options(joinedload(Cart.product))
+             .filter_by(user_id=current_user.id).all())
     total = 0
     for item in items:
         if item.product:
@@ -6979,12 +7635,65 @@ def order_is_paid(order):
 
 
 def forget_order_checkout_ids(order):
-    """Drop the M-Pesa checkout-id bookmarks for an order we no longer wait on."""
-    stale = [f'mpesa_order_checkout_{order.id}']
-    checkout_request_id = Setting.get(f'mpesa_order_checkout_{order.id}', '')
-    if checkout_request_id:
-        stale.append(f'mpesa_checkout_order_{checkout_request_id}')
-    Setting.query.filter(Setting.key.in_(stale)).delete(synchronize_session=False)
+    """Clear the M-Pesa checkout id for an order we no longer wait on.
+
+    Also clears any legacy settings-row bookmarks left by versions that stored
+    the mapping there, so an upgraded deployment stops carrying them.
+    """
+    if not order:
+        return
+    legacy_keys = [f'mpesa_order_checkout_{order.id}']
+    legacy_checkout_id = Setting.get(f'mpesa_order_checkout_{order.id}', '')
+    if legacy_checkout_id:
+        legacy_keys.append(f'mpesa_checkout_order_{legacy_checkout_id}')
+    Setting.query.filter(Setting.key.in_(legacy_keys)).delete(synchronize_session=False)
+    for key in legacy_keys:
+        Setting.invalidate_cache(key)
+    order.mpesa_checkout_request_id = None
+
+
+def remember_order_checkout_id(order, checkout_request_id):
+    """Record the in-flight Daraja checkout id against the order.
+
+    A column rather than a separate row because the callback has to be able to
+    find this order, and Safaricom's callback can arrive before a write in its own
+    transaction would have landed. Writing it on the order means it commits with
+    the order state it belongs to, and the callback lookup is one indexed query.
+    """
+    if not order or not checkout_request_id:
+        return
+    order.mpesa_checkout_request_id = str(checkout_request_id)[:120]
+
+
+def order_checkout_id(order):
+    """The checkout id for an order, falling back to the legacy settings row.
+
+    The fallback covers orders that were already in flight when the column was
+    introduced; it costs one cached read and can be removed once no pending order
+    predates the upgrade.
+    """
+    if not order:
+        return ''
+    if order.mpesa_checkout_request_id:
+        return order.mpesa_checkout_request_id
+    return Setting.get(f'mpesa_order_checkout_{order.id}', '')
+
+
+def order_for_checkout_id(checkout_request_id):
+    """Resolve a Daraja checkout id back to its order."""
+    if not checkout_request_id:
+        return None
+    order = Order.query.filter_by(
+        mpesa_checkout_request_id=str(checkout_request_id)).first()
+    if order:
+        return order
+    legacy_order_id = Setting.get(f'mpesa_checkout_order_{checkout_request_id}', '')
+    if legacy_order_id:
+        try:
+            return Order.query.get(int(legacy_order_id))
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def abandon_unpaid_order(order, reason=''):
@@ -7215,7 +7924,10 @@ def finalize_paid_order(order):
 @app.route('/checkout', methods=['GET', 'POST'])
 @login_required
 def checkout():
-    cart_items = Cart.query.filter_by(user_id=current_user.id).all()
+    # Every line's product is read repeatedly from here on - stock, weight, seller,
+    # delivery - so it is loaded once with the cart rather than per access.
+    cart_items = (Cart.query.options(joinedload(Cart.product))
+                  .filter_by(user_id=current_user.id).all())
     if not cart_items:
         flash('Your cart is empty.', 'warning')
         return redirect(url_for('cart'))
@@ -7347,8 +8059,8 @@ def checkout():
         if result.get('success'):
             checkout_request_id = result.get('checkout_request_id')
             if checkout_request_id:
-                Setting.set(f'mpesa_checkout_order_{checkout_request_id}', order.id)
-                Setting.set(f'mpesa_order_checkout_{order.id}', checkout_request_id)
+                remember_order_checkout_id(order, checkout_request_id)
+                db.session.commit()
             session['polling_order_id'] = order.id
             return render_template('checkout.html', polling=True, order=order)
         else:
@@ -7414,7 +8126,7 @@ def check_payment(order_id):
     elif order.payment_status == 'failed':
         return jsonify({'payment_status': 'failed', 'cart_url': url_for('cart')})
 
-    checkout_request_id = Setting.get(f'mpesa_order_checkout_{order.id}', '')
+    checkout_request_id = order_checkout_id(order)
     if checkout_request_id:
         status_data = check_payment_status(checkout_request_id)
         if status_data:
@@ -7502,9 +8214,7 @@ def mpesa_callback():
         order = None
 
         if checkout_id:
-            order_id = Setting.get(f'mpesa_checkout_order_{checkout_id}', '')
-            if order_id:
-                order = Order.query.get(int(order_id))
+            order = order_for_checkout_id(checkout_id)
 
         if result_code == 0:
             metadata = stk_callback.get('CallbackMetadata', {}).get('Item', [])
@@ -7522,14 +8232,47 @@ def mpesa_callback():
                     phone = str(item.get('Value', ''))
 
             if not order and receipt:
+                # Fallback for a callback whose CheckoutRequestID we cannot match
+                # (an order created by an older build, or a replayed callback).
+                #
+                # Guessing is worse than not guessing: crediting the wrong order
+                # both hands one customer someone else's goods and leaves the real
+                # payer unpaid. So match on phone and amount within a short window
+                # and only accept an unambiguous single hit - anything else is left
+                # for reconciliation, where a human can see the receipt.
                 phone = normalize_mpesa_phone(phone)
-                candidates = Order.query.filter_by(payment_status='pending').order_by(Order.created_at.desc()).limit(20).all()
-                for candidate in candidates:
-                    same_amount = abs((candidate.amount_paid or 0) - float(amount or 0)) < 1
-                    same_phone = not phone or normalize_mpesa_phone(candidate.mpesa_phone) == phone
-                    if same_amount and same_phone:
-                        order = candidate
-                        break
+                window_start = datetime.utcnow() - timedelta(hours=6)
+                candidate_query = Order.query.filter(
+                    Order.payment_status == 'pending',
+                    Order.created_at >= window_start,
+                )
+                if phone:
+                    candidate_query = candidate_query.filter(Order.mpesa_phone.isnot(None))
+                candidates = [
+                    candidate
+                    for candidate in candidate_query.order_by(Order.created_at.desc()).limit(50).all()
+                    if abs((candidate.amount_paid or 0) - float(amount or 0)) < 1
+                    and (not phone or normalize_mpesa_phone(candidate.mpesa_phone) == phone)
+                ]
+                if len(candidates) == 1:
+                    order = candidates[0]
+                    app.logger.info(
+                        'M-Pesa receipt %s matched order %s by phone and amount (no checkout id)',
+                        receipt, order.order_number,
+                    )
+                elif len(candidates) > 1:
+                    app.logger.error(
+                        'M-Pesa receipt %s matches %s pending orders (%s) for phone %s amount %s; '
+                        'left unmatched for reconciliation rather than credited to a guess.',
+                        receipt, len(candidates),
+                        ', '.join(c.order_number for c in candidates[:5]), phone, amount,
+                    )
+                else:
+                    app.logger.error(
+                        'M-Pesa receipt %s (phone %s, amount %s) matched no pending order; '
+                        'needs reconciliation.',
+                        receipt, phone, amount,
+                    )
 
             if order and receipt:
                 order.payment_status = 'completed'
@@ -7726,11 +8469,20 @@ def flutterwave_callback():
 def orders():
     # Only orders where the money actually arrived. A failed or still-pending
     # checkout is not an order yet - the buyer's cart is where they pick it up again.
-    user_orders = Order.query.filter(
-        Order.user_id == current_user.id,
-        Order.payment_status.in_(ORDER_PAID_STATUSES)
-    ).order_by(Order.created_at.desc()).all()
-    return render_template('orders.html', orders=user_orders)
+    #
+    # Paginated and eager-loaded together, because the template prints
+    # item.product.name for every line of every order: unpaginated that was one
+    # query for the orders, one per order for its items, and one per item for its
+    # product. A regular with 200 orders was running roughly 800 queries to open
+    # this page, and the number only ever grew.
+    page = request.args.get('page', 1, type=int)
+    pagination = (Order.query
+                  .options(joinedload(Order.items).joinedload(OrderItem.product))
+                  .filter(Order.user_id == current_user.id,
+                          Order.payment_status.in_(ORDER_PAID_STATUSES))
+                  .order_by(Order.created_at.desc())
+                  .paginate(page=max(1, page), per_page=ORDERS_PER_PAGE, error_out=False))
+    return render_template('orders.html', orders=pagination.items, pagination=pagination)
 
 
 @app.route('/order/<int:order_id>')
@@ -7772,8 +8524,7 @@ def retry_payment(order_id):
     if result.get('success'):
         checkout_request_id = result.get('checkout_request_id')
         if checkout_request_id:
-            Setting.set(f'mpesa_checkout_order_{checkout_request_id}', order.id)
-            Setting.set(f'mpesa_order_checkout_{order.id}', checkout_request_id)
+            remember_order_checkout_id(order, checkout_request_id)
         order.mpesa_phone = phone
         order.payment_status = 'pending'
         db.session.commit()
@@ -7849,6 +8600,27 @@ def download_digital(order_id, product_id):
         log_admin_action('unauthorized_download_attempt', 'product', product_id,
                         {'user_id': current_user.id, 'order_id': order_id})
         abort(403)
+
+    # Cloud-stored files are handed over as a signed URL that expires in minutes,
+    # minted here and nowhere else - which is to say only after all four checks
+    # above have passed. Note the ordering: the gate is unchanged and still runs in
+    # full, and only the delivery of an already-authorised file moved.
+    reference = parse_cloudinary_reference(product.file_path)
+    if reference:
+        download_name = f'{secure_filename(product.slug) or "download"}'
+        extension = product_file_extension(product)
+        if extension:
+            download_name = f'{download_name}.{extension}'
+        signed = signed_private_download_url(product.file_path,
+                                             download_name=download_name)
+        if not signed:
+            logger.error('Digital product %s is stored in Cloudinary but could not '
+                         'be signed for delivery', product_id)
+            abort(503)
+        log_admin_action('digital_download', 'product', product_id,
+                        {'user_id': current_user.id, 'order_id': order_id,
+                         'filename': download_name, 'storage': 'cloudinary'})
+        return redirect(signed)
 
     # Sanitize file path to prevent directory traversal
     filename = sanitize_filepath(os.path.basename(product.file_path), ALLOWED_DIGITAL_EXTENSIONS)
@@ -8314,7 +9086,7 @@ def storefront_manage_view(storefront):
             Product.seller_id == storefront.owner_id,
             Product.review_status != 'approved').count(),
     }
-    categories = Category.query.filter_by(is_active=True).order_by(Category.name).all()
+    categories = nav_categories()
     return render_template('storefront_manage.html', storefront=storefront,
                            products=products, stats=stats, categories=categories,
                            follower_count=storefront_follower_count(storefront))
@@ -8372,7 +9144,7 @@ def storefront_apply():
         flash('Storefront application submitted. Our review team has been notified.', 'success')
         return redirect(url_for('storefront_apply'))
     storefronts = BusinessStorefront.query.filter_by(owner_id=current_user.id).order_by(BusinessStorefront.created_at.desc()).all()
-    categories = Category.query.filter_by(is_active=True).order_by(Category.name.asc()).all()
+    categories = nav_categories()
     return render_template('storefront_apply.html', storefronts=storefronts, categories=categories)
 
 
@@ -8549,7 +9321,8 @@ def admin_bnpl_scan_push():
         'raw': raw[:120],
         'received_at': utcnow().isoformat(),
     }
-    Setting.set(f'bnpl_latest_imei_scan_{current_user.id}', json.dumps(payload))
+    ephemeral_set(f'bnpl_latest_imei_scan_{current_user.id}', payload,
+                  ttl_seconds=SCAN_HANDOFF_TTL_SECONDS)
     db.session.commit()
     return jsonify({'success': True, 'imei': payload['imei'], 'product': f'IMEI {payload["imei"]}', 'action': 'captured'})
 
@@ -8559,15 +9332,12 @@ def admin_bnpl_scan_push():
 @mvp_required
 def admin_bnpl_latest_scan():
     key = f'bnpl_latest_imei_scan_{current_user.id}'
-    raw = Setting.get(key, '')
-    if not raw:
+    payload = ephemeral_get_json(key)
+    if not payload:
         return jsonify({'success': False})
-    Setting.set(key, '')
-    db.session.commit()
-    try:
-        payload = json.loads(raw)
-    except Exception:
-        payload = {'imei': normalize_imei(raw)}
+    # Read-once: the console has taken delivery of this scan, so drop it rather
+    # than let the next poll pick the same IMEI up again.
+    ephemeral_delete(key)
     payload['success'] = bool(payload.get('imei'))
     return jsonify(payload)
 
@@ -8625,15 +9395,31 @@ def coin_setting(key, default):
     return int(float(Setting.get(key, str(default)) or default))
 
 
-def get_user_coin_balance(user_id):
-    last_txn = CoinTransaction.query.filter_by(user_id=user_id).order_by(CoinTransaction.created_at.desc()).first()
+def get_user_coin_balance(user_id, for_update=False):
+    """The user's coin balance, read off the newest ledger row.
+
+    ``for_update`` takes the lock described in lock_row, and every mutation must
+    pass it: unlocked, two awards landing together both read the same starting
+    balance and one is silently erased, and two spends both clear an affordability
+    check the balance can only honour once. Coins are money here, so that is a
+    correctness bug rather than a slow path. Display callers leave it off.
+
+    Ordered by id as well as timestamp: rows written in the same transaction share
+    a created_at, so "the newest" would otherwise be decided arbitrarily.
+    """
+    if for_update:
+        lock_row(User, user_id)
+    last_txn = (CoinTransaction.query
+                .filter_by(user_id=user_id)
+                .order_by(CoinTransaction.created_at.desc(), CoinTransaction.id.desc())
+                .first())
     return last_txn.balance_after if last_txn else 0
 
 
 def award_coins(user_id, amount, coin_type, description='', reference_id=''):
     if amount <= 0:
         return None
-    current_balance = get_user_coin_balance(user_id)
+    current_balance = get_user_coin_balance(user_id, for_update=True)
     new_balance = current_balance + amount
     txn = CoinTransaction(
         user_id=user_id,
@@ -8662,7 +9448,10 @@ def spend_coins(user_id, amount, coin_type, description='', reference_id=''):
     if not coin_spend_is_allowed(coin_type):
         app.logger.warning('Blocked coin spend of type %s for user %s', coin_type, user_id)
         return None
-    current_balance = get_user_coin_balance(user_id)
+    # Locked, so the affordability check below is still true when the row lands.
+    # Unlocked, two spends of the whole balance both pass it and the account goes
+    # negative.
+    current_balance = get_user_coin_balance(user_id, for_update=True)
     if amount > current_balance:
         return None
     new_balance = current_balance - amount
@@ -8788,7 +9577,7 @@ def coin_leaderboard(limit=10):
         sqfunc.coalesce(
             db.session.query(CoinTransaction.balance_after)
             .filter(CoinTransaction.user_id == User.id)
-            .order_by(CoinTransaction.created_at.desc())
+            .order_by(CoinTransaction.created_at.desc(), CoinTransaction.id.desc())
             .limit(1)
             .correlate(User)
             .scalar_subquery(), 0
@@ -9016,8 +9805,11 @@ def admin_dashboard():
     # Recent orders
     recent_orders = Order.query.order_by(Order.created_at.desc()).limit(5).all()
 
-    # Unread/low stock alerts
-    low_stock_count = Product.query.filter(Product.stock < 10).count()
+    # Unread/low stock alerts. Downloads never run out, and they are stored with a
+    # stock of zero, so counting them here would report a shop full of digital notes
+    # as an inventory emergency.
+    low_stock_count = Product.query.filter(
+        Product.is_digital.is_(False), Product.stock < 10).count()
     pending_reviews = Review.query.filter_by(is_visible=False).count()
     production_setup_issues = production_setup_pending(current_user)
 
@@ -9042,14 +9834,19 @@ def admin_dashboard():
             Order.status == 'completed'
         ).scalar() or 0.0
 
-    # If no total column found, calculate from completed orders' items
+    # If no total column found, calculate from completed orders' items.
+    #
+    # In SQL, not in Python. This used to load every completed order on the
+    # platform and then walk order.items on each one - a query per order on top of
+    # the load - and it ran whenever gross_revenue came out at zero, which is also
+    # what a brand-new install looks like. At a million users it is the one query
+    # here that could take the worker down rather than merely slow it.
     if not total_col or gross_revenue == 0.0:
-        completed = Order.query.filter_by(status='completed').all()
-        gross_revenue = sum(
-            sum(item.quantity * item.price for item in order.items)
-            for order in completed
-            if hasattr(order, 'items')
-        )
+        gross_revenue = db.session.query(
+            func.sum(OrderItem.quantity * OrderItem.price)
+        ).join(Order, Order.id == OrderItem.order_id).filter(
+            Order.status == 'completed'
+        ).scalar() or 0.0
 
     # Total cost of goods sold
     total_cogs = 0.0
@@ -9428,12 +10225,10 @@ def admin_market_news():
                 flash(f'Generated {created} market news update(s).', 'success')
             except OperationalError as exc:
                 db.session.rollback()
-                Setting.set('market_news_generation_lock', '0')
                 app.logger.exception('Market news generation failed: %s', exc)
                 flash('Market news generation hit a database lock. Try again in a moment; production should use Postgres/MySQL for real traffic.', 'warning')
             except Exception as exc:
                 db.session.rollback()
-                Setting.set('market_news_generation_lock', '0')
                 app.logger.exception('Market news generation failed: %s', exc)
                 flash('Market news refresh failed for one source, but the admin page remains available. Check server logs for details.', 'warning')
         elif action == 'send_followers':
@@ -9447,12 +10242,10 @@ def admin_market_news():
         generate_market_news_if_due()
     except OperationalError as exc:
         db.session.rollback()
-        Setting.set('market_news_generation_lock', '0')
         app.logger.exception('Market news auto-generation failed: %s', exc)
         flash('Market news auto-refresh hit a database lock. Existing news is still shown.', 'warning')
     except Exception as exc:
         db.session.rollback()
-        Setting.set('market_news_generation_lock', '0')
         app.logger.exception('Market news auto-generation failed: %s', exc)
         flash('Market news auto-refresh failed for one source. Existing news is still shown.', 'warning')
     news = MarketNews.query.filter_by(is_cleared=False).order_by(MarketNews.created_at.desc()).limit(100).all()
@@ -9476,18 +10269,16 @@ def admin_market_news():
 def admin_product_trends():
     manual_refresh = request.args.get('refresh') == '1'
     if manual_refresh:
-        Setting.set('market_news_generation_lock', '0')
+        # The operator's "it is stuck" hatch. Forced, because a lease left behind
+        # by a dead worker on another instance is not ours to release politely.
+        release_lease(MARKET_NEWS_LOCK, force=True)
     try:
         generate_market_news_if_due(force=manual_refresh)
     except OperationalError:
         db.session.rollback()
-        Setting.set('market_news_generation_lock', '0')
-        db.session.commit()
         flash('News generation hit a database lock. Try again in a moment.', 'warning')
     except Exception as exc:
         db.session.rollback()
-        Setting.set('market_news_generation_lock', '0')
-        db.session.commit()
         app.logger.exception('News generation failed: %s', exc)
         flash('News refresh could not complete, but the page is still available. Check server logs for the failed market source.', 'warning')
     trend_seed = int(utcnow().timestamp()) if manual_refresh else int(utcnow().timestamp() // 3600)
@@ -10641,7 +11432,7 @@ def admin_pos():
     suppliers = Supplier.query.order_by(Supplier.name.asc()).all()
     purchase_orders = PurchaseOrder.query.order_by(PurchaseOrder.created_at.desc()).limit(10).all()
     stock_movements = StockMovement.query.order_by(StockMovement.created_at.desc()).limit(20).all()
-    categories = Category.query.filter_by(is_active=True).order_by(Category.name.asc()).all()
+    categories = nav_categories()
     terminal_payload = pos_terminal_payload()
     scanner_pairing = create_pos_scanner_pairing()
     return render_template('admin/pos.html', products=products, recent_sales=recent_sales, low_stock=low_stock,
@@ -10958,7 +11749,7 @@ def pos_pair_scan_push(token):
             remove_product_from_pos_terminal(product, 1, user_id=user_id)
         else:
             add_product_to_pos_terminal(product, 1, user_id=user_id)
-    Setting.set(f'pos_latest_scan_{user_id}', json.dumps({
+    ephemeral_set(f'pos_latest_scan_{user_id}', {
         'barcode': barcode,
         'action': action,
         'product_id': product.id if product else None,
@@ -10966,7 +11757,7 @@ def pos_pair_scan_push(token):
         'out_of_stock': bool(sold_out),
         'cart': pos_terminal_payload(user_id=user_id),
         'received_at': utcnow().isoformat()
-    }))
+    }, ttl_seconds=SCAN_HANDOFF_TTL_SECONDS)
     db.session.commit()
     if not product:
         return jsonify({'success': False, 'error': f'No product found for barcode: {barcode}', 'barcode': barcode})
@@ -10992,7 +11783,7 @@ def admin_pos_scan_push():
             remove_product_from_pos_terminal(product, 1)
         else:
             add_product_to_pos_terminal(product, 1)
-    Setting.set(f'pos_latest_scan_{current_user.id}', json.dumps({
+    ephemeral_set(f'pos_latest_scan_{current_user.id}', {
         'barcode': barcode,
         'action': action,
         'product_id': product.id if product else None,
@@ -11000,7 +11791,7 @@ def admin_pos_scan_push():
         'out_of_stock': bool(sold_out),
         'cart': pos_terminal_payload(),
         'received_at': utcnow().isoformat()
-    }))
+    }, ttl_seconds=SCAN_HANDOFF_TTL_SECONDS)
     db.session.commit()
     if not product:
         return jsonify({'success': False, 'error': f'No product found for barcode: {barcode}', 'barcode': barcode})
@@ -11014,15 +11805,12 @@ def admin_pos_scan_push():
 @admin_required
 def admin_pos_latest_scan():
     key = f'pos_latest_scan_{current_user.id}'
-    raw = Setting.get(key, '')
-    if not raw:
+    payload = ephemeral_get_json(key)
+    if not payload:
         return jsonify({'success': False})
-    Setting.set(key, '')
-    db.session.commit()
-    try:
-        payload = json.loads(raw)
-    except Exception:
-        payload = {'barcode': raw}
+    # Read-once: clearing here is what stops the till re-adding the same scan on
+    # its next poll.
+    ephemeral_delete(key)
     payload['success'] = True
     payload['cart'] = pos_terminal_payload()
     return jsonify(payload)
@@ -11082,7 +11870,7 @@ def admin_inventory():
 @login_required
 @admin_required
 def admin_add_product():
-    categories = Category.query.all()
+    categories = nav_categories(active_only=False)
 
     if request.method == 'POST':
         admin_user_id = current_user.id
@@ -11247,7 +12035,7 @@ def admin_add_product():
 @admin_required
 def admin_edit_product(pid):
     product = Product.query.get_or_404(pid)
-    categories = Category.query.all()
+    categories = nav_categories(active_only=False)
 
     if request.method == 'POST':
         name = request.form.get('name', product.name).strip()
@@ -11461,6 +12249,7 @@ def admin_categories():
             db.session.add(category)
             flash(f'Category "{name}" created.', 'success')
         db.session.commit()
+        invalidate_nav_categories()
         return redirect(url_for('admin_categories'))
 
     categories = Category.query.order_by(Category.name.asc()).all()
@@ -11478,6 +12267,7 @@ def admin_add_category():
         cat = Category(name=name, slug=slug, description=description)
         db.session.add(cat)
         db.session.commit()
+        invalidate_nav_categories()
         flash(f'Category "{name}" created!', 'success')
     return redirect(url_for('admin_categories'))
 
@@ -11491,6 +12281,7 @@ def admin_delete_category(cid):
     Product.query.filter_by(category_id=cid).update({Product.category_id: None})
     db.session.delete(cat)
     db.session.commit()
+    invalidate_nav_categories()
     flash('Category deleted.', 'success')
     return redirect(url_for('admin_categories'))
 
@@ -13267,13 +14058,17 @@ def didit_webhook():
 
     event_id = str(payload.get('event_id') or payload.get('id') or '').strip()
     if event_id:
+        # Replay guard. Held in the ephemeral store rather than the settings
+        # table: providers retry within minutes, so a month is generous, and one
+        # permanent settings row per webhook event grows forever.
         dedupe_key = f'didit_event_{event_id}'
-        if Setting.get(dedupe_key):
+        if ephemeral_get(dedupe_key):
             return jsonify({'status': 'ok'})
 
     applied = apply_didit_status(payload)
     if event_id:
-        Setting.set(dedupe_key, utcnow().isoformat())
+        ephemeral_set(dedupe_key, utcnow().isoformat(),
+                      ttl_seconds=WEBHOOK_DEDUPE_TTL_SECONDS)
     return jsonify({'status': 'ok', 'applied': applied})
 
 
@@ -13390,7 +14185,386 @@ def save_seller_product(product, storefront, is_new):
     # Sellers may absorb the delivery charge on a listing; everything else is
     # priced automatically from the origin above.
     product.free_delivery = bool(request.form.get('free_delivery'))
+
+    # Done last so it overrides the physical defaults set above: a digital listing
+    # has nothing to weigh, no stock to run out of and no condition to grade.
+    if form_bool('is_digital'):
+        failure = attach_digital_file(product, request.files.get('digital_file'),
+                                      required=not product.file_path)
+        if failure:
+            return failure
+        apply_digital_defaults(product)
+    else:
+        product.is_digital = False
     return None
+
+
+# Bulk digital listing. A tutor with two hundred exam papers should not fill the
+# single-product form two hundred times, but the whole selection cannot arrive in
+# one request either: MAX_CONTENT_LENGTH caps the entire body at 30MB, and a sync
+# worker held for minutes by one enormous upload is the exact stall the rest of
+# this work is removing. So the browser slices the selection into small posts and
+# this endpoint answers each one with a per-file verdict.
+#
+# Every limit is an env var with a working default, so none of this needs
+# configuring to run.
+BULK_DIGITAL_MAX_FILES = int_env('BULK_DIGITAL_MAX_FILES_PER_REQUEST', 8)
+BULK_DIGITAL_MAX_FILE_MB = float_env('BULK_DIGITAL_MAX_FILE_MB', 20)
+BULK_DIGITAL_RATE_LIMIT = os.environ.get('BULK_DIGITAL_RATE_LIMIT', '120 per hour')
+
+# Academic material is the obvious use for this, and it is also the material most
+# likely to be somebody else's copyright, so bulk listings park for review by
+# default. Set BULK_DIGITAL_REVIEW=0 to publish them straight away.
+DIGITAL_REVIEW_REQUIRED = bool_env('BULK_DIGITAL_REVIEW', True)
+
+
+def bulk_digital_request_budget():
+    """Bytes the browser may put in one batch, kept clear of the hard body cap.
+
+    Flask rejects an oversized body before any view runs, so a batch that guesses
+    wrong is a 413 with no per-file detail - useless feedback for someone halfway
+    through a hundred files. The browser packs to this figure instead, and the 2MB
+    of headroom covers the form fields and multipart boundaries riding along.
+    """
+    hard_cap = int(app.config.get('MAX_CONTENT_LENGTH') or (30 * 1024 * 1024))
+    headroom = 2 * 1024 * 1024
+    asked = int(float_env('BULK_DIGITAL_REQUEST_BUDGET_MB', 24) * 1024 * 1024)
+    return max(1024 * 1024, min(asked, hard_cap - headroom))
+
+
+def bulk_digital_max_file_bytes():
+    """Per-file ceiling. Never above the batch budget, or nothing could be sent."""
+    return int(min(BULK_DIGITAL_MAX_FILE_MB * 1024 * 1024, bulk_digital_request_budget()))
+
+
+def uploaded_file_size(file):
+    """Bytes in an upload, measured off the stream and rewound for the next reader."""
+    try:
+        stream = file.stream
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(0)
+        return int(size)
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+def attach_digital_file(product, file, required=True):
+    """Validate one upload and hang it off ``product``. Error string or None.
+
+    The size is taken from the stream rather than stat-ing the file afterwards:
+    the bytes are already in hand, and a stat would be a second answer to a
+    question we have answered.
+    """
+    if not file or not file.filename:
+        return 'Attach the file buyers will download.' if required else None
+    size = uploaded_file_size(file)
+    ceiling = bulk_digital_max_file_bytes()
+    if size <= 0:
+        return 'That file came through empty.'
+    if size > ceiling:
+        # Deliberately not quoting the file's own size back: at one decimal place a
+        # file a kilobyte over the line prints the same figure as the line itself,
+        # which reads as a contradiction.
+        return f'Too large for one file. The limit is {human_file_size(ceiling)}.'
+    if not allowed_digital_file(file.filename) or not allowed_digital_file_signature(file):
+        return ('Allowed file types are '
+                f'{", ".join(sorted(ALLOWED_DIGITAL_EXTENSIONS))}, '
+                'and the contents have to match the extension.')
+    try:
+        product.file_path = save_uploaded_file(file, 'digital')
+    except ValueError as exc:
+        return str(exc)
+    product.file_size = size
+    return None
+
+
+def apply_digital_defaults(product):
+    """Force the fields a digital listing cannot meaningfully carry.
+
+    Left to the form these would hold whatever the physical inputs posted, and a
+    downloadable file with a shipping weight and a stock count of zero reads as
+    out of stock everywhere that checks.
+    """
+    product.is_digital = True
+    product.product_condition = 'new'
+    product.stock = 0
+    product.weight_kg = 0.0
+    product.free_delivery = True
+    if DIGITAL_REVIEW_REQUIRED:
+        product.review_status = 'admin_review'
+        product.is_active = False
+    return product
+
+
+def human_file_size(size):
+    size = float(size or 0)
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if size < 1024 or unit == 'GB':
+            return f'{size:.0f} {unit}' if unit == 'B' else f'{size:.1f} {unit}'
+        size /= 1024
+    return f'{size:.1f} GB'
+
+
+def digital_product_name(filename, fallback='Digital download'):
+    """Turn a filename into something a shopper would read.
+
+    'NUR-201_Final_Exam_2024 (1).pdf' becomes 'NUR 201 Final Exam 2024'. Existing
+    capitalisation is kept, because course codes carry meaning that title-casing
+    would flatten; an all-lowercase name gets capitalised since that is a filename
+    convention rather than a choice.
+    """
+    stem = os.path.splitext(os.path.basename(filename or ''))[0]
+    # splitext reads a leading-dot name as an extensionless dotfile, so a file
+    # called ".pdf" would come back as the name "Pdf" rather than the fallback.
+    if os.path.basename(filename or '').startswith('.'):
+        stem = ''
+    cleaned = re.sub(r'[\s_]+', ' ', stem.replace('-', ' '))
+    cleaned = re.sub(r'\s*\(\d+\)\s*$', '', cleaned)  # the "(1)" a re-download picks up
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(' .')
+    if not cleaned:
+        return fallback
+    if cleaned.islower():
+        cleaned = cleaned.title()
+    return cleaned[:200]
+
+
+def read_bulk_digital_form():
+    """The fields shared by every file in the batch, read once.
+
+    Returns (shared, error). These arrive on every request rather than being
+    stashed server-side between batches: a session-held draft would be one more
+    thing to expire, and the browser already has them.
+    """
+    price = form_float('selling_price', 0, minimum=0)
+    if price <= 0:
+        return None, 'Set a price above zero for the batch.'
+    if not form_bool('owns_rights'):
+        return None, 'Confirm you hold the rights to sell these files.'
+    return {
+        'category_id': request.form.get('category_id', type=int),
+        'selling_price': price,
+        'discount_percent': form_float('discount_percent', 0, minimum=0, maximum=99),
+        'description': request.form.get('description', '').strip(),
+        'short_description': request.form.get('short_description', '').strip()[:300],
+        'name_prefix': request.form.get('name_prefix', '').strip()[:60],
+        'is_active': form_bool('is_active'),
+        'first_page_preview': form_bool('first_page_preview'),
+        'cover_url': (request.form.get('cover_url', '').strip() or None),
+    }, None
+
+
+def bulk_digital_location(storefront):
+    """Resolve the storefront pin once for the whole batch.
+
+    apply_product_location geocodes when there are no coordinates to work from.
+    Called per file that is a network round trip per file, and eight of those in a
+    request that is also writing eight files to disk is how a sync worker reaches
+    its timeout. So it is resolved once here and the answer is reused; a storefront
+    that still has no pin afterwards is left without one rather than retried eight
+    times, which is also why the empty label matters - it is the other branch in
+    apply_product_location that would reach for the geocoder.
+    """
+    try:
+        geocode_storefront(storefront)
+    except Exception:
+        app.logger.exception('Bulk digital geocode failed for storefront %s', storefront.id)
+    if storefront.location_lat is None or storefront.location_lng is None:
+        return {'storefront': None, 'lat': None, 'lng': None}
+    return {'storefront': storefront,
+            'lat': storefront.location_lat,
+            'lng': storefront.location_lng}
+
+
+def build_bulk_digital_product(file, shared, location):
+    """One uploaded file becomes one product. Returns (product, error)."""
+    product = Product(seller_id=current_user.id, commission_percent=15.0)
+    failure = attach_digital_file(product, file, required=True)
+    if failure:
+        return None, failure
+
+    label = digital_product_name(file.filename)
+    name = f'{shared["name_prefix"]} {label}'.strip()[:200] if shared['name_prefix'] else label
+    product.name = name
+    product.slug = unique_product_slug(name)
+    product.description = shared['description'] or name
+    product.short_description = shared['short_description'] or label[:300]
+    product.category_id = shared['category_id']
+    product.selling_price = shared['selling_price']
+    product.buying_price = 0.0
+    product.discount_percent = shared['discount_percent']
+    product.first_page_preview = shared['first_page_preview']
+    product.is_active = shared['is_active']
+    product.image_url = shared['cover_url']
+    apply_digital_defaults(product)
+
+    # A download ships from nowhere, but the pin is what tells a buyer whose shop
+    # this is, so it follows the storefront like every other listing.
+    apply_product_location(product, storefront=location['storefront'], label='',
+                           lat=location['lat'], lng=location['lng'])
+    return product, None
+
+
+def save_bulk_digital_batch(files, shared, storefront):
+    """Persist a batch, isolating each file so one bad one does not sink the rest.
+
+    Each product goes in inside a savepoint. Without one, a name collision or a
+    constraint failure on file seven would need a rollback that discarded the six
+    already staged, and the seller would be told the whole batch failed when only
+    one file was at fault.
+    """
+    location = bulk_digital_location(storefront)
+    created, failed = [], []
+    for file in files:
+        filename = file.filename or 'unnamed file'
+        try:
+            with db.session.begin_nested():
+                product, error = build_bulk_digital_product(file, shared, location)
+                if error:
+                    raise BulkFileRejected(error)
+                db.session.add(product)
+                db.session.flush()
+                created.append({
+                    'id': product.id,
+                    'name': product.name,
+                    'slug': product.slug,
+                    'filename': filename,
+                    'size': human_file_size(product.file_size),
+                    'review': product.review_status != 'approved',
+                })
+        except BulkFileRejected as exc:
+            failed.append({'filename': filename, 'error': str(exc)})
+        except SQLAlchemyError:
+            app.logger.exception('Bulk digital product failed for %s', filename)
+            failed.append({'filename': filename,
+                           'error': 'Could not be saved. Try this one on its own.'})
+
+    if created:
+        try:
+            db.session.commit()
+        except SQLAlchemyError:
+            db.session.rollback()
+            app.logger.exception('Bulk digital batch commit failed')
+            return [], failed + [{'filename': item['filename'],
+                                  'error': 'The batch could not be saved.'}
+                                 for item in created]
+        # Once per request, not once per file: the cache version is a single key
+        # and rewriting it eight times would invalidate the same thing eight times.
+        invalidate_product_cache()
+    else:
+        db.session.rollback()
+    return created, failed
+
+
+class BulkFileRejected(Exception):
+    """One file failed validation. Rolls back its savepoint, leaves the batch."""
+
+
+@app.route('/seller/products/bulk')
+@login_required
+def seller_products_bulk():
+    """The bulk digital listing page."""
+    storefront, bounce = seller_listing_gate()
+    if bounce:
+        return bounce
+    return render_template(
+        'seller_bulk_digital.html',
+        storefront=storefront,
+        categories=nav_categories(),
+        max_files_per_request=BULK_DIGITAL_MAX_FILES,
+        request_budget_bytes=bulk_digital_request_budget(),
+        max_file_bytes=bulk_digital_max_file_bytes(),
+        allowed_extensions=sorted(ALLOWED_DIGITAL_EXTENSIONS),
+        review_required=DIGITAL_REVIEW_REQUIRED,
+    )
+
+
+@app.route('/seller/products/bulk/cover', methods=['POST'])
+@login_required
+@limiter.limit(BULK_DIGITAL_RATE_LIMIT)
+def seller_products_bulk_cover():
+    """Store the shared cover image once and hand back its URL.
+
+    Its own request for two reasons. save_product_image measures the whole request
+    body against the 5MB image cap, so a cover riding along with 20MB of PDFs would
+    be rejected for the size of its neighbours. And one cover shared by two hundred
+    listings should be stored once, not two hundred times - the browser sends it
+    here first and passes the returned URL to every batch.
+    """
+    _storefront, bounce = seller_listing_gate()
+    if bounce:
+        return jsonify({'ok': False, 'error': 'Your storefront cannot list products yet.'}), 403
+    cover = request.files.get('cover_image')
+    if not cover or not cover.filename:
+        return jsonify({'ok': False, 'error': 'No image arrived.'}), 400
+    try:
+        return jsonify({'ok': True, 'cover_url': save_product_image(cover)})
+    except (ValueError, OSError) as exc:
+        app.logger.info('Bulk digital cover rejected: %s', exc)
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+
+
+@app.route('/seller/products/bulk/upload', methods=['POST'])
+@login_required
+@limiter.limit(BULK_DIGITAL_RATE_LIMIT)
+def seller_products_bulk_upload():
+    """Take one batch of files and report on each of them.
+
+    Answers JSON per batch rather than redirecting, because the browser is looping
+    over a selection this request only holds a slice of. Any error the seller could
+    act on comes back with the filename attached.
+    """
+    storefront, bounce = seller_listing_gate()
+    if bounce:
+        # The gate flashes and redirects, which a fetch cannot follow usefully.
+        return jsonify({'ok': False, 'error': 'Your storefront cannot list products yet.'}), 403
+
+    shared, error = read_bulk_digital_form()
+    if error:
+        return jsonify({'ok': False, 'error': error}), 400
+
+    files = [f for f in request.files.getlist('files') if f and f.filename]
+    if not files:
+        return jsonify({'ok': False, 'error': 'No files arrived in that batch.'}), 400
+    if len(files) > BULK_DIGITAL_MAX_FILES:
+        return jsonify({'ok': False,
+                        'error': f'Send at most {BULK_DIGITAL_MAX_FILES} files per batch.'}), 400
+
+    created, failed = save_bulk_digital_batch(files, shared, storefront)
+
+    payload = {
+        'ok': True,
+        'created': created,
+        'failed': failed,
+        'cover_url': shared['cover_url'],
+        'summary': {'created': len(created), 'failed': len(failed)},
+    }
+
+    if created:
+        log_admin_action('bulk_digital_upload', 'product', created[0]['id'], {
+            'seller_id': current_user.id,
+            'storefront_id': storefront.id,
+            'count': len(created),
+            'product_ids': [item['id'] for item in created],
+            # The attestation is the record that matters if a takedown ever lands.
+            'rights_confirmed': True,
+        })
+
+    # One announcement for the whole upload, sent when the browser says it is done.
+    # Per file it would be a hundred notifications per follower for one action.
+    if form_bool('finalize'):
+        total = form_int('total_created', len(created), minimum=0)
+        payload['finalized'] = True
+        payload['notified'] = 0
+        if total and not DIGITAL_REVIEW_REQUIRED and shared['is_active']:
+            payload['notified'] = notify_storefront_followers(
+                storefront,
+                f'{total} new download{"" if total == 1 else "s"} from {storefront.business_name}',
+                f'{storefront.business_name} just listed {total} new digital '
+                f'item{"" if total == 1 else "s"}.',
+            )
+    return jsonify(payload)
+
 
 
 @app.route('/seller/products', methods=['GET', 'POST'])
@@ -13447,10 +14621,17 @@ def seller_products(product_id=None):
 
                 return redirect(url_for('seller_products'))
 
-    products = Product.query.filter_by(seller_id=current_user.id).order_by(
-        Product.created_at.desc()).all()
-    categories = Category.query.filter_by(is_active=True).order_by(Category.name.asc()).all()
-    return render_template('seller_products.html', storefront=storefront, products=products,
+    # Paginated because bulk upload made this list unbounded in one action: a
+    # tutor who uploads an afternoon of past papers has thousands of listings, and
+    # rendering all of them would time out the page they need to manage them from.
+    page = request.args.get('page', 1, type=int)
+    pagination = (Product.query.filter_by(seller_id=current_user.id)
+                  .order_by(Product.created_at.desc())
+                  .paginate(page=max(1, page), per_page=SELLER_PRODUCTS_PER_PAGE,
+                            error_out=False))
+    categories = nav_categories()
+    return render_template('seller_products.html', storefront=storefront,
+                           products=pagination.items, pagination=pagination,
                            categories=categories, product=product,
                            conditions=SELLER_PRODUCT_CONDITIONS,
                            excludable_countries=excludable_countries(),
@@ -15913,6 +17094,7 @@ def phase_two_schema_spec():
             ('pickup_station', 'pickup_station VARCHAR(160)'),
             ('estimated_minutes_to_destination', 'estimated_minutes_to_destination INTEGER'),
             ('promo_code_id', 'promo_code_id INTEGER'),
+            ('mpesa_checkout_request_id', 'mpesa_checkout_request_id VARCHAR(120)'),
         ],
         'customer_feedback': [
             ('admin_status', "admin_status VARCHAR(20) DEFAULT 'new'"),
@@ -16084,6 +17266,17 @@ def phase_two_schema_spec():
         ('ix_driver_pings_order_created', 'driver_location_pings', 'order_id, created_at', False),
         ('ix_delivery_assignments_driver_status', 'delivery_assignments', 'driver_id, status', False),
         ('ix_delivery_assignments_order', 'delivery_assignments', 'order_id', False),
+        # The M-Pesa callback arrives with nothing but the checkout id, so this is
+        # the lookup that has to stay a single indexed hit no matter how many
+        # orders the table holds.
+        ('ix_orders_mpesa_checkout', 'orders', 'mpesa_checkout_request_id', False),
+        # Runtime infrastructure. create_all() builds these with the tables on a
+        # fresh database; listed here so a database that predates the tables, or
+        # one where an index creation failed, still converges.
+        ('ix_ephemeral_kv_expires', 'ephemeral_kv', 'expires_at', False),
+        ('ix_outbound_status_next_attempt', 'outbound_messages', 'status, next_attempt_at', False),
+        ('ix_outbound_channel_status', 'outbound_messages', 'channel, status', False),
+        ('ix_outbound_created', 'outbound_messages', 'created_at', False),
     ]
     return columns, index_specs
 
@@ -16831,6 +18024,93 @@ def init_database():
 
 
 
+def leased_job(name, fn, lease_ttl=None):
+    """Wrap a scheduled job so exactly one process across the fleet runs it.
+
+    Every gunicorn worker imports this module and therefore starts its own
+    scheduler. Without a lease, four workers on two instances means eight
+    concurrent runs of the same job - eight times the outbound scraping, and eight
+    writers racing on the same rows. The lease is taken per tick and released
+    after, so a worker that dies mid-job blocks the next run for one lease term
+    rather than forever.
+    """
+    lease = JobLease(ttl_seconds=lease_ttl) if lease_ttl else None
+
+    def runner():
+        with app.app_context():
+            if not acquire_lease(name, lease):
+                return
+            try:
+                fn()
+                mark_lease_run(name)
+            except Exception:
+                db.session.rollback()
+                app.logger.exception('Scheduled job %s failed', name)
+            finally:
+                release_lease(name)
+
+    runner.__name__ = f'leased_{name}'
+    return runner
+
+
+def start_outbound_worker():
+    """Drain the outbound queue from inside every web worker.
+
+    Deliberately not behind RUN_BACKGROUND_JOBS. Email and SMS now go through the
+    queue, so a deployment where nothing drains it is a deployment where no
+    customer gets a receipt or a password reset - and that must not depend on
+    anyone having set an extra environment variable. Every worker drains, and
+    claim_batch makes concurrent draining safe, so throughput grows with the
+    fleet instead of being pinned to one process.
+    """
+    if not OUTBOUND_QUEUE_ENABLED:
+        return None
+    if os.environ.get('DISABLE_OUTBOUND_WORKER') == '1':
+        app.logger.info('Outbound worker disabled by DISABLE_OUTBOUND_WORKER=1')
+        return None
+    if app.debug and os.environ.get('WERKZEUG_RUN_MAIN') not in {'true', '1'}:
+        return None
+    # The test scripts import this module directly; a thread writing to their
+    # scratch database while they assert against it only produces flakes.
+    if 'pytest' in sys.modules or os.path.basename(sys.argv[0] or '').startswith('test_'):
+        return None
+
+    import threading
+    import time
+
+    interval = max(1, int_env('OUTBOUND_DRAIN_INTERVAL_SECONDS', 5))
+    batch = max(1, int_env('OUTBOUND_DRAIN_BATCH', 25))
+    idle_backoff = max(interval, int_env('OUTBOUND_DRAIN_IDLE_SECONDS', 15))
+
+    def loop():
+        while True:
+            worked = 0
+            try:
+                with app.app_context():
+                    sent, failed, requeued = drain_outbound(limit=batch)
+                    worked = sent + failed + requeued
+                    if worked:
+                        app.logger.info(
+                            'Outbound drain: %s sent, %s failed, %s requeued', sent, failed, requeued)
+            except Exception:
+                # Never let one bad cycle end the thread - it is the only thing
+                # delivering mail in this process.
+                try:
+                    with app.app_context():
+                        db.session.rollback()
+                        app.logger.exception('Outbound drain cycle failed')
+                except Exception:
+                    pass
+            # Poll faster while there is work, slower when the queue is empty, so
+            # an idle site is not running a query every few seconds per worker.
+            time.sleep(interval if worked else idle_backoff)
+
+    thread = threading.Thread(target=loop, name='outbound-drain', daemon=True)
+    thread.start()
+    app.logger.info('Outbound worker started (every %ss, batch %s)', interval, batch)
+    return thread
+
+
 def start_background_jobs():
     class NoopScheduler:
         def shutdown(self, wait=False):
@@ -16847,15 +18127,29 @@ def start_background_jobs():
         return NoopScheduler()
 
     def market_price_job():
+        refreshed = refresh_market_price_cache(limit=30)
+        app.logger.info('Refreshed %s market price cache row(s)', refreshed)
+
+    def housekeeping_job():
+        results = housekeeping()
+        app.logger.info('Housekeeping removed: %s', results)
+
+    def view_flush_job():
+        """Land this worker's buffered view counts.
+
+        Needs an app context of its own: the scheduler thread has none, and the
+        flush touches the database.
+        """
         with app.app_context():
-            try:
-                refreshed = refresh_market_price_cache(limit=30)
-                app.logger.info('Refreshed %s market price cache row(s)', refreshed)
-            except Exception:
-                db.session.rollback()
-                app.logger.exception('Scheduled market price cache refresh failed')
+            flush_product_views()
 
     refresh_hours = int(os.environ.get('MARKET_PRICE_REFRESH_HOURS', '6'))
+    housekeeping_hours = max(1, int_env('HOUSEKEEPING_INTERVAL_HOURS', 6))
+    market_runner = leased_job('market_price_cache_refresh', market_price_job,
+                               lease_ttl=refresh_hours * 1800)
+    housekeeping_runner = leased_job('housekeeping', housekeeping_job,
+                                     lease_ttl=housekeeping_hours * 1800)
+
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
     except ImportError:
@@ -16866,7 +18160,9 @@ def start_background_jobs():
         def loop():
             while True:
                 time.sleep(refresh_hours * 3600)
-                market_price_job()
+                market_runner()
+                housekeeping_runner()
+                view_flush_job()
 
         thread = threading.Thread(target=loop, name='market-price-cache-refresh', daemon=True)
         thread.start()
@@ -16874,10 +18170,34 @@ def start_background_jobs():
 
     scheduler = BackgroundScheduler(timezone='Africa/Nairobi')
     scheduler.add_job(
-        market_price_job,
+        market_runner,
         'interval',
         hours=refresh_hours,
         id='market_price_cache_refresh',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    # Retention sweeps. Nothing was deleting driver pings, audit rows or stale
+    # quotes, and driver pings alone are millions of rows a day at scale.
+    scheduler.add_job(
+        housekeeping_runner,
+        'interval',
+        hours=housekeeping_hours,
+        id='runtime_housekeeping',
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    # Deliberately not leased, unlike every other job here. Each worker buffers
+    # its own view counts, so a lease would mean one worker wrote its buffer and
+    # the rest never wrote theirs. Cheap enough to run everywhere: it does nothing
+    # at all when the buffer is empty.
+    scheduler.add_job(
+        view_flush_job,
+        'interval',
+        minutes=max(1, int_env('VIEW_COUNT_FLUSH_MINUTES', 5)),
+        id='product_view_flush',
         replace_existing=True,
         max_instances=1,
         coalesce=True,
@@ -16932,6 +18252,7 @@ with app.app_context():
     init_database()
 
 background_scheduler = start_background_jobs()
+outbound_worker = start_outbound_worker()
 
 
 if __name__ == '__main__':
