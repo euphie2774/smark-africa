@@ -4,6 +4,8 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_login import UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
 
+from scale import CACHE_MISS, TTLCache, float_env, int_env
+
 db = SQLAlchemy()
 
 
@@ -218,6 +220,7 @@ class Order(db.Model):
         db.Index('ix_orders_status_created', 'status', 'created_at'),
         db.Index('ix_orders_payment_status_created', 'payment_status', 'created_at'),
         db.Index('ix_orders_shipping_status_created', 'shipping_status', 'created_at'),
+        db.Index('ix_orders_mpesa_checkout', 'mpesa_checkout_request_id'),
     )
     id = db.Column(db.Integer, primary_key=True)
     order_number = db.Column(db.String(50), unique=True, nullable=False, default=generate_order_number)
@@ -232,6 +235,12 @@ class Order(db.Model):
     promo_code_id = db.Column(db.Integer, db.ForeignKey('promo_codes.id'), nullable=True)
     mpesa_receipt = db.Column(db.String(100))
     mpesa_phone = db.Column(db.String(20))
+    # The Daraja CheckoutRequestID for the in-flight STK push. Lives on the order
+    # rather than in a settings row so the callback can find its order with one
+    # indexed lookup, inside the same transaction that created the order - a
+    # callback can and does arrive before a separate write would have committed,
+    # and a payment that cannot be matched to an order is a payment lost.
+    mpesa_checkout_request_id = db.Column(db.String(120))
     payment_status = db.Column(db.String(20), default='pending')  # pending, completed, failed
     payment_method = db.Column(db.String(30), default='mpesa')
     protection_status = db.Column(db.String(30), default='held')  # held, released, disputed, refunded
@@ -1154,21 +1163,210 @@ class Setting(db.Model):
     value = db.Column(db.Text)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    @classmethod
-    def get(cls, key, default=''):
-        s = cls.query.filter_by(key=key).first()
-        return s.value if s else default
+    # Configuration is read dozens of times per request (payment credentials, SMTP
+    # details, feature flags, coin rates) and changes a few times a week. Without
+    # a cache each page render is dozens of round trips to the same handful of
+    # rows. TTL rather than explicit invalidation only, because several gunicorn
+    # workers each hold their own copy: a write invalidates locally and the other
+    # workers catch up within the TTL. Keep it short enough that an admin saving a
+    # setting sees it take effect while they are still looking at the page.
+    _cache = TTLCache(
+        ttl_seconds=float_env('SETTING_CACHE_TTL_SECONDS', 30.0),
+        max_entries=int_env('SETTING_CACHE_MAX_ENTRIES', 4096),
+        name='settings',
+    )
 
     @classmethod
-    def set(cls, key, value):
+    def cache_stats(cls):
+        return cls._cache.stats()
+
+    @classmethod
+    def invalidate_cache(cls, key=None):
+        if key is None:
+            cls._cache.clear()
+        else:
+            cls._cache.invalidate(key)
+
+    @classmethod
+    def get(cls, key, default=''):
+        """Read a setting, going to the database at most once per TTL per worker.
+
+        The row's value is cached, never the resolved default, because the same
+        key is read with different defaults from different call sites. A missing
+        row is cached as None so that absent optional config (the common case for
+        unset credentials) does not re-query on every read.
+        """
+        cached = cls._cache.lookup(key)
+        if cached is not CACHE_MISS:
+            return default if cached is None else cached
+        row = cls.query.filter_by(key=key).first()
+        value = row.value if row else None
+        cls._cache.set(key, value)
+        return default if value is None else value
+
+    @classmethod
+    def set(cls, key, value, commit=True):
+        """Write a setting.
+
+        ``commit`` exists because this used to commit unconditionally, which meant
+        any caller writing a setting mid-flow also committed that flow's partial
+        work. Callers inside a larger transaction pass commit=False and let the
+        surrounding code decide when the unit of work is complete.
+        """
         s = cls.query.filter_by(key=key).first()
         if s:
             s.value = str(value)
         else:
             s = cls(key=key, value=str(value))
             db.session.add(s)
-        db.session.commit()
+        if commit:
+            db.session.commit()
+        # Invalidate after the write so a concurrent reader on this worker cannot
+        # repopulate the cache from the pre-write state.
+        cls._cache.invalidate(key)
         return s
+
+    @classmethod
+    def delete(cls, key, commit=True):
+        cls.query.filter_by(key=key).delete(synchronize_session=False)
+        if commit:
+            db.session.commit()
+        cls._cache.invalidate(key)
+
+    @classmethod
+    def bump_counter(cls, key, step=1, commit=True):
+        """Increment a numeric setting and return the new value.
+
+        Counters cannot go through ``get``: a cached read is by definition out of
+        date, and read-then-write on a stale number silently loses increments.
+        This reads the row directly with a row lock (a no-op on SQLite, a real
+        lock on PostgreSQL) so two workers counting the same event both land.
+        """
+        query = cls.query.filter_by(key=key)
+        try:
+            row = query.with_for_update().first()
+        except Exception:
+            # Backends without row locking (or a session already in a state that
+            # forbids it) still get the increment, just without the guarantee.
+            db.session.rollback()
+            row = cls.query.filter_by(key=key).first()
+        try:
+            current = int(float(row.value)) if row and row.value not in (None, '') else 0
+        except (TypeError, ValueError):
+            current = 0
+        total = current + int(step)
+        if row:
+            row.value = str(total)
+        else:
+            db.session.add(cls(key=key, value=str(total)))
+        if commit:
+            db.session.commit()
+        cls._cache.invalidate(key)
+        return total
+
+
+# ============================================================================
+# RUNTIME INFRASTRUCTURE
+#
+# Three tables that exist to keep the request path fast and bounded. None of
+# them hold business data: they can all be truncated on a running system
+# without losing anything a customer would notice.
+# ============================================================================
+
+class EphemeralKV(db.Model):
+    """Short-lived values that must be visible to every worker.
+
+    The barcode-scanner handoff is the reason this exists: a phone posts a scan
+    to whichever worker answers, and the till polls for it from a different
+    worker, so an in-process dict cannot carry it. These used to be written into
+    the settings table, one permanent row per user, which meant the config table
+    grew with the user base and never shrank.
+
+    Every row carries an expiry and the sweeper deletes what has passed it, so
+    the table's size is bounded by how many handoffs are in flight rather than by
+    how many have ever happened.
+    """
+    __tablename__ = 'ephemeral_kv'
+    __table_args__ = (
+        db.Index('ix_ephemeral_kv_expires', 'expires_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(160), unique=True, nullable=False)
+    value = db.Column(db.Text)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    @property
+    def is_expired(self):
+        return (self.expires_at or datetime.utcnow()) <= datetime.utcnow()
+
+
+class OutboundMessage(db.Model):
+    """A queued email, SMS or notification fan-out.
+
+    Anything that talks to a third party or writes an unbounded number of rows
+    goes in here instead of running inside the request. An SMTP handshake is one
+    to twenty seconds of a worker thread; a fan-out to every follower of a large
+    shop is however many rows that shop has followers. Both used to happen while
+    a customer waited, and both are the reason a single slow provider could take
+    the whole site down.
+
+    Retries are scheduled rather than immediate, backing off per attempt, so a
+    provider outage drains slowly instead of hammering a service that is already
+    struggling.
+    """
+    __tablename__ = 'outbound_messages'
+    __table_args__ = (
+        # The drain query: due work, oldest first.
+        db.Index('ix_outbound_status_next_attempt', 'status', 'next_attempt_at'),
+        db.Index('ix_outbound_channel_status', 'channel', 'status'),
+        db.Index('ix_outbound_created', 'created_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    # email, sms, notification_fanout
+    channel = db.Column(db.String(30), nullable=False)
+    recipient = db.Column(db.String(240))
+    subject = db.Column(db.String(300))
+    body = db.Column(db.Text)
+    # JSON blob for channels that need structured input (fan-out targets, etc).
+    payload = db.Column(db.Text)
+    # queued, sending, sent, failed, dead
+    status = db.Column(db.String(20), default='queued', nullable=False)
+    attempts = db.Column(db.Integer, default=0, nullable=False)
+    max_attempts = db.Column(db.Integer, default=5, nullable=False)
+    next_attempt_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    last_error = db.Column(db.Text)
+    # Set by the worker that claimed the row, so a crashed claim can be spotted.
+    claimed_by = db.Column(db.String(120))
+    claimed_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    sent_at = db.Column(db.DateTime)
+
+    def backoff_seconds(self):
+        """Exponential, capped. Attempt 1 waits 30s, attempt 5 waits 8 minutes."""
+        return min(480, 30 * (2 ** max(0, (self.attempts or 1) - 1)))
+
+
+class JobLock(db.Model):
+    """A lease that lets exactly one worker run a scheduled job.
+
+    Background jobs were started inside the app process, so every gunicorn
+    worker ran its own copy of every schedule - N workers meant N concurrent
+    runs of the same job, N times the outbound scraping, and racing writes.
+
+    A database lease rather than a file lock because the deployment can be more
+    than one machine, and a file lock only coordinates the workers that happen to
+    share a filesystem. The holder renews periodically; if it dies, the lease
+    expires and another worker picks the job up without anyone intervening.
+    """
+    __tablename__ = 'job_locks'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), unique=True, nullable=False)
+    holder = db.Column(db.String(120))
+    acquired_at = db.Column(db.DateTime)
+    expires_at = db.Column(db.DateTime)
+    last_run_at = db.Column(db.DateTime)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class AuditLog(db.Model):

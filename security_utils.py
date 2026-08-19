@@ -130,8 +130,15 @@ def generate_csrf_token():
 
 # Safe file extensions - no executables
 SAFE_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-SAFE_DIGITAL_EXTENSIONS = {'pdf', 'zip', 'epub', 'mobi', 'mp3', 'mp4', 'jpg', 'jpeg', 'png'}
-DANGEROUS_EXTENSIONS = {'exe', 'msi', 'apk', 'bat', 'cmd', 'com', 'sh', 'bash', 'dll', 'so', 'dylib'}
+# The Office formats here are the XML ones only. docx, pptx and xlsx cannot carry
+# macros at all - that is what the docm/pptm/xlsm variants are for, and those stay
+# out. Notes and assignments are usually written in Word, so leaving them out would
+# mean rejecting most of what a tutor has to sell.
+SAFE_DIGITAL_EXTENSIONS = {'pdf', 'zip', 'epub', 'mobi', 'mp3', 'mp4', 'jpg', 'jpeg', 'png',
+                           'docx', 'pptx', 'xlsx'}
+DANGEROUS_EXTENSIONS = {'exe', 'msi', 'apk', 'bat', 'cmd', 'com', 'sh', 'bash', 'dll', 'so', 'dylib',
+                        'docm', 'pptm', 'xlsm', 'xlsb', 'dotm', 'ps1', 'vbs', 'js', 'jar', 'scr',
+                        'lnk', 'reg', 'hta', 'msc', 'cpl', 'pif'}
 
 
 def is_safe_file(filename, file_type='image'):

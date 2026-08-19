@@ -33,22 +33,37 @@ def _requires_persistent_database():
     return os.environ.get('FLASK_ENV') == 'production' or _looks_hosted()
 
 
+def _int_env(name, default):
+    try:
+        return int(str(os.environ.get(name, '')).strip() or default)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _engine_options(uri):
     """Pool settings tuned per backend.
 
-    SQLite needs a longer lock timeout; server backends need bounded pools so
-    that gunicorn workers x pool size stays under the provider connection cap
-    (Render/Railway Postgres plans typically allow ~100 total).
+    SQLite needs a longer lock timeout; server backends get a pool sized by
+    scale.pool_plan so that workers x (pool_size + max_overflow) stays under the
+    provider connection cap (Render/Railway Postgres plans typically allow ~100).
     """
     if uri.startswith('sqlite'):
         return {'pool_pre_ping': True, 'connect_args': {'timeout': 30}}
+    from scale import pool_plan
+    pool_size, max_overflow, workers = pool_plan()
+    # Recorded rather than logged: config is imported before logging is set up, and
+    # the one thing an operator needs on a "too many clients" page is this figure.
+    os.environ.setdefault(
+        'DB_CONNECTION_PLAN',
+        f'{workers} workers x ({pool_size} pooled + {max_overflow} overflow) '
+        f'= up to {workers * (pool_size + max_overflow)} connections')
     return {
         'pool_pre_ping': True,
         # Hosted Postgres drops idle connections; recycle before they go stale.
-        'pool_recycle': int(os.environ.get('DB_POOL_RECYCLE', '280')),
-        'pool_size': int(os.environ.get('DB_POOL_SIZE', '5')),
-        'max_overflow': int(os.environ.get('DB_MAX_OVERFLOW', '5')),
-        'pool_timeout': int(os.environ.get('DB_POOL_TIMEOUT', '30')),
+        'pool_recycle': _int_env('DB_POOL_RECYCLE', 280),
+        'pool_size': pool_size,
+        'max_overflow': max_overflow,
+        'pool_timeout': _int_env('DB_POOL_TIMEOUT', 30),
         'connect_args': {},
     }
 

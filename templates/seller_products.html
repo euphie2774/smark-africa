@@ -12,9 +12,14 @@
                 <i class="fas fa-location-dot text-danger ms-2 me-1"></i>{{ storefront.location_label or 'address on file' }}
             </p>
         </div>
-        <a href="{{ url_for('storefront_apply') }}" class="btn btn-outline-secondary">
-            <i class="fas fa-store me-1"></i>Storefront details
-        </a>
+        <div class="d-flex gap-2">
+            <a href="{{ url_for('seller_products_bulk') }}" class="btn btn-primary">
+                <i class="fas fa-layer-group me-1"></i>Bulk upload downloads
+            </a>
+            <a href="{{ url_for('storefront_apply') }}" class="btn btn-outline-secondary">
+                <i class="fas fa-store me-1"></i>Storefront details
+            </a>
+        </div>
     </div>
 
     <div class="row g-4">
@@ -97,6 +102,31 @@
                             {% endfor %}
                         </select>
 
+                        <div class="border rounded p-3 mb-3">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="is_digital"
+                                       id="isDigital" value="1"
+                                       {% if product and product.is_digital %}checked{% endif %}>
+                                <label class="form-check-label fw-semibold" for="isDigital">
+                                    This is a download, not a physical item
+                                </label>
+                            </div>
+                            <div id="digitalFields" class="mt-2 {% if not (product and product.is_digital) %}d-none{% endif %}">
+                                <label class="form-label small">File buyers download</label>
+                                <input type="file" name="digital_file" class="form-control form-control-sm mb-2">
+                                {% if product and product.file_path %}
+                                <div class="form-text mb-2">
+                                    <i class="fas fa-paperclip me-1"></i>A file is already attached.
+                                    Choose another only to replace it.
+                                </div>
+                                {% endif %}
+                                <div class="form-text mb-0">
+                                    Stock, weight and condition are ignored for downloads, and delivery
+                                    is always free.
+                                </div>
+                            </div>
+                        </div>
+
                         <label class="form-label">Photos</label>
                         <input type="file" name="product_images" class="form-control mb-2" multiple
                                accept="image/png,image/jpeg,image/gif,image/webp">
@@ -175,7 +205,10 @@
             <div class="card border-0 shadow-sm">
                 <div class="card-header bg-white d-flex justify-content-between align-items-center">
                     <h5 class="mb-0">Your listings</h5>
-                    <span class="text-muted small">{{ products|length }} product{{ 's' if products|length != 1 }}</span>
+                    <span class="text-muted small">
+                        {{ pagination.total if pagination else products|length }}
+                        product{{ 's' if (pagination.total if pagination else products|length) != 1 }}
+                    </span>
                 </div>
                 <div class="card-body p-0">
                     <div class="table-responsive">
@@ -200,7 +233,11 @@
                                             {% endif %}
                                             <div>
                                                 <div class="fw-semibold">{{ item.name[:48] }}</div>
-                                                {% if item.has_location %}
+                                                {% if item.is_digital %}
+                                                <div class="small text-muted">
+                                                    <i class="fas fa-file-arrow-down text-primary me-1"></i>Download
+                                                </div>
+                                                {% elif item.has_location %}
                                                 <div class="small text-muted">
                                                     <i class="fas fa-location-dot text-danger me-1"></i>{{ item.location_display }}
                                                 </div>
@@ -213,7 +250,7 @@
                                         </div>
                                     </td>
                                     <td>KSh {{ "%.2f"|format(item.discounted_price) }}</td>
-                                    <td>{{ item.stock }}</td>
+                                    <td>{% if item.is_digital %}<span class="text-muted">&infin;</span>{% else %}{{ item.stock }}{% endif %}</td>
                                     <td>
                                         {% if item.review_status != 'approved' %}
                                         <span class="badge bg-warning text-dark">Awaiting review</span>
@@ -251,6 +288,23 @@
                         </table>
                     </div>
                 </div>
+                {% if pagination and pagination.pages > 1 %}
+                <div class="card-footer bg-white">
+                    <nav aria-label="Listing pages">
+                        <ul class="pagination pagination-sm justify-content-center mb-0">
+                            {% if pagination.has_prev %}
+                            <li class="page-item"><a class="page-link" href="{{ url_for('seller_products', page=pagination.prev_num) }}">Previous</a></li>
+                            {% endif %}
+                            <li class="page-item disabled">
+                                <span class="page-link">Page {{ pagination.page }} of {{ pagination.pages }}</span>
+                            </li>
+                            {% if pagination.has_next %}
+                            <li class="page-item"><a class="page-link" href="{{ url_for('seller_products', page=pagination.next_num) }}">Next</a></li>
+                            {% endif %}
+                        </ul>
+                    </nav>
+                </div>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -259,6 +313,10 @@
 
 {% block scripts %}
 <script>
+document.getElementById('isDigital')?.addEventListener('change', function () {
+    document.getElementById('digitalFields')?.classList.toggle('d-none', !this.checked);
+});
+
 document.getElementById('useMyLocation')?.addEventListener('click', function () {
     if (!navigator.geolocation) {
         alert('This browser cannot share a location.');
