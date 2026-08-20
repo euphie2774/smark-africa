@@ -1,0 +1,457 @@
+{% extends "base.html" %}
+{% block title %}Bulk upload documents - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+        <div>
+            <h1 class="fw-bold mb-1">Bulk upload documents</h1>
+            <p class="text-muted mb-0">
+                Exams, notes, past papers, revision packs. Pick every file once and
+                each one becomes its own listing, priced and described from the
+                settings below.
+            </p>
+        </div>
+        <a href="{{ url_for('admin_products') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-arrow-left me-1"></i>Back to products
+        </a>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-5">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h5 class="mb-1">Settings for the whole batch</h5>
+                    <p class="text-muted small">
+                        Every file gets these. The listing name comes from the filename,
+                        so <code>NUR-201_Final_Exam_2024.pdf</code> lists as
+                        <em>NUR 201 Final Exam 2024</em>.
+                    </p>
+
+                    <form id="bulkForm" onsubmit="return false;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+
+                        <label class="form-label">Category</label>
+                        <select name="category_id" class="form-select mb-3">
+                            <option value="">Uncategorised</option>
+                            {% for category in categories %}
+                            <option value="{{ category.id }}">{{ category.name }}</option>
+                            {% endfor %}
+                        </select>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-7">
+                                <label class="form-label">Price each (KSh) *</label>
+                                <input name="selling_price" type="number" step="0.01" min="1"
+                                       class="form-control" required placeholder="250">
+                            </div>
+                            <div class="col-5">
+                                <label class="form-label">Discount %</label>
+                                <input name="discount_percent" type="number" step="1" min="0" max="99"
+                                       class="form-control" value="0">
+                            </div>
+                        </div>
+
+                        <label class="form-label">Commission %</label>
+                        <input name="commission_percent" type="number" step="0.5" min="10" max="15"
+                               class="form-control mb-3" value="15">
+
+                        <label class="form-label">Name prefix <span class="text-muted">(optional)</span></label>
+                        <input name="name_prefix" class="form-control mb-3" maxlength="60"
+                               placeholder="e.g. Nursing Year 2 -">
+
+                        <label class="form-label">Short description</label>
+                        <input name="short_description" class="form-control mb-3" maxlength="300"
+                               placeholder="One line buyers see on the card">
+
+                        <label class="form-label">Full details</label>
+                        <textarea name="description" class="form-control mb-3" rows="3"
+                                  placeholder="What the pack covers, which course or year, page count"></textarea>
+
+                        <label class="form-label">Shared cover image <span class="text-muted">(optional)</span></label>
+                        <input type="file" name="cover_image" id="coverImage" accept="image/*"
+                               class="form-control mb-3">
+
+                        <div class="form-check mb-2">
+                            <input class="form-check-input" type="checkbox" name="first_page_preview"
+                                   id="firstPagePreview" checked>
+                            <label class="form-check-label" for="firstPagePreview">
+                                Let buyers preview the first page
+                            </label>
+                        </div>
+
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" name="is_active"
+                                   id="isActive" checked>
+                            <label class="form-check-label" for="isActive">
+                                Publish once uploaded
+                            </label>
+                        </div>
+
+                        <div class="alert alert-warning py-2 small">
+                            <div class="form-check mb-0">
+                                <input class="form-check-input" type="checkbox" name="owns_rights"
+                                       id="ownsRights" required>
+                                <label class="form-check-label" for="ownsRights">
+                                    <strong>The platform holds the rights to sell these files.</strong>
+                                    They are original work, licensed, or cleared for resale.
+                                </label>
+                            </div>
+                        </div>
+
+                        <p class="small text-muted mb-0">
+                            <i class="fas fa-circle-info me-1"></i>Admin uploads go on sale
+                            immediately. Sellers' bulk listings still wait for a review.
+                        </p>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body">
+                    <h5 class="mb-3">Choose your files</h5>
+
+                    <div id="dropZone" class="border border-2 border-dashed rounded p-4 text-center mb-3"
+                         style="cursor:pointer;">
+                        <i class="fas fa-cloud-arrow-up fa-2x text-muted mb-2 d-block"></i>
+                        <div class="fw-semibold">Drop files here, or click to browse</div>
+                        <div class="small text-muted mt-1">
+                            {{ allowed_extensions|join(', ') }} &middot;
+                            up to {{ (max_file_bytes / 1048576)|round(0, 'floor')|int }}MB per file
+                        </div>
+                        <input type="file" id="fileInput" multiple class="d-none"
+                               accept=".{{ allowed_extensions|join(',.') }}">
+                    </div>
+
+                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                        <button id="startBtn" class="btn btn-primary" disabled>
+                            <i class="fas fa-upload me-1"></i>Upload <span id="startCount">0</span> files
+                        </button>
+                        <button id="clearBtn" class="btn btn-outline-secondary" disabled>Clear list</button>
+                        <span id="totalSize" class="text-muted small ms-auto"></span>
+                    </div>
+
+                    <div id="progressWrap" class="mt-3 d-none">
+                        <div class="progress" style="height:1.25rem;">
+                            <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated"
+                                 style="width:0%">0%</div>
+                        </div>
+                        <div id="progressNote" class="small text-muted mt-1"></div>
+                    </div>
+
+                    <div id="summary" class="mt-3"></div>
+                </div>
+            </div>
+
+            <div class="card border-0 shadow-sm">
+                <div class="card-body p-0">
+                    <div class="table-responsive" style="max-height:26rem;overflow-y:auto;">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead class="table-light sticky-top">
+                                <tr>
+                                    <th>File</th>
+                                    <th>Size</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="fileRows">
+                                <tr id="emptyRow">
+                                    <td colspan="3" class="text-center text-muted py-5">
+                                        <i class="fas fa-folder-open fa-2x mb-2 d-block"></i>
+                                        Nothing selected yet.
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    'use strict';
+
+    // Every limit comes from the server, so raising an env var moves the browser
+    // with it instead of leaving the two disagreeing about what fits in a request.
+    const MAX_FILES_PER_BATCH = {{ max_files_per_request }};
+    const REQUEST_BUDGET = {{ request_budget_bytes }};
+    const MAX_FILE_BYTES = {{ max_file_bytes }};
+    const UPLOAD_URL = "{{ url_for('admin_products_bulk_upload') }}";
+    const COVER_URL = "{{ url_for('admin_products_bulk_cover') }}";
+    const PRODUCTS_URL = "{{ url_for('admin_products') }}";
+    const ALLOWED = new Set({{ allowed_extensions|tojson }});
+
+    const form = document.getElementById('bulkForm');
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const startBtn = document.getElementById('startBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const startCount = document.getElementById('startCount');
+    const totalSize = document.getElementById('totalSize');
+    const fileRows = document.getElementById('fileRows');
+    const emptyRow = document.getElementById('emptyRow');
+    const progressWrap = document.getElementById('progressWrap');
+    const progressBar = document.getElementById('progressBar');
+    const progressNote = document.getElementById('progressNote');
+    const summary = document.getElementById('summary');
+    const coverInput = document.getElementById('coverImage');
+
+    let picked = [];
+    let running = false;
+
+    function humanSize(bytes) {
+        const units = ['B', 'KB', 'MB', 'GB'];
+        let value = bytes, unit = 0;
+        while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+        return (unit === 0 ? value.toFixed(0) : value.toFixed(1)) + ' ' + units[unit];
+    }
+
+    function extensionOf(name) {
+        const parts = (name || '').split('.');
+        return parts.length > 1 ? parts.pop().toLowerCase() : '';
+    }
+
+    // Rejected here as well as on the server, so someone who picked two hundred
+    // files finds out about the one oversized one before waiting for the upload.
+    function rejectReason(file) {
+        if (!ALLOWED.has(extensionOf(file.name))) return 'File type not accepted';
+        if (file.size > MAX_FILE_BYTES) return 'Over ' + humanSize(MAX_FILE_BYTES);
+        if (file.size === 0) return 'Empty file';
+        return null;
+    }
+
+    function render() {
+        fileRows.querySelectorAll('tr[data-row]').forEach(row => row.remove());
+        emptyRow.classList.toggle('d-none', picked.length > 0);
+        let bytes = 0;
+        picked.forEach((entry, index) => {
+            bytes += entry.file.size;
+            const row = document.createElement('tr');
+            row.setAttribute('data-row', String(index));
+            row.innerHTML =
+                '<td class="text-break small">' + escapeHtml(entry.file.name) + '</td>' +
+                '<td class="small text-nowrap">' + humanSize(entry.file.size) + '</td>' +
+                '<td class="small" data-status></td>';
+            fileRows.appendChild(row);
+            setStatus(index, entry.status, entry.detail);
+        });
+        totalSize.textContent = picked.length
+            ? picked.length + ' files, ' + humanSize(bytes) + ' total'
+            : '';
+        startCount.textContent = String(picked.filter(e => e.status === 'ready').length);
+        const ready = picked.some(e => e.status === 'ready');
+        startBtn.disabled = running || !ready;
+        clearBtn.disabled = running || picked.length === 0;
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    const BADGES = {
+        ready: ['bg-secondary', 'Ready'],
+        uploading: ['bg-info text-dark', 'Uploading'],
+        done: ['bg-success', 'Listed'],
+        review: ['bg-warning text-dark', 'Awaiting review'],
+        failed: ['bg-danger', 'Failed'],
+        skipped: ['bg-danger', 'Skipped']
+    };
+
+    function setStatus(index, status, detail) {
+        picked[index].status = status;
+        picked[index].detail = detail || '';
+        const cell = fileRows.querySelector('tr[data-row="' + index + '"] [data-status]');
+        if (!cell) return;
+        const badge = BADGES[status] || BADGES.ready;
+        cell.innerHTML = '<span class="badge ' + badge[0] + '">' + badge[1] + '</span>' +
+            (picked[index].detail
+                ? '<div class="text-muted mt-1">' + escapeHtml(picked[index].detail) + '</div>'
+                : '');
+    }
+
+    function addFiles(list) {
+        Array.from(list).forEach(file => {
+            const duplicate = picked.some(e =>
+                e.file.name === file.name && e.file.size === file.size);
+            if (duplicate) return;
+            const reason = rejectReason(file);
+            picked.push({
+                file: file,
+                status: reason ? 'skipped' : 'ready',
+                detail: reason || ''
+            });
+        });
+        render();
+    }
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
+    ['dragenter', 'dragover'].forEach(name => dropZone.addEventListener(name, event => {
+        event.preventDefault();
+        dropZone.classList.add('border-primary', 'bg-light');
+    }));
+    ['dragleave', 'drop'].forEach(name => dropZone.addEventListener(name, event => {
+        event.preventDefault();
+        dropZone.classList.remove('border-primary', 'bg-light');
+    }));
+    dropZone.addEventListener('drop', event => {
+        if (event.dataTransfer && event.dataTransfer.files) addFiles(event.dataTransfer.files);
+    });
+    clearBtn.addEventListener('click', () => { picked = []; summary.innerHTML = ''; render(); });
+
+    // Packed by total bytes, not by count. MAX_CONTENT_LENGTH applies to the whole
+    // request body, so eight 20MB files in one post is a 413 that never reaches a
+    // view and so cannot report which file was at fault.
+    function buildBatches(entries) {
+        const batches = [];
+        let current = [], bytes = 0;
+        entries.forEach(entry => {
+            const tooMany = current.length >= MAX_FILES_PER_BATCH;
+            const tooBig = current.length && (bytes + entry.file.size) > REQUEST_BUDGET;
+            if (tooMany || tooBig) { batches.push(current); current = []; bytes = 0; }
+            current.push(entry);
+            bytes += entry.file.size;
+        });
+        if (current.length) batches.push(current);
+        return batches;
+    }
+
+    function sharedFields() {
+        const data = new FormData();
+        new FormData(form).forEach((value, key) => data.append(key, value));
+        return data;
+    }
+
+    function missingRequired() {
+        const price = parseFloat(form.querySelector('[name="selling_price"]').value || '0');
+        if (!(price > 0)) return 'Set a price above zero first.';
+        if (!document.getElementById('ownsRights').checked) {
+            return 'Confirm the rights to sell these files.';
+        }
+        return null;
+    }
+
+    async function postJson(url, body) {
+        const response = await fetch(url, {
+            method: 'POST',
+            body: body,
+            credentials: 'same-origin',
+            headers: {'X-CSRFToken': form.querySelector('[name="csrf_token"]').value}
+        });
+        // A 413 never reaches the view, so it comes back as HTML. Read the status
+        // rather than assuming anything that arrives is the JSON we asked for.
+        const type = response.headers.get('content-type') || '';
+        if (!type.includes('application/json')) {
+            throw new Error(response.status === 413
+                ? 'That batch was too large for one request.'
+                : 'Upload failed (' + response.status + ').');
+        }
+        const payload = await response.json();
+        if (!response.ok || payload.ok === false) {
+            throw new Error(payload.error || 'Upload failed.');
+        }
+        return payload;
+    }
+
+    async function uploadCover() {
+        if (!coverInput.files || !coverInput.files.length) return null;
+        const body = new FormData();
+        body.append('csrf_token', form.querySelector('[name="csrf_token"]').value);
+        body.append('cover_image', coverInput.files[0]);
+        try {
+            const payload = await postJson(COVER_URL, body);
+            return payload.cover_url || null;
+        } catch (error) {
+            // A missing cover is cosmetic; the listings are the point.
+            note('Cover image skipped: ' + error.message);
+            return null;
+        }
+    }
+
+    function note(text) { progressNote.textContent = text; }
+
+    startBtn.addEventListener('click', async () => {
+        const blocker = missingRequired();
+        if (blocker) { alert(blocker); return; }
+
+        const queue = picked.filter(entry => entry.status === 'ready');
+        if (!queue.length) return;
+
+        running = true;
+        render();
+        progressWrap.classList.remove('d-none');
+        summary.innerHTML = '';
+
+        note('Uploading cover image...');
+        const coverUrl = await uploadCover();
+
+        const batches = buildBatches(queue);
+        let done = 0, listed = 0, failedCount = 0;
+
+        for (let index = 0; index < batches.length; index++) {
+            const batch = batches[index];
+            batch.forEach(entry => setStatus(picked.indexOf(entry), 'uploading'));
+            note('Batch ' + (index + 1) + ' of ' + batches.length +
+                 ' - ' + batch.length + ' file' + (batch.length === 1 ? '' : 's'));
+
+            const body = sharedFields();
+            if (coverUrl) body.set('cover_url', coverUrl);
+            batch.forEach(entry => body.append('files', entry.file, entry.file.name));
+
+            try {
+                const payload = await postJson(UPLOAD_URL, body);
+                // Matched back by filename: the server reports per file, and the
+                // order it reports in is not something to rely on.
+                (payload.created || []).forEach(item => {
+                    const entry = batch.find(e => e.file.name === item.filename);
+                    if (entry) {
+                        setStatus(picked.indexOf(entry), item.review ? 'review' : 'done',
+                                  item.name);
+                    }
+                    listed++;
+                });
+                (payload.failed || []).forEach(item => {
+                    const entry = batch.find(e => e.file.name === item.filename);
+                    if (entry) setStatus(picked.indexOf(entry), 'failed', item.error);
+                    failedCount++;
+                });
+            } catch (error) {
+                // One bad batch does not stop the rest; the remaining files still
+                // have a good chance of going up.
+                batch.forEach(entry => setStatus(picked.indexOf(entry), 'failed', error.message));
+                failedCount += batch.length;
+            }
+
+            done += batch.length;
+            const percent = Math.round((done / queue.length) * 100);
+            progressBar.style.width = percent + '%';
+            progressBar.textContent = percent + '%';
+        }
+
+        progressBar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+        note('Finished.');
+        running = false;
+        render();
+
+        summary.innerHTML =
+            '<div class="alert ' + (failedCount ? 'alert-warning' : 'alert-success') + ' mb-0">' +
+            '<strong>' + listed + '</strong> listing' + (listed === 1 ? '' : 's') + ' created' +
+            (failedCount ? ', <strong>' + failedCount + '</strong> failed' : '') + '. ' +
+            '<a href="' + PRODUCTS_URL + '" class="alert-link">Review them in the product list</a>.' +
+            '</div>';
+    });
+
+    render();
+})();
+</script>
+{% endblock %}

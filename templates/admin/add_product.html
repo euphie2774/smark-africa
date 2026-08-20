@@ -86,6 +86,16 @@
                             <option value="refurbished" {{ 'selected' if condition == 'refurbished' }}>Refurbished</option>
                         </select>
                     </div>
+                    <div class="col-md-3 d-none" id="imeiField">
+                        <label class="form-label">
+                            IMEI <span class="text-muted small">(optional)</span>
+                        </label>
+                        <input name="device_imei" class="form-control" inputmode="numeric"
+                               maxlength="15" placeholder="15 digits">
+                        <div class="form-text">
+                            Registers the handset so nobody else can list it here.
+                        </div>
+                    </div>
                     <div class="col-md-3">
                         <label class="form-label">Sale Mode</label>
                         <select name="sale_mode" class="form-select">
@@ -279,7 +289,32 @@ const descriptionInput = document.querySelector('[name="description"]');
 const conditionInput = document.querySelector('[name="product_condition"]');
 const imageUrlInput = document.querySelector('[name="image_url"]');
 const digitalInput = document.querySelector('[name="is_digital"]');
+
+// The IMEI field only means anything for a used handset, so it appears when the
+// form is describing one. Same token list as the server's is_phone_listing, minus
+// the accessory blocklist, which is why it only ever shows a field rather than
+// gating anything: a wrong guess here costs nothing.
+const PHONE_HINTS = ['phone', 'iphone', 'galaxy', 'tecno', 'infinix', 'itel', 'redmi',
+                     'xiaomi', 'oppo', 'vivo', 'huawei', 'nokia', 'samsung', 'oneplus',
+                     'realme', 'pixel', 'handset'];
+const imeiField = document.getElementById('imeiField');
+
+function syncImeiField() {
+    if (!imeiField) return;
+    const used = ['second_hand', 'refurbished'].includes(conditionInput?.value);
+    const text = (nameInput?.value || '').toLowerCase();
+    const looksLikePhone = PHONE_HINTS.some(token => text.includes(token));
+    imeiField.classList.toggle('d-none', !(used && looksLikePhone));
+}
+conditionInput?.addEventListener('change', syncImeiField);
+nameInput?.addEventListener('input', syncImeiField);
+syncImeiField();
+// The price check runs while the form is still being filled in, so it is kept off
+// the typing path: a longer debounce, one in-flight request at a time, and nothing
+// sent at all until there is enough to check or anything has actually changed.
 let priceCheckTimer = null;
+let priceCheckAbort = null;
+let lastPriceCheckKey = '';
 
 function showMarketWarning(data) {
     if (!marketWarning) return;
@@ -325,20 +360,34 @@ function updateMarketSource(data) {
 function checkMarketPrice() {
     clearTimeout(priceCheckTimer);
     priceCheckTimer = setTimeout(() => {
-        if (!priceInput?.value || !nameInput?.value) return;
+        const name = (nameInput?.value || '').trim();
+        const price = priceInput?.value || '';
+        if (!price || name.length < 3) return;
+        // Nothing worth asking again about: the answer only depends on these.
+        const key = [name, price, buyingInput?.value || '', categoryInput?.value || ''].join('|');
+        if (key === lastPriceCheckKey) return;
+        // Cancel the previous request rather than race it. Without this a slow
+        // earlier response can land after a newer one and overwrite the warning
+        // with a verdict for a price that is no longer in the form.
+        priceCheckAbort?.abort();
+        priceCheckAbort = new AbortController();
         fetch("{{ url_for('admin_price_check_api') }}", {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
+            signal: priceCheckAbort.signal,
             body: JSON.stringify({
                 product_id: productId,
-                name: nameInput.value,
+                name: name,
                 category_id: categoryInput?.value || null,
-                selling_price: priceInput.value,
+                selling_price: price,
                 buying_price: buyingInput?.value || 0,
                 description: descriptionInput?.value || ''
             })
-        }).then(response => response.json()).then(showMarketWarning).catch(() => {});
-    }, 350);
+        }).then(response => response.json()).then(data => {
+            lastPriceCheckKey = key;
+            showMarketWarning(data);
+        }).catch(() => {});
+    }, 600);
 }
 
 [priceInput, buyingInput, nameInput, categoryInput].forEach(input => {

@@ -252,7 +252,16 @@
                                     <td>KSh {{ "%.2f"|format(item.discounted_price) }}</td>
                                     <td>{% if item.is_digital %}<span class="text-muted">&infin;</span>{% else %}{{ item.stock }}{% endif %}</td>
                                     <td>
-                                        {% if item.review_status != 'approved' %}
+                                        {% if item.review_status in ['pending_evidence', 'auto_rejected'] %}
+                                        <a href="{{ url_for('seller_phone_ownership', product_id=item.id) }}"
+                                           class="badge bg-danger text-decoration-none">
+                                            {% if item.review_status == 'auto_rejected' %}
+                                            Ownership not verified
+                                            {% else %}
+                                            Needs ownership proof
+                                            {% endif %}
+                                        </a>
+                                        {% elif (item.review_status or 'approved') != 'approved' %}
                                         <span class="badge bg-warning text-dark">Awaiting review</span>
                                         {% elif item.is_active %}
                                         <span class="badge bg-success">Live</span>

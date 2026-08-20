@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Phone ownership evidence - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-mobile-screen me-2"></i>Phone ownership evidence</h2>
+            <p class="text-muted mb-0 small">
+                Second-hand phones are scored automatically and pass at {{ '%.0f'|format(min_score) }} or above.
+                Only a seller's first phone listing waits here.
+            </p>
+        </div>
+        <a href="{{ url_for('admin_products') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-box me-1"></i> All products
+        </a>
+    </div>
+
+    <div class="btn-group mb-3" role="group">
+        <a href="{{ url_for('admin_phone_evidence', status='manual_second_review') }}"
+           class="btn btn-{{ 'primary' if status == 'manual_second_review' else 'outline-primary' }}">
+            Waiting on you
+            {% if waiting %}<span class="badge bg-light text-dark ms-1">{{ waiting }}</span>{% endif %}
+        </a>
+        <a href="{{ url_for('admin_phone_evidence', status='auto_rejected') }}"
+           class="btn btn-{{ 'primary' if status == 'auto_rejected' else 'outline-primary' }}">Auto-rejected</a>
+        <a href="{{ url_for('admin_phone_evidence', status='approved') }}"
+           class="btn btn-{{ 'primary' if status == 'approved' else 'outline-primary' }}">Approved</a>
+        <a href="{{ url_for('admin_phone_evidence', status='all') }}"
+           class="btn btn-{{ 'primary' if status not in ['manual_second_review', 'auto_rejected', 'approved'] else 'outline-primary' }}">All</a>
+    </div>
+
+    {% if not items %}
+    <div class="card border-0 shadow-sm">
+        <div class="card-body text-center text-muted py-5">
+            <i class="fas fa-check-circle fa-2x mb-2 d-block"></i>
+            Nothing here.
+            {% if status == 'manual_second_review' %}No first-time phone listing is waiting for a look.{% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    {% for item in items %}
+    <div class="card border-0 shadow-sm mb-3">
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-lg-5">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <div>
+                            <h5 class="mb-1">
+                                {% if item.product %}
+                                <a href="{{ url_for('admin_edit_product', pid=item.product_id) }}"
+                                   class="text-decoration-none">{{ item.product.name[:60] }}</a>
+                                {% else %}
+                                <span class="text-muted">Listing #{{ item.product_id }} removed</span>
+                                {% endif %}
+                            </h5>
+                            <div class="small text-muted">
+                                {{ item.user.username if item.user else 'Unknown seller' }}
+                                &middot; {{ item.created_at.strftime('%d %b %Y %H:%M') if item.created_at else '' }}
+                                {% if item.product %}&middot; KSh {{ '%.0f'|format(item.product.selling_price) }}{% endif %}
+                            </div>
+                        </div>
+                        {% if item.status == 'approved' %}
+                        <span class="badge bg-success">Approved</span>
+                        {% elif item.status == 'auto_rejected' %}
+                        <span class="badge bg-danger">Rejected</span>
+                        {% else %}
+                        <span class="badge bg-warning text-dark">Waiting</span>
+                        {% endif %}
+                    </div>
+
+                    <table class="table table-sm mb-2">
+                        <tbody>
+                            <tr>
+                                <th class="text-muted fw-normal small" style="width:45%">IMEI</th>
+                                <td><code>{{ item.imei }}</code>
+                                    {% if item.imei_valid %}
+                                    <i class="fas fa-check text-success ms-1" title="Checksum passes"></i>
+                                    {% else %}
+                                    <i class="fas fa-xmark text-danger ms-1" title="Checksum fails"></i>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            <tr>
+                                <th class="text-muted fw-normal small">Unique on the platform</th>
+                                <td>{{ 'Yes' if item.uniqueness_ok else 'No' }}</td>
+                            </tr>
+                            <tr>
+                                <th class="text-muted fw-normal small">IMEI photo quality</th>
+                                <td>{{ '%.0f'|format(item.photo_score or 0) }} / 25</td>
+                            </tr>
+                            <tr>
+                                <th class="text-muted fw-normal small">Purchase proof quality</th>
+                                <td>{{ '%.0f'|format(item.proof_score or 0) }} / 20</td>
+                            </tr>
+                            <tr>
+                                <th class="text-muted fw-normal small">Originality</th>
+                                <td>{{ '%.0f'|format(item.originality_score or 0) }} / 10</td>
+                            </tr>
+                            <tr class="border-top">
+                                <th class="small">Total</th>
+                                <td>
+                                    <strong class="{{ 'text-success' if (item.total_score or 0) >= min_score else 'text-danger' }}">
+                                        {{ '%.0f'|format(item.total_score or 0) }} / 100
+                                    </strong>
+                                    <span class="text-muted small">(pass at {{ '%.0f'|format(min_score) }})</span>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    {% if item.reasons %}
+                    <ul class="small text-muted mb-0 ps-3">
+                        {% for reason in item.reasons %}<li>{{ reason }}</li>{% endfor %}
+                    </ul>
+                    {% endif %}
+                </div>
+
+                <div class="col-lg-4">
+                    <div class="row g-2">
+                        <div class="col-6">
+                            <div class="small text-muted mb-1">IMEI on screen</div>
+                            {% if item.imei_photo_path %}
+                            <a href="{{ item.imei_photo_path }}" target="_blank" rel="noopener">
+                                <img src="{{ item.imei_photo_path }}" class="img-fluid rounded border"
+                                     alt="IMEI photo" loading="lazy">
+                            </a>
+                            {% else %}
+                            <div class="border rounded text-center text-muted small py-4">Not supplied</div>
+                            {% endif %}
+                        </div>
+                        <div class="col-6">
+                            <div class="small text-muted mb-1">Purchase proof</div>
+                            {% if item.proof_path %}
+                            <a href="{{ item.proof_path }}" target="_blank" rel="noopener">
+                                <img src="{{ item.proof_path }}" class="img-fluid rounded border"
+                                     alt="Purchase proof" loading="lazy">
+                            </a>
+                            {% else %}
+                            <div class="border rounded text-center text-muted small py-4">Not supplied</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-lg-3">
+                    {% if item.status == 'manual_second_review' %}
+                    <div class="small text-muted mb-2">
+                        Does the proof show this handset belongs to this seller? The score cannot read
+                        the words on a receipt - that part is yours.
+                    </div>
+                    <form method="POST"
+                          action="{{ url_for('admin_phone_evidence_decide', evidence_id=item.id, decision='approve') }}"
+                          class="mb-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input name="note" class="form-control form-control-sm mb-2"
+                               maxlength="300" placeholder="Note (optional)">
+                        <button class="btn btn-success btn-sm w-100">
+                            <i class="fas fa-check me-1"></i> Approve and publish
+                        </button>
+                    </form>
+                    <form method="POST"
+                          action="{{ url_for('admin_phone_evidence_decide', evidence_id=item.id, decision='reject') }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input name="note" class="form-control form-control-sm mb-2"
+                               maxlength="300" placeholder="Why not? The seller sees this.">
+                        <button class="btn btn-outline-danger btn-sm w-100">
+                            <i class="fas fa-xmark me-1"></i> Reject
+                        </button>
+                    </form>
+                    {% else %}
+                    <div class="small text-muted">
+                        {% if item.reviewer %}
+                        Settled by {{ item.reviewer.username }}
+                        {% if item.reviewed_at %}on {{ item.reviewed_at.strftime('%d %b %Y') }}{% endif %}.
+                        {% elif item.status == 'auto_rejected' %}
+                        Auto-rejected. The seller can send new photos at any time.
+                        {% else %}
+                        Passed automatically.
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+
+    {% if pagination and pagination.pages > 1 %}
+    <nav class="mt-3">
+        <ul class="pagination justify-content-center mb-0">
+            {% for p in pagination.iter_pages(left_edge=1, right_edge=1, left_current=2, right_current=2) %}
+                {% if p %}
+                <li class="page-item {{ 'active' if p == pagination.page }}">
+                    <a class="page-link" href="{{ url_for('admin_phone_evidence', page=p, status=status) }}">{{ p }}</a>
+                </li>
+                {% else %}
+                <li class="page-item disabled"><span class="page-link">…</span></li>
+                {% endif %}
+            {% endfor %}
+        </ul>
+    </nav>
+    {% endif %}
+</div>
+{% endblock %}

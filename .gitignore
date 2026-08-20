@@ -221,3 +221,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Uploaded files that must never enter the repository. phone_docs holds
+# second-hand phone ownership evidence, seller_docs holds identity captures, and
+# digital holds the files buyers have paid for - committing any of them hands them
+# to everyone with repo access, and git keeps them after the file is deleted.
+# These rules only stop new ones: seller_docs/ and digital/ already have tracked
+# files from before this, which need `git rm --cached` plus a history rewrite to
+# remove properly.
+static/uploads/phone_docs/
+static/uploads/seller_docs/
+static/uploads/digital/
+static/uploads/kyc/

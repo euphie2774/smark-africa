@@ -5,8 +5,41 @@
 <div class="container-fluid py-4">
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h2><i class="fas fa-box me-2"></i>Manage Products</h2>
-        <a href="{{ url_for('admin_add_product') }}" class="btn btn-success"><i class="fas fa-plus me-1"></i> Add Product</a>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="{{ url_for('admin_phone_evidence') }}" class="btn btn-outline-warning">
+                <i class="fas fa-mobile-screen me-1"></i> Phone evidence
+            </a>
+            <a href="{{ url_for('admin_products_bulk') }}" class="btn btn-outline-primary">
+                <i class="fas fa-file-arrow-up me-1"></i> Bulk documents
+            </a>
+            <a href="{{ url_for('admin_add_product') }}" class="btn btn-success"><i class="fas fa-plus me-1"></i> Add Product</a>
+        </div>
     </div>
+
+    {# Without these tabs a listing parked by the second-hand branch is invisible:
+       it is not active, so it never shows on the shop, and this page's default
+       ordering buries it behind twenty newer rows. The counts are on the tabs
+       rather than in a banner so a growing backlog is visible without clicking. #}
+    <ul class="nav nav-pills mb-3 small">
+        <li class="nav-item">
+            <a class="nav-link {{ 'active' if not review }}"
+               href="{{ url_for('admin_products') }}">All</a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {{ 'active' if review == 'pending' }}"
+               href="{{ url_for('admin_products', review='pending') }}">
+                Needs review
+                {% if pending_count %}<span class="badge bg-danger ms-1">{{ pending_count }}</span>{% endif %}
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {{ 'active' if review == 'evidence' }}"
+               href="{{ url_for('admin_products', review='evidence') }}">
+                Ownership evidence
+                {% if evidence_count %}<span class="badge bg-warning text-dark ms-1">{{ evidence_count }}</span>{% endif %}
+            </a>
+        </li>
+    </ul>
 
     <div class="card border-0 shadow-sm">
         <div class="card-body p-0">
@@ -24,6 +57,7 @@
                             <th>Type</th>
                             <th>Stock</th>
                             <th>Active</th>
+                            <th>Review</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -63,6 +97,19 @@
                                 </span>
                             </td>
                             <td>
+                                {% set status = product.review_status or 'approved' %}
+                                {% set tone = {'approved': 'success', 'auto_rejected': 'danger',
+                                               'pending_evidence': 'warning',
+                                               'manual_second_review': 'info',
+                                               'admin_review': 'secondary'}.get(status, 'secondary') %}
+                                <span class="badge bg-{{ tone }}{{ ' text-dark' if tone == 'warning' }}">
+                                    {{ status.replace('_', ' ')|title }}
+                                </span>
+                                {% if status in ('pending_evidence', 'auto_rejected', 'manual_second_review') %}
+                                <a href="{{ url_for('admin_phone_evidence') }}" class="d-block small text-muted">evidence</a>
+                                {% endif %}
+                            </td>
+                            <td>
                                 <div class="btn-group btn-group-sm">
                                     <form method="POST" action="{{ url_for('admin_toggle_hot_sale', pid=product.id) }}" style="display:inline;">
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
@@ -83,12 +130,39 @@
                             </td>
                         </tr>
                         {% else %}
-                        <tr><td colspan="11" class="text-center text-muted py-4">No products found</td></tr>
+                        <tr><td colspan="12" class="text-center text-muted py-4">No products found</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </div>
         </div>
     </div>
+
+    {# The route has always paginated at 20; until now there was no pager, so an
+       admin could only ever see the newest twenty products. Window the page
+       numbers rather than printing them all - at a million listings a full run of
+       links is its own performance problem. #}
+    {% if pagination and pagination.pages > 1 %}
+    <nav class="mt-3">
+        <ul class="pagination pagination-sm justify-content-center mb-0">
+            <li class="page-item {{ 'disabled' if not pagination.has_prev }}">
+                <a class="page-link" href="{{ url_for('admin_products', review=review or None, page=pagination.prev_num or 1) }}">Previous</a>
+            </li>
+            {% for p in pagination.iter_pages(left_edge=1, left_current=2, right_current=2, right_edge=1) %}
+                {% if p %}
+                <li class="page-item {{ 'active' if p == pagination.page }}">
+                    <a class="page-link" href="{{ url_for('admin_products', review=review or None, page=p) }}">{{ p }}</a>
+                </li>
+                {% else %}
+                <li class="page-item disabled"><span class="page-link">…</span></li>
+                {% endif %}
+            {% endfor %}
+            <li class="page-item {{ 'disabled' if not pagination.has_next }}">
+                <a class="page-link" href="{{ url_for('admin_products', review=review or None, page=pagination.next_num or pagination.page) }}">Next</a>
+            </li>
+        </ul>
+        <p class="text-center text-muted small mt-2 mb-0">{{ pagination.total }} listing{{ 's' if pagination.total != 1 }}</p>
+    </nav>
+    {% endif %}
 </div>
 {% endblock %}

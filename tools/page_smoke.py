@@ -24,7 +24,7 @@ from sqlalchemy import event
 
 import main as app_module
 from main import app, db, nav_categories
-from models import Category
+from models import Category, Product, User
 
 FAILURES = []
 TAG = 'pagesmoke'
@@ -57,6 +57,10 @@ class StatementCounter:
 def teardown():
     db.session.rollback()
     try:
+        Product.query.filter(Product.slug.like(f'{TAG}%')).delete(
+            synchronize_session=False)
+        User.query.filter(User.username.like(f'{TAG}%')).delete(
+            synchronize_session=False)
         Category.query.filter(Category.slug.like(f'{TAG}%')).delete(
             synchronize_session=False)
         db.session.commit()
@@ -139,6 +143,115 @@ def run():
         # nav is not part of it, which a category SELECT would show up as.
         check('the home page runs a small, bounded number of queries',
               counter.count < 25, counter.count)
+
+    check_price_check()
+
+
+def check_price_check():
+    """The create-product page's live price advisory, under a growing catalog.
+
+    This is the endpoint that made /admin/products/add unresponsive: it fired on
+    every pause in typing and each call loaded eighty full Product rows to tokenise
+    their descriptions in Python. The fix was to narrow the columns and cache the
+    scan, and the property worth asserting is comparative rather than absolute -
+    ten more products in the catalog must not mean ten more anything per keystroke.
+    """
+    print('the price advisory does not grow with the catalog')
+    admin = User(username=f'{TAG}_admin', email=f'{TAG}_admin@example.invalid')
+    admin.set_password('x')
+    admin.is_admin = True
+    db.session.add(admin)
+    db.session.commit()
+    admin_id = admin.id
+
+    category = Category(name=f'{TAG} gadgets', slug=f'{TAG}-gadgets', is_active=True)
+    db.session.add(category)
+    db.session.commit()
+    category_id = category.id
+    app_module.invalidate_nav_categories()
+
+    def seed(count, offset=0):
+        for index in range(count):
+            db.session.add(Product(
+                name=f'{TAG} Samsung Galaxy A14 variant {offset + index}',
+                slug=f'{TAG}-galaxy-{offset + index}',
+                selling_price=18000.0 + index, buying_price=15000.0,
+                description='A midrange handset. ' * 40,  # the column the scan used to load
+                short_description='Midrange handset', stock=5, is_active=True,
+                category_id=category_id, commission_percent=15.0,
+                review_status='approved'))
+        db.session.commit()
+
+    payload = {'name': 'Samsung Galaxy A14', 'category_id': category_id,
+               'selling_price': 18500, 'buying_price': 15000}
+
+    limiter = getattr(app_module, 'limiter', None)
+    was_enabled = getattr(limiter, 'enabled', None)
+    if limiter is not None:
+        limiter.enabled = False
+    # An app context of this block's own, for the same reason the other smoke scripts
+    # give one to each identity: Flask-Login caches the loaded user on ``g``, which
+    # belongs to the app context, and the anonymous page views above already left one
+    # there. Reusing it means the admin session set on the client below is ignored,
+    # every request here bounces off @admin_required as a 302, and the query counts
+    # come out equal because they are counting redirects rather than work.
+    admin_ctx = app.app_context()
+    admin_ctx.push()
+    try:
+        seed(6)
+        ctx_small = None
+        with app.test_client() as client:
+            with client.session_transaction() as session:
+                session['_user_id'] = str(admin_id)
+                session['_fresh'] = True
+            first = client.post('/admin/api/price-check', json=payload)
+            check('POST /admin/api/price-check answers', first.status_code == 200,
+                  first.status_code)
+            body = first.get_json() or {}
+            check('and it answers with a verdict and a count',
+                  'status' in body and isinstance(body.get('competitor_count'), int),
+                  sorted(body)[:6])
+
+            # Cold count: a fresh name so the comparable cache cannot serve it.
+            app_module._comparable_price_cache.clear()
+            with StatementCounter() as small:
+                client.post('/admin/api/price-check',
+                            json=dict(payload, name='Samsung Galaxy A14'))
+            ctx_small = small.count
+
+            seed(40, offset=100)
+            app_module._comparable_price_cache.clear()
+            with StatementCounter() as large:
+                client.post('/admin/api/price-check',
+                            json=dict(payload, name='Samsung Galaxy A14'))
+
+            check('a catalog seven times larger costs no extra queries',
+                  large.count <= ctx_small, (ctx_small, large.count))
+            check('and the query count is small in absolute terms too',
+                  large.count <= 12, large.count)
+
+            # The cache is what collapses a burst of debounced keystrokes on the
+            # same product name into one scan.
+            app_module._comparable_price_cache.clear()
+            client.post('/admin/api/price-check', json=payload)
+            with StatementCounter() as repeat:
+                client.post('/admin/api/price-check', json=payload)
+                client.post('/admin/api/price-check', json=payload)
+            check('a repeated check costs fewer queries than the first',
+                  repeat.count < ctx_small * 2, (ctx_small, repeat.count))
+            stats = app_module._comparable_price_cache.stats()
+            check('and the comparable cache is being hit',
+                  stats.get('hits', 0) >= 1, stats)
+
+        print('the endpoint is not open to unlimited polling')
+        check('a rate limit is configured on it',
+              bool(app_module.PRICE_CHECK_RATE_LIMIT),
+              app_module.PRICE_CHECK_RATE_LIMIT)
+    finally:
+        if limiter is not None and was_enabled is not None:
+            limiter.enabled = was_enabled
+        db.session.remove()
+        admin_ctx.pop()
 
 
 def main():

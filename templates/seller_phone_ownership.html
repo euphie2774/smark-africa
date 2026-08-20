@@ -1,0 +1,496 @@
+{% extends "base.html" %}
+{% block title %}Prove ownership - {{ product.name }} - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4" style="max-width:56rem;">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-start mb-3 gap-2">
+        <div>
+            <h1 class="fw-bold mb-1">Prove this phone is yours to sell</h1>
+            <p class="text-muted mb-0">{{ product.name }}</p>
+        </div>
+        <a href="{{ url_for('seller_products') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-arrow-left me-1"></i>Back to products
+        </a>
+    </div>
+
+    {% if evidence and evidence.status == 'auto_rejected' %}
+    <div class="alert alert-danger">
+        <h6 class="fw-bold mb-2"><i class="fas fa-circle-xmark me-1"></i>Not verified yet</h6>
+        <ul class="mb-2 ps-3">
+            {% for reason in evidence.reasons %}
+            <li>{{ reason }}</li>
+            {% endfor %}
+        </ul>
+        <div class="small mb-0">
+            Fix what is listed and submit again below. There is no waiting period and no
+            limit on attempts.
+        </div>
+    </div>
+    {% elif evidence and evidence.status == 'manual_second_review' %}
+    <div class="alert alert-info">
+        <i class="fas fa-user-check me-1"></i>
+        <strong>With a reviewer.</strong> Your first phone listing gets one human check.
+        You do not need to do anything else.
+    </div>
+    {% elif evidence and evidence.status == 'approved' %}
+    <div class="alert alert-success">
+        <i class="fas fa-circle-check me-1"></i>
+        <strong>Ownership verified.</strong> This listing can be published from your
+        product list.
+    </div>
+    {% endif %}
+
+    <div class="alert alert-light border small">
+        <h6 class="fw-semibold mb-2">What the platform checks, and what it does not</h6>
+        <p class="mb-2">
+            {% if first_listing %}
+            Because this is the first phone on your account, one person will look at it
+            after the automatic checks pass - every seller's first listing gets that,
+            however good the evidence is. After this one, verification is automatic with
+            no queue.
+            {% else %}
+            Verification is automatic - no queue, no waiting for a person.
+            {% endif %}
+            The system
+            checks that the IMEI is a real, valid number, that it is not already listed
+            here and not still on an active payment plan, and that both photos are
+            genuine, sharp and recent enough to read.
+        </p>
+        <p class="mb-0 text-muted">
+            It does <strong>not</strong> read the words on your receipt. If the seller's
+            name or the price on it looks wrong to a buyer or to us later, the listing can
+            still be pulled. Passing here means your evidence is in order, not that
+            anything about the device has been guaranteed.
+        </p>
+    </div>
+
+    <form method="POST" enctype="multipart/form-data" id="evidenceForm" novalidate>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+
+        <!-- Step 1 -->
+        <div class="card border-0 shadow-sm mb-3">
+            <div class="card-body">
+                <h5 class="mb-1"><span class="badge bg-primary me-2">1</span>The handset's IMEI</h5>
+                <p class="text-muted small">
+                    Every phone has one. Dial <code>*#06#</code> on the handset and it
+                    appears on screen - do not type it from the box if the phone is in
+                    front of you.
+                </p>
+
+                <div class="d-flex flex-wrap gap-2 mb-3">
+                    <a href="tel:*%2306%23" class="btn btn-outline-primary btn-sm">
+                        <i class="fas fa-phone me-1"></i>Dial *#06# on this phone
+                    </a>
+                    <a href="#" class="btn btn-outline-secondary btn-sm d-none" id="scanBtn">
+                        <i class="fas fa-barcode me-1"></i>Scan the box barcode
+                    </a>
+                </div>
+
+                <label class="form-label">IMEI (15 digits) *</label>
+                <input name="imei" id="imeiInput" class="form-control form-control-lg"
+                       inputmode="numeric" autocomplete="off" maxlength="19"
+                       placeholder="000000000000000"
+                       value="{{ evidence.imei if evidence else '' }}">
+                <div id="imeiFeedback" class="small mt-2"></div>
+
+                <div id="scanWrap" class="mt-3 d-none">
+                    <video id="scanVideo" class="w-100 rounded bg-dark" style="max-height:16rem;"
+                           muted playsinline></video>
+                    <div class="small text-muted mt-1" id="scanStatus">
+                        Point the camera at the barcode on the box.
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="card border-0 shadow-sm mb-3">
+            <div class="card-body">
+                <h5 class="mb-1"><span class="badge bg-primary me-2">2</span>Photo of the IMEI on the screen</h5>
+                <p class="text-muted small">
+                    With <code>*#06#</code> still showing, photograph the phone's screen
+                    using another device. This is the one photo that ties the number above
+                    to a handset somebody is holding.
+                </p>
+
+                <div class="row g-3">
+                    <div class="col-md-7">
+                        <video id="imei_photo-video" class="w-100 rounded bg-dark d-none"
+                               style="max-height:15rem;" muted playsinline></video>
+                        <canvas id="imei_photo-canvas" class="d-none"></canvas>
+                        <img id="imei_photo-preview" class="img-fluid rounded d-none"
+                             style="max-height:15rem;" alt="IMEI photo preview">
+                        {% if evidence and evidence.imei_photo_path and not (evidence and evidence.status == 'auto_rejected') %}
+                        <div class="small text-success mt-1">
+                            <i class="fas fa-check me-1"></i>A photo is already on file.
+                        </div>
+                        {% endif %}
+                    </div>
+                    <div class="col-md-5">
+                        <div class="d-grid gap-2">
+                            <button type="button" class="btn btn-outline-primary btn-sm"
+                                    data-camera="imei_photo">
+                                <i class="fas fa-camera me-1"></i>Use the camera
+                            </button>
+                            <button type="button" class="btn btn-primary btn-sm d-none"
+                                    data-shutter="imei_photo">
+                                <i class="fas fa-circle me-1"></i>Take the photo
+                            </button>
+                            <label class="btn btn-outline-secondary btn-sm mb-0">
+                                <i class="fas fa-upload me-1"></i>Or choose a file
+                                <input type="file" name="imei_photo" accept="image/*" class="d-none"
+                                       data-filefor="imei_photo">
+                            </label>
+                        </div>
+                        <div class="small text-muted mt-2" id="imei_photo-status"></div>
+                    </div>
+                </div>
+                <input type="hidden" name="imei_photo_capture" id="imei_photo_capture">
+            </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="card border-0 shadow-sm mb-3">
+            <div class="card-body">
+                <h5 class="mb-1"><span class="badge bg-primary me-2">3</span>Proof you bought it</h5>
+                <p class="text-muted small">Any one of these works. Photograph whichever you have:</p>
+                <ul class="small text-muted">
+                    <li>The shop receipt or invoice</li>
+                    <li>The original box, showing the IMEI label</li>
+                    <li>The M-Pesa message from when you paid for it</li>
+                    <li>A warranty card in your name</li>
+                </ul>
+
+                <div class="row g-3">
+                    <div class="col-md-7">
+                        <video id="proof-video" class="w-100 rounded bg-dark d-none"
+                               style="max-height:15rem;" muted playsinline></video>
+                        <canvas id="proof-canvas" class="d-none"></canvas>
+                        <img id="proof-preview" class="img-fluid rounded d-none"
+                             style="max-height:15rem;" alt="Proof preview">
+                        {% if evidence and evidence.proof_path and not (evidence and evidence.status == 'auto_rejected') %}
+                        <div class="small text-success mt-1">
+                            <i class="fas fa-check me-1"></i>Proof is already on file.
+                        </div>
+                        {% endif %}
+                    </div>
+                    <div class="col-md-5">
+                        <div class="d-grid gap-2">
+                            <button type="button" class="btn btn-outline-primary btn-sm"
+                                    data-camera="proof">
+                                <i class="fas fa-camera me-1"></i>Use the camera
+                            </button>
+                            <button type="button" class="btn btn-primary btn-sm d-none"
+                                    data-shutter="proof">
+                                <i class="fas fa-circle me-1"></i>Take the photo
+                            </button>
+                            <label class="btn btn-outline-secondary btn-sm mb-0">
+                                <i class="fas fa-upload me-1"></i>Or choose a file
+                                <input type="file" name="proof_file" accept="image/*" class="d-none"
+                                       data-filefor="proof">
+                            </label>
+                        </div>
+                        <div class="small text-muted mt-2" id="proof-status"></div>
+                    </div>
+                </div>
+                <input type="hidden" name="proof_capture" id="proof_capture">
+            </div>
+        </div>
+
+        <div class="d-flex flex-wrap gap-2 align-items-center mb-4">
+            <button type="submit" class="btn btn-success btn-lg" id="submitBtn">
+                <i class="fas fa-shield-halved me-1"></i>Submit and verify
+            </button>
+            <span class="small text-muted">
+                You get an answer immediately. Anything that fails can be redone right away.
+            </span>
+        </div>
+    </form>
+
+    {% if attempts|length > 1 %}
+    <div class="card border-0 shadow-sm">
+        <div class="card-body">
+            <h6 class="mb-3">Earlier attempts</h6>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead class="table-light">
+                        <tr><th>When</th><th>Score</th><th>Result</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for attempt in attempts %}
+                        <tr>
+                            <td class="small text-nowrap">
+                                {{ attempt.created_at.strftime('%d %b %Y, %H:%M') if attempt.created_at else '-' }}
+                            </td>
+                            <td class="small">{{ '%.0f'|format(attempt.total_score or 0) }} / 100</td>
+                            <td class="small">
+                                {% if attempt.status == 'approved' %}
+                                <span class="badge bg-success">Verified</span>
+                                {% elif attempt.status == 'manual_second_review' %}
+                                <span class="badge bg-warning text-dark">With a reviewer</span>
+                                {% else %}
+                                <span class="badge bg-danger">Not verified</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <p class="small text-muted mb-0 mt-2">
+                The pass mark is {{ '%.0f'|format(min_score) }} out of 100.
+            </p>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    'use strict';
+
+    const IMEI_CHECK_URL = "{{ url_for('seller_phone_imei_check', product_id=product.id) }}";
+    const csrf = document.querySelector('[name="csrf_token"]').value;
+
+    // ---- Step 1: the IMEI ----------------------------------------------------
+    const imeiInput = document.getElementById('imeiInput');
+    const imeiFeedback = document.getElementById('imeiFeedback');
+    let imeiTimer = null;
+    let lastChecked = '';
+
+    // The same Luhn arithmetic the server runs. Duplicated here on purpose: a
+    // mistyped digit is the single most likely reason an honest submission fails,
+    // and catching it in the field costs nothing, while catching it server-side
+    // costs the seller two photographs.
+    function luhnOk(digits) {
+        if (digits.length !== 15) return false;
+        if (new Set(digits).size === 1) return false;
+        let total = 0;
+        for (let i = 0; i < 15; i++) {
+            let digit = parseInt(digits[14 - i], 10);
+            if (i % 2 === 1) {
+                digit *= 2;
+                if (digit > 9) digit -= 9;
+            }
+            total += digit;
+        }
+        return total % 10 === 0;
+    }
+
+    function say(text, kind) {
+        imeiFeedback.className = 'small mt-2 text-' + kind;
+        imeiFeedback.textContent = text;
+    }
+
+    function onImeiInput() {
+        const digits = (imeiInput.value || '').replace(/\D/g, '').slice(0, 15);
+        if (imeiInput.value !== digits) imeiInput.value = digits;
+        clearTimeout(imeiTimer);
+
+        if (!digits.length) { imeiFeedback.textContent = ''; return; }
+        if (digits.length < 15) {
+            say(digits.length + ' of 15 digits.', 'muted');
+            return;
+        }
+        if (!luhnOk(digits)) {
+            say('That is not a valid IMEI. Dial *#06# on the handset and copy all 15 digits.',
+                'danger');
+            return;
+        }
+        say('Valid format. Checking it against the platform...', 'muted');
+
+        // Only the server knows whether the number is already listed or financed.
+        // Debounced so holding a key down does not fire fifteen lookups.
+        if (digits === lastChecked) return;
+        imeiTimer = setTimeout(() => {
+            lastChecked = digits;
+            fetch(IMEI_CHECK_URL, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf},
+                body: JSON.stringify({imei: digits})
+            })
+                .then(response => response.json())
+                .then(data => say(data.reason || '', data.ok ? 'success' : 'danger'))
+                // A failed pre-check is not a failed submission - the server checks
+                // again on submit either way, so silence beats a false alarm.
+                .catch(() => say('Valid format.', 'success'));
+        }, 500);
+    }
+
+    imeiInput.addEventListener('input', onImeiInput);
+    if (imeiInput.value) onImeiInput();
+
+    // ---- Steps 2 and 3: photographs -----------------------------------------
+    const streams = {};
+
+    async function openCamera(kind) {
+        const video = document.getElementById(kind + '-video');
+        const status = document.getElementById(kind + '-status');
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            status.textContent = 'This browser cannot use the camera. Choose a file instead.';
+            return;
+        }
+        try {
+            // Rear camera preferred but not demanded: a laptop has only one, and a
+            // hard constraint would fail outright rather than fall back.
+            streams[kind] = await navigator.mediaDevices.getUserMedia({
+                video: {facingMode: {ideal: 'environment'},
+                        width: {ideal: 1280}, height: {ideal: 720}},
+                audio: false
+            });
+            video.muted = true;
+            video.playsInline = true;
+            video.srcObject = streams[kind];
+            await video.play();
+            video.classList.remove('d-none');
+            document.getElementById(kind + '-preview').classList.add('d-none');
+            document.querySelector('[data-shutter="' + kind + '"]').classList.remove('d-none');
+            status.textContent = 'Fill the frame with it, then take the photo.';
+        } catch (error) {
+            status.textContent = 'Camera access failed. Allow the permission, or choose a file.';
+        }
+    }
+
+    function shoot(kind) {
+        const video = document.getElementById(kind + '-video');
+        const canvas = document.getElementById(kind + '-canvas');
+        const preview = document.getElementById(kind + '-preview');
+        const hidden = document.getElementById(kind + '_capture');
+        const status = document.getElementById(kind + '-status');
+
+        canvas.width = video.videoWidth || 1280;
+        canvas.height = video.videoHeight || 720;
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+        // 0.9 rather than the usual 0.8: the checks measure sharpness, and JPEG
+        // artefacts at a lower quality read as blur.
+        const data = canvas.toDataURL('image/jpeg', 0.9);
+        hidden.value = data;
+        preview.src = data;
+        preview.classList.remove('d-none');
+        video.classList.add('d-none');
+        document.querySelector('[data-shutter="' + kind + '"]').classList.add('d-none');
+        status.textContent = 'Captured. Check you can read it, and retake if not.';
+
+        // Release the camera. Left open it keeps the indicator light on and holds
+        // the device awake for the rest of the form.
+        if (streams[kind]) {
+            streams[kind].getTracks().forEach(track => track.stop());
+            delete streams[kind];
+        }
+    }
+
+    document.querySelectorAll('[data-camera]').forEach(button =>
+        button.addEventListener('click', () => openCamera(button.dataset.camera)));
+    document.querySelectorAll('[data-shutter]').forEach(button =>
+        button.addEventListener('click', () => shoot(button.dataset.shutter)));
+
+    document.querySelectorAll('[data-filefor]').forEach(input =>
+        input.addEventListener('change', () => {
+            const kind = input.dataset.filefor;
+            const status = document.getElementById(kind + '-status');
+            const preview = document.getElementById(kind + '-preview');
+            if (!input.files || !input.files.length) return;
+            // A chosen file wins over an earlier capture, so clear the hidden field
+            // rather than leaving the server to guess which one was meant.
+            document.getElementById(kind + '_capture').value = '';
+            preview.src = URL.createObjectURL(input.files[0]);
+            preview.classList.remove('d-none');
+            document.getElementById(kind + '-video').classList.add('d-none');
+            status.textContent = input.files[0].name;
+        }));
+
+    // ---- Submit --------------------------------------------------------------
+    const form = document.getElementById('evidenceForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const alreadyOnFile = {
+        imei_photo: {{ 'true' if evidence and evidence.imei_photo_path else 'false' }},
+        proof: {{ 'true' if evidence and evidence.proof_path else 'false' }}
+    };
+
+    function supplied(kind, fileName) {
+        if (document.getElementById(kind + '_capture').value) return true;
+        const file = document.querySelector('[data-filefor="' + kind + '"]');
+        if (file && file.files && file.files.length) return true;
+        return alreadyOnFile[kind];
+    }
+
+    form.addEventListener('submit', event => {
+        const digits = (imeiInput.value || '').replace(/\D/g, '');
+        if (!luhnOk(digits)) {
+            event.preventDefault();
+            say('Enter a valid 15-digit IMEI before submitting.', 'danger');
+            imeiInput.focus();
+            return;
+        }
+        if (!supplied('imei_photo')) {
+            event.preventDefault();
+            document.getElementById('imei_photo-status').textContent =
+                'Add the photo of the IMEI on the screen.';
+            return;
+        }
+        if (!supplied('proof')) {
+            event.preventDefault();
+            document.getElementById('proof-status').textContent =
+                'Add your proof of purchase.';
+            return;
+        }
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Verifying...';
+    });
+
+    // ---- Barcode scan (optional) --------------------------------------------
+    // BarcodeDetector is not everywhere, so the button starts hidden and only
+    // appears where it works. Everyone else still has *#06# and the keyboard.
+    const scanBtn = document.getElementById('scanBtn');
+    if ('BarcodeDetector' in window) {
+        scanBtn.classList.remove('d-none');
+        scanBtn.addEventListener('click', async event => {
+            event.preventDefault();
+            const wrap = document.getElementById('scanWrap');
+            const video = document.getElementById('scanVideo');
+            const status = document.getElementById('scanStatus');
+            wrap.classList.remove('d-none');
+            let stream;
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {facingMode: {ideal: 'environment'}}, audio: false});
+                video.srcObject = stream;
+                await video.play();
+            } catch (error) {
+                status.textContent = 'Camera access failed. Type the IMEI instead.';
+                return;
+            }
+            const detector = new window.BarcodeDetector();
+            const stop = () => {
+                stream.getTracks().forEach(track => track.stop());
+                wrap.classList.add('d-none');
+            };
+            const tick = async () => {
+                if (!stream.active) return;
+                try {
+                    const codes = await detector.detect(video);
+                    // A phone box carries several barcodes. Take the first that is a
+                    // plausible IMEI rather than the first of any kind.
+                    for (const code of codes) {
+                        const digits = (code.rawValue || '').replace(/\D/g, '');
+                        if (digits.length >= 15 && luhnOk(digits.slice(0, 15))) {
+                            imeiInput.value = digits.slice(0, 15);
+                            onImeiInput();
+                            status.textContent = 'Scanned.';
+                            stop();
+                            return;
+                        }
+                    }
+                } catch (error) { /* a frame that would not decode; try the next */ }
+                requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+        });
+    }
+})();
+</script>
+{% endblock %}

@@ -2,7 +2,7 @@
 
 Run with: python tools/run_all_checks.py
 
-There are sixteen of these now, spread between the repository root and tools/, and
+There are nineteen of these now, spread between the repository root and tools/, and
 they are the only evidence that any of the scaling work actually holds. Running them
 one at a time invites running only the ones you remember, which is how a regression
 in the fourteenth survives a green run of the first three.
@@ -15,6 +15,9 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SCRIPTS = [
+    # First, because it needs no fixture and a failure here explains failures below:
+    # the app boots bare, and every template link still resolves.
+    'tools/wiring_smoke.py',
     'test_card_barcode.py',
     'test_delivery_follows_ads.py',
     'test_deploy_migration.py',
@@ -30,6 +33,8 @@ SCRIPTS = [
     'tools/page_smoke.py',
     'tools/list_page_smoke.py',
     'tools/bulk_digital_smoke.py',
+    'tools/admin_bulk_digital_smoke.py',
+    'tools/phone_evidence_smoke.py',
     'tools/private_storage_smoke.py',
 ]
 

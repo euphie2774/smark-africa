@@ -245,31 +245,13 @@
 <div class="mt-5">
     <h3 class="fw-bold mb-4" id="reviews">Reviews</h3>
 
-    {% if false %}
-    <div class="card border-0 shadow-sm mb-4">
-        <div class="card-body">
-            <h5 class="fw-bold">Write a Review</h5>
-            <form method="POST" action="{{ url_for('submit_review', product_id=product.id) }}">
-                <div class="mb-3">
-                    <label class="form-label">Rating</label>
-                    <div class="rating-stars">
-                        {% for i in range(5, 0, -1) %}
-                        <div class="form-check form-check-inline">
-                            <input class="form-check-input" type="radio" name="rating" id="star{{ i }}" value="{{ i }}" {% if i == 5 %}checked{% endif %}>
-                            <label class="form-check-label" for="star{{ i }}">{{ i }} Star{{ 's' if i > 1 }}</label>
-                        </div>
-                        {% endfor %}
-                    </div>
-                </div>
-                <div class="mb-3">
-                    <label for="comment" class="form-label">Comment</label>
-                    <textarea name="comment" id="comment" class="form-control" rows="3" required></textarea>
-                </div>
-                <button type="submit" class="btn btn-primary">Submit Review</button>
-            </form>
-        </div>
-    </div>
-    {% endif %}
+    {# The "Write a Review" form that used to sit here was disabled with
+       {% if false %} and could not have worked if re-enabled: submit_review is a
+       JSON POST at /api/review/<order_id>/<product_id>, and this page has no order
+       in scope - reviewing is tied to a completed order, not to a product page.
+       Removed rather than left dormant so the whole-repo url_for audit in the
+       check scripts stays a signal instead of a known-red line. Buyers review from
+       their order history, which is where the order_id comes from. #}
 
     {% if reviews %}
     <div class="row g-3">

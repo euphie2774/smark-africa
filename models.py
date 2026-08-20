@@ -1,3 +1,4 @@
+import json
 import uuid
 from datetime import datetime, timedelta
 from flask_sqlalchemy import SQLAlchemy
@@ -1533,6 +1534,69 @@ class KYCIdentityVerification(db.Model):
 
     user = db.relationship('User', foreign_keys=[user_id], lazy=True)
     reviewer = db.relationship('User', foreign_keys=[reviewed_by], lazy=True)
+
+
+class PhoneOwnershipEvidence(db.Model):
+    """What a seller submitted to prove a second-hand phone is theirs to sell.
+
+    One row per attempt, not one per product: a rejection is immediately
+    re-submittable, and the earlier attempts are the record of what was tried. The
+    live verdict for a listing is its newest row.
+
+    ``proof_fingerprint`` is unique for the same reason
+    ``KYCIdentityVerification.document_fingerprint`` is - the same receipt
+    photographed once and uploaded against six different phones is the cheapest
+    fraud there is, and the constraint catches it in the database rather than in a
+    check somebody has to remember to write. The column therefore means "this is
+    the attempt that claimed this image", and is left NULL on later attempts by the
+    same listing: a seller retaking a blurred IMEI photo sends the same receipt
+    again, and that resubmission must not collide with its own earlier row.
+    """
+    __tablename__ = 'phone_ownership_evidence'
+    __table_args__ = (
+        db.UniqueConstraint('proof_fingerprint', name='uq_phone_evidence_proof_fingerprint'),
+        # An IMEI is looked up on every submission to see whether it is already
+        # listed, and the status is part of that question.
+        db.Index('ix_phone_evidence_imei_status', 'imei', 'status'),
+        db.Index('ix_phone_evidence_user_created', 'user_id', 'created_at'),
+        db.Index('ix_phone_evidence_product_created', 'product_id', 'created_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey('products.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    imei = db.Column(db.String(20), nullable=False)
+    imei_photo_path = db.Column(db.String(500))
+    proof_path = db.Column(db.String(500))
+    proof_fingerprint = db.Column(db.String(64))
+    imei_valid = db.Column(db.Boolean, default=False)
+    uniqueness_ok = db.Column(db.Boolean, default=False)
+    photo_score = db.Column(db.Float, default=0.0)
+    proof_score = db.Column(db.Float, default=0.0)
+    originality_score = db.Column(db.Float, default=0.0)
+    total_score = db.Column(db.Float, default=0.0)
+    # approved, auto_rejected, manual_second_review
+    status = db.Column(db.String(30), default='pending')
+    # JSON list of per-item reasons, so a rejection can say which item failed
+    # instead of only that something did.
+    notes = db.Column(db.Text)
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    reviewed_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    product = db.relationship('Product', lazy=True)
+    user = db.relationship('User', foreign_keys=[user_id], lazy=True)
+    reviewer = db.relationship('User', foreign_keys=[reviewed_by], lazy=True)
+
+    @property
+    def reasons(self):
+        """The stored per-item reasons, always a list."""
+        if not self.notes:
+            return []
+        try:
+            parsed = json.loads(self.notes)
+        except (ValueError, TypeError):
+            return [self.notes]
+        return parsed if isinstance(parsed, list) else [str(parsed)]
 
 
 class Raffle(db.Model):

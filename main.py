@@ -51,7 +51,7 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     PromotedListing, AffiliateLink, AffiliateConversion, SellerSubscription, SponsoredBanner, \
     EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue, AuditLog, \
     ShippingZone, ShippingQuote, DriverProfile, DriverLocationPing, DeliveryAssignment, \
-    StorefrontFollow, SocialAdPost, PromoCode, PromoCodeRedemption
+    StorefrontFollow, SocialAdPost, PromoCode, PromoCodeRedemption, PhoneOwnershipEvidence
 
 from scale import (CACHE_MISS, CounterBuffer, JobLease, TTLCache, bool_env, float_env,
                    int_env, worker_identity)
@@ -1717,6 +1717,36 @@ def is_music_category(category):
     return any(token in value for token in ['music', 'audio', 'beat', 'mix'])
 
 
+# Handsets, and the things that sit next to handsets on a shelf. The blocklist is
+# not a nicety: 'earphone' and 'headphone' both contain 'phone', so a plain
+# substring test drags a KSh 300 pair of earbuds into an ownership-evidence flow
+# built for a KSh 30,000 handset. Blocked tokens win over matched ones.
+PHONE_TOKENS = (
+    'phone', 'smartphone', 'iphone', 'galaxy', 'tecno', 'infinix', 'itel',
+    'redmi', 'xiaomi', 'oppo', 'vivo', 'huawei', 'nokia', 'samsung', 'oneplus',
+    'realme', 'pixel', 'handset',
+)
+PHONE_ACCESSORY_TOKENS = (
+    'case', 'cover', 'earphone', 'headphone', 'earbud', 'airpod', 'charger',
+    'cable', 'screen protector', 'tempered glass', 'pouch', 'holder', 'stand',
+    'adapter', 'powerbank', 'power bank', 'sim card', 'lanyard', 'ring light',
+    'selfie stick', 'battery', 'flip cover', 'skin', 'sticker', 'mount',
+)
+
+
+def is_phone_listing(name, category=None):
+    """Is this listing an actual handset?
+
+    Checked on the listing's own words plus its category, because a phone listed
+    under 'Electronics' and one listed under 'Mobile Phones' are the same phone.
+    """
+    value = f'{name or ""} {getattr(category, "name", "") or ""} ' \
+            f'{getattr(category, "slug", "") or ""}'.lower()
+    if any(token in value for token in PHONE_ACCESSORY_TOKENS):
+        return False
+    return any(token in value for token in PHONE_TOKENS)
+
+
 VOICEOVER_TOKENS = ('voice over', 'voiceover', 'voice-over', 'narration', 'voice artist')
 
 
@@ -2123,9 +2153,18 @@ def save_capture_data(data_url, subfolder='seller_docs'):
 
 
 def uploaded_static_url_to_path(file_url):
+    """Map a stored /static/... URL back to a path on disk. '' if it is not ours.
+
+    Compares on the path component alone. url_for can only build an absolute URL
+    when there is no request to hang a relative one off, and an absolute prefix
+    matches no stored path - so without this every caller outside a request would
+    quietly get ''. For file_content_fingerprint that silence is the duplicate
+    evidence check failing open, which is the wrong direction for it to fail in.
+    """
     if not file_url:
         return ''
-    static_prefix = url_for('static', filename='')
+    from urllib.parse import urlsplit
+    static_prefix = urlsplit(url_for('static', filename='')).path or '/static/'
     if file_url.startswith(static_prefix):
         relative = file_url[len(static_prefix):].replace('/', os.sep)
         return os.path.join(app.static_folder, relative)
@@ -3987,22 +4026,69 @@ def refresh_market_price_cache(limit=30):
     db.session.commit()
     return refreshed
 
-def comparable_products(name='', category_id=None, exclude_id=None, limit=12):
+# The comparable-price scan is the expensive half of the price check, and the price
+# check runs on every pause in typing on the add-product form. Its answer depends only
+# on the name tokens and the category, so an admin walking a price up and down asks
+# the identical question over and over - which this holds on to. In-process on purpose:
+# it must work with no Redis configured.
+MARKET_COMPARABLE_TTL = float_env('MARKET_COMPARABLE_TTL', 60)
+_comparable_price_cache = TTLCache(ttl_seconds=MARKET_COMPARABLE_TTL, max_entries=512,
+                                   name='market-comparables')
+
+# The add-product form calls the price check while the admin is still typing. The
+# debounce and the cache above keep that cheap, but a stuck or hostile client should
+# not be able to hold sync workers either, so there is a ceiling on it as well.
+PRICE_CHECK_RATE_LIMIT = os.environ.get('PRICE_CHECK_RATE_LIMIT', '120 per minute')
+
+
+def comparable_price_stats(name='', category_id=None, exclude_id=None, limit=12):
+    """Price spread of the listings most like this one. Cached, returns plain floats.
+
+    Two deliberate economies, because this runs while somebody is still typing:
+
+    Only the columns needed are selected. This used to load 80 full Product rows,
+    whose ``description`` Text column is the bulk of the transfer and the weakest
+    match signal of the three text fields; matching now uses name and
+    short_description, and ``discounted_price`` is recomputed here because it is a
+    Python property (models.py) rather than a column.
+
+    And the result is a dict of numbers, not ORM instances - same reasoning as
+    NavCategory: cached ORM objects belong to the session that loaded them and are
+    detached by the time the next request reads them.
+    """
     tokens = token_set(name)
-    query = Product.query.filter(Product.is_active == True)
+    key = (tuple(sorted(tokens)), category_id or 0, exclude_id or 0, limit)
+    found = _comparable_price_cache.lookup(key)
+    if found is not CACHE_MISS:
+        return found
+
+    query = db.session.query(
+        Product.short_description, Product.name, Product.selling_price,
+        Product.discount_percent, Product.updated_at, Product.created_at,
+    ).filter(Product.is_active.is_(True))
     if category_id:
         query = query.filter(Product.category_id == category_id)
     if exclude_id:
         query = query.filter(Product.id != exclude_id)
-    products = query.order_by(Product.updated_at.desc()).limit(80).all()
+    rows = query.order_by(Product.updated_at.desc()).limit(80).all()
+
     scored = []
-    for product in products:
-        product_tokens = token_set(product.name, product.short_description, product.description)
-        overlap = len(tokens.intersection(product_tokens))
+    for row in rows:
+        overlap = len(tokens.intersection(token_set(row.name, row.short_description)))
         if overlap or not tokens:
-            scored.append((overlap, product))
-    scored.sort(key=lambda item: (item[0], item[1].updated_at or item[1].created_at), reverse=True)
-    return [product for _, product in scored[:limit]]
+            price = float(row.selling_price or 0)
+            if row.discount_percent and row.discount_percent > 0:
+                price = round(price * (1 - row.discount_percent / 100), 2)
+            if price:
+                scored.append((overlap, row.updated_at or row.created_at or utcnow(), price))
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    prices = [price for _, _, price in scored[:limit]]
+
+    stats = {'count': len(prices)}
+    if prices:
+        stats.update({'low': min(prices), 'high': max(prices),
+                      'midpoint': sum(prices) / len(prices)})
+    return _comparable_price_cache.set(key, stats)
 
 
 def market_price_reference(name, category_id=None, price=None, buying_price=0, exclude_id=None, description=''):
@@ -4047,12 +4133,12 @@ def market_price_reference(name, category_id=None, price=None, buying_price=0, e
             'confidence': 'verified_reference',
         }
 
-    comps = comparable_products(name, category_id, exclude_id=exclude_id)
-    comp_prices = [p.discounted_price or p.selling_price for p in comps if (p.discounted_price or p.selling_price)]
+    stats = comparable_price_stats(name, category_id, exclude_id=exclude_id)
+    comp_prices = stats['count']
     if comp_prices:
-        low = min(comp_prices)
-        high = max(comp_prices)
-        midpoint = sum(comp_prices) / len(comp_prices)
+        low = stats['low']
+        high = stats['high']
+        midpoint = stats['midpoint']
     else:
         web_range = cached_market_range(name, category.name if category else '')
         if web_range:
@@ -4119,7 +4205,7 @@ def market_price_reference(name, category_id=None, price=None, buying_price=0, e
         'kenya_high': kenya_high,
         'manufacturer_price': round(manufacturer_price, 2),
         'recommended_price': recommended,
-        'competitor_count': len(comp_prices),
+        'competitor_count': comp_prices,
         'source': 'Your active SMARKAFRICA catalog comparables',
         'source_url': '',
         'image_url': '',
@@ -5041,6 +5127,35 @@ def generate_bnpl_lock_code(plan=None):
 
 def normalize_imei(value):
     return re.sub(r'\D', '', (value or '').strip())[:20]
+
+
+def imei_checksum_valid(value):
+    """Does this look like a real IMEI rather than fifteen typed digits?
+
+    An IMEI carries a Luhn check digit, so 123456789012345 - the number somebody
+    reaches for when a form insists on fifteen digits - fails arithmetic that a
+    genuine handset's number passes. It proves the number is well formed, not that
+    the handset exists; that is all a checksum can do, and it is still the cheapest
+    filter available.
+    """
+    digits = normalize_imei(value)
+    if len(digits) != 15 or not digits.isdigit():
+        return False
+    # Rejects 000000000000000 and the other all-same-digit placeholders, which
+    # happen to satisfy Luhn.
+    if len(set(digits)) == 1:
+        return False
+    total = 0
+    # Doubling every second digit from the right, i.e. positions 13, 11, 9 ... of
+    # the 14-digit body, with the 15th as the check digit.
+    for index, char in enumerate(reversed(digits)):
+        digit = int(char)
+        if index % 2 == 1:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
 
 
 def bnpl_remote_functional_code(plan):
@@ -7714,20 +7829,37 @@ def abandon_unpaid_order(order, reason=''):
 
 
 def notify_seller_listing_live(product, storefront=None):
-    """Confirm to a seller that their new listing went up.
+    """Confirm to a seller that their new listing went up, and say what is next.
 
     Both channels on purpose: the in-app note is what they see next time they
     open the hub, the email is what reaches them when they have closed the tab.
+
+    "What is next" has three answers, not two - live, waiting on an admin, or
+    waiting on the seller's own ownership proof - and getting the third one wrong
+    is what leaves a second-hand phone parked indefinitely.
     """
     seller = product.seller if product.seller_id else None
     if not seller:
         return False
 
-    pending_review = product.review_status != 'approved'
+    status = product.review_status or 'approved'
     where = product.location_display or (storefront.business_name if storefront else '') or 'your storefront address'
-    body = (f'"{product.name}" is listed and pinned to {where}. '
-            + ('An admin still needs to approve it before shoppers can see it in the shop.'
-               if pending_review else 'It is live in the shop now.'))
+    # Three outcomes, not two. A listing waiting on ownership evidence is waiting on
+    # the seller, and telling them an admin will handle it is how a phone sits parked
+    # forever - they have no reason to open the evidence step if they think the queue
+    # is somebody else's.
+    if status == 'approved':
+        next_step = 'It is live in the shop now.'
+        status_label = 'Live in the shop'
+    elif status in ('pending_evidence', 'auto_rejected'):
+        next_step = ('Before shoppers can see it, open the listing and add proof you own '
+                     'the handset - the IMEI and two photos. It takes a minute and the '
+                     'check is instant.')
+        status_label = 'Waiting for your ownership proof'
+    else:
+        next_step = 'An admin still needs to approve it before shoppers can see it in the shop.'
+        status_label = 'Awaiting admin review'
+    body = f'"{product.name}" is listed and pinned to {where}. {next_step}'
 
     note = create_customer_notification(
         seller.id,
@@ -7751,10 +7883,19 @@ def notify_seller_listing_live(product, storefront=None):
     if not seller.email:
         return False
 
+    # Point the seller at the step that is actually theirs. A parked listing has no
+    # public page yet, so linking the shop URL sends them to a dead end at the one
+    # moment they are motivated to act.
     try:
-        link = url_for('product_page', slug=product.slug, _external=True)
+        if status in ('pending_evidence', 'auto_rejected'):
+            link = url_for('seller_phone_ownership', product_id=product.id, _external=True)
+            link_text = 'Add your ownership proof'
+        else:
+            link = url_for('product_page', slug=product.slug, _external=True)
+            link_text = 'View your listing'
     except Exception:
         link = ''
+        link_text = ''
 
     price = float(product.selling_price or 0)
     html = f"""
@@ -7765,9 +7906,10 @@ def notify_seller_listing_live(product, storefront=None):
         <tr><td>Price</td><td>KES {price:,.0f}</td></tr>
         <tr><td>Stock</td><td>{product.stock if not product.is_digital else 'Digital - unlimited'}</td></tr>
         <tr><td>Item location</td><td>{where}</td></tr>
-        <tr><td>Status</td><td>{'Awaiting admin review' if pending_review else 'Live in the shop'}</td></tr>
+        <tr><td>Status</td><td>{status_label}</td></tr>
     </table>
-    {f'<p><a href="{link}">View your listing</a></p>' if link else ''}
+    {f'<p><a href="{link}">{link_text}</a></p>' if link else ''}
+    <p>{next_step}</p>
     <p>We will email you again the moment it sells.</p>
     <br><p>SMARKAFRICA Team</p>
     """
@@ -10178,6 +10320,7 @@ def market_news_api():
 @app.route('/admin/api/price-check', methods=['POST'])
 @login_required
 @admin_required
+@limiter.limit(PRICE_CHECK_RATE_LIMIT)
 def admin_price_check_api():
     data = request.get_json() or {}
     return jsonify(market_price_reference(
@@ -10526,13 +10669,139 @@ def admin_toggle_pricing_suggestions_access():
     return redirect(url_for('admin_business_intelligence'))
 # --- Product Management ---
 
+# The statuses that mean "a person still has to do something here". Without a
+# surface listing these, a listing parked by the second-hand branch is invisible
+# to admins - the seller sees it waiting and nobody upstream ever sees it at all.
+# 'auto_rejected' is deliberately in the pending set even though no admin action is
+# required: it is the seller's move, and an admin seeing a run of them is how a
+# mis-calibrated threshold gets noticed.
+PRODUCT_PENDING_STATUSES = ('manual_second_review', 'admin_review',
+                            'pending_evidence', 'auto_rejected')
+PRODUCT_EVIDENCE_STATUSES = ('pending_evidence', 'auto_rejected',
+                             'manual_second_review')
+
 @app.route('/admin/products')
 @login_required
 @admin_required
 def admin_products():
     page = request.args.get('page', 1, type=int)
-    pagination = Product.query.filter(or_(Product.review_status != 'deleted', Product.review_status.is_(None))).order_by(Product.created_at.desc()).paginate(page=page, per_page=20, error_out=False)
-    return render_template('admin/products.html', products=pagination.items, pagination=pagination)
+    review = (request.args.get('review') or '').strip().lower()
+    live = or_(Product.review_status != 'deleted', Product.review_status.is_(None))
+    query = Product.query.filter(live)
+    if review == 'pending':
+        query = query.filter(Product.review_status.in_(PRODUCT_PENDING_STATUSES))
+    elif review == 'evidence':
+        query = query.filter(Product.review_status.in_(PRODUCT_EVIDENCE_STATUSES))
+    pagination = query.order_by(Product.created_at.desc()).paginate(
+        page=page, per_page=20, error_out=False)
+    # Two counts, not a group-by over the whole table: these are the only buckets
+    # the tabs offer, both are indexed on (review_status, created_at), and both
+    # are small even when the products table is not.
+    pending_count = db.session.query(func.count(Product.id)).filter(
+        live, Product.review_status.in_(PRODUCT_PENDING_STATUSES)).scalar() or 0
+    evidence_count = db.session.query(func.count(Product.id)).filter(
+        live, Product.review_status.in_(PRODUCT_EVIDENCE_STATUSES)).scalar() or 0
+    return render_template('admin/products.html', products=pagination.items,
+                           pagination=pagination, review=review,
+                           pending_count=pending_count, evidence_count=evidence_count)
+
+
+@app.route('/admin/phone-evidence')
+@login_required
+@admin_required
+def admin_phone_evidence():
+    """The one human step in the phone flow.
+
+    Scoring decides everything except a seller's first phone listing, which is
+    held here on purpose: the score can tell a sharp photo from a blurred one but
+    not a seller worth trusting from one worth watching, and the first listing is
+    the only cheap moment to look. Everything else on this page is read-only
+    history - it is here so a run of auto-rejections is visible to somebody who
+    can adjust the threshold, not so it can be overridden one row at a time.
+    """
+    page = request.args.get('page', 1, type=int)
+    status = (request.args.get('status') or 'manual_second_review').strip().lower()
+    query = PhoneOwnershipEvidence.query.options(
+        joinedload(PhoneOwnershipEvidence.product),
+        joinedload(PhoneOwnershipEvidence.user),
+    )
+    if status in ('approved', 'auto_rejected', 'manual_second_review'):
+        query = query.filter(PhoneOwnershipEvidence.status == status)
+    pagination = query.order_by(PhoneOwnershipEvidence.created_at.desc()).paginate(
+        page=page, per_page=20, error_out=False)
+    waiting = db.session.query(func.count(PhoneOwnershipEvidence.id)).filter(
+        PhoneOwnershipEvidence.status == 'manual_second_review').scalar() or 0
+    return render_template('admin/phone_evidence.html', items=pagination.items,
+                           pagination=pagination, status=status, waiting=waiting,
+                           min_score=PHONE_EVIDENCE_MIN_SCORE)
+
+
+@app.route('/admin/phone-evidence/<int:evidence_id>/<decision>', methods=['POST'])
+@login_required
+@admin_required
+def admin_phone_evidence_decide(evidence_id, decision):
+    if decision not in ('approve', 'reject'):
+        abort(404)
+    evidence = db.session.get(PhoneOwnershipEvidence, evidence_id)
+    if not evidence:
+        abort(404)
+    # Only a first-listing hold is decidable. An approved row is already live and
+    # an auto-rejected one is the seller's to fix by resubmitting, so letting an
+    # admin flip either from here would put two different verdicts in the table
+    # for the same handset with no record of which won.
+    if evidence.status != 'manual_second_review':
+        flash('That submission has already been settled.', 'info')
+        return redirect(url_for('admin_phone_evidence'))
+
+    note = (request.form.get('note') or '').strip()[:300]
+    reasons = evidence.reasons
+    product = evidence.product
+    if decision == 'approve':
+        evidence.status = 'approved'
+        reasons.insert(0, note or 'Confirmed by an admin.')
+        if product:
+            product.review_status = 'approved'
+            product.is_active = True
+    else:
+        evidence.status = 'auto_rejected'
+        reasons.insert(0, note or 'An admin could not confirm ownership from what was sent.')
+        if product:
+            product.review_status = 'auto_rejected'
+            product.is_active = False
+    evidence.notes = json.dumps(reasons)
+    evidence.reviewed_by = current_user.id
+    evidence.reviewed_at = utcnow()
+
+    if product and product.seller_id:
+        create_customer_notification(
+            product.seller_id,
+            f'Ownership check: {product.name}'[:180],
+            (f'"{product.name}" passed the ownership check and is live in the shop now.'
+             if decision == 'approve' else
+             f'"{product.name}" did not pass the ownership check. {reasons[0]} '
+             'You can send new photos from your listings page.'),
+            'seller_listing',
+            product_id=product.id,
+        )
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        app.logger.exception('Phone evidence decision failed for %s', evidence_id)
+        flash('That decision could not be saved. Try again.', 'danger')
+        return redirect(url_for('admin_phone_evidence'))
+
+    # An approval publishes the listing, so the shop's cached product pages have to
+    # let go of the set that did not include it. The seller-side submission route
+    # does the same after its commit; a decision made here is no less a publish.
+    invalidate_product_cache()
+    log_admin_action('phone_evidence_decision', 'product',
+                     evidence.product_id, {'decision': decision,
+                                           'evidence_id': evidence_id,
+                                           'score': evidence.total_score})
+    flash('Listing approved and live.' if decision == 'approve'
+          else 'Listing rejected. The seller can resubmit.', 'success')
+    return redirect(url_for('admin_phone_evidence'))
 
 
 @app.route('/shopping-card', methods=['GET', 'POST'])
@@ -11941,6 +12210,19 @@ def admin_add_product():
         else:
             product.review_status = 'approved'
 
+        # An admin posting a second-hand phone is posting platform stock whose
+        # history they already know, so it does not go through the evidence flow or
+        # a review queue - there is nobody above them to review it. The IMEI is
+        # still recorded below when supplied, which is what makes the duplicate
+        # check work against platform stock too.
+        admin_phone_listing = (admin_is_admin
+                               and product.product_condition in PHONE_EVIDENCE_CONDITIONS
+                               and is_phone_listing(name, db.session.get(Category, category_id)
+                                                    if category_id else None))
+        if admin_phone_listing:
+            product.review_status = 'approved'
+            product.is_active = is_active
+
         # Give the listing a pin so its card matches seller-listed products.
         apply_product_location(
             product,
@@ -11984,6 +12266,13 @@ def admin_add_product():
         try:
             db.session.add(product)
             db.session.flush()
+
+            # Register the handset against the listing so the next person to submit
+            # this IMEI hits the duplicate check. Optional on the admin form: no
+            # IMEI simply means no registration, not a blocked save.
+            if admin_phone_listing and normalize_imei(request.form.get('device_imei', '')):
+                record_phone_evidence(product, request.form.get('device_imei', ''),
+                                      None, None, as_admin=True)
 
             if product.admin_priority and not Review.query.filter_by(product_id=product.id, is_admin_review=True).first():
                 db.session.add(Review(
@@ -14100,6 +14389,445 @@ def file_claim(order_id):
 
 SELLER_PRODUCT_CONDITIONS = ['new', 'second_hand', 'refurbished', 'thrifted']
 
+# Second-hand phone ownership evidence.
+#
+# A second-hand handset is the one listing where "is this yours to sell" is a real
+# question, and parking every one of them in a human queue does not scale - which is
+# the whole point of this. So the checks below are arithmetic and image measurement,
+# and they run without anybody looking.
+#
+# What this can and cannot do, stated plainly because the seller-facing copy has to
+# say the same thing: there is no OCR installed, so nothing here reads the text on a
+# receipt. It verifies that the IMEI is well formed, that it is not already on the
+# platform, that the two photos are real photographs of adequate quality, that they
+# are recent, and that they have not been used on another account. That is a strong
+# filter against the cheap frauds - typed-in numbers, one receipt reused across six
+# listings, a screenshot lifted from a marketplace - and it is not a guarantee that
+# the receipt says what the seller claims.
+#
+# Both env vars have working defaults, so none of this needs configuring.
+PHONE_EVIDENCE_MIN_SCORE = float_env('PHONE_EVIDENCE_MIN_SCORE', 70)
+PHONE_EVIDENCE_REQUIRED = bool_env('PHONE_EVIDENCE_REQUIRED', True)
+PHONE_EVIDENCE_RATE_LIMIT = os.environ.get('PHONE_EVIDENCE_RATE_LIMIT', '60 per hour')
+
+# Conditions where the handset has had a previous owner. 'refurbished' is in here
+# too: a refurbished phone came from somewhere, and that somewhere is the question.
+PHONE_EVIDENCE_CONDITIONS = ('second_hand', 'refurbished')
+
+# Local disk, deliberately. Deliberately NOT added to CLOUDINARY_PUBLIC_FOLDERS:
+# a purchase receipt carries a name, a phone number and often a card tail, which
+# makes this identity-adjacent material that must not sit on a permanently public
+# URL. It follows seller_docs and kyc, which stay local for the same reason - and
+# the image measurement below reads these back off disk with PIL and OpenCV, so
+# they have to be local anyway.
+PHONE_EVIDENCE_FOLDER = 'phone_docs'
+
+
+def save_phone_evidence_upload(file):
+    """Store one evidence photo on local disk, or '' if there was nothing to store.
+
+    Wrapped rather than called directly so a rejected file becomes an empty result
+    that the scoring reports as a missing item, instead of a 500 on a form the
+    seller is in the middle of.
+    """
+    if not file or not file.filename:
+        return ''
+    try:
+        return save_uploaded_file(file, PHONE_EVIDENCE_FOLDER)
+    except (ValueError, OSError) as exc:
+        app.logger.info('Phone evidence upload rejected: %s', exc)
+        return ''
+
+
+def phone_evidence_required(product, category=None):
+    """Does this listing need ownership evidence before it can go live?"""
+    if not PHONE_EVIDENCE_REQUIRED:
+        return False
+    if getattr(product, 'is_digital', False):
+        return False
+    if (product.product_condition or 'new') not in PHONE_EVIDENCE_CONDITIONS:
+        return False
+    if category is None and product.category_id:
+        category = db.session.get(Category, product.category_id)
+    return is_phone_listing(product.name, category)
+
+
+def phone_listing_gate(user):
+    """Return None if ``user`` may list a second-hand phone, else a reason.
+
+    Two things beyond the ordinary storefront gate, because a stolen handset is the
+    one item on the platform where the seller's identity is the evidence: an
+    approved storefront, and completed KYC so there is a real person behind it.
+
+    Admins are exempt entirely. They post platform stock whose history they already
+    know, and there is nobody above them to appeal a rejection to.
+    """
+    if getattr(user, 'is_admin', False):
+        return None
+    if not seller_storefront(user):
+        return ('Second-hand phones need an approved storefront. '
+                'Apply for one and this opens up.')
+    kyc = (KYCIdentityVerification.query
+           .filter(KYCIdentityVerification.user_id == user.id,
+                   KYCIdentityVerification.status == 'approved')
+           .first())
+    if not kyc:
+        return ('Second-hand phones need your identity verified first. '
+                'Complete ID verification and this opens up.')
+    return None
+
+
+def evidence_image_measure(image_url):
+    """Measure one evidence photo. Returns (score 0-100, reasons, legible).
+
+    Resolution and aspect follow verify_document_quality's bands. The blur check is
+    Laplacian variance, which is the standard cheap answer to "is this in focus":
+    a sharp photo has strong second derivatives, a blurred or re-photographed
+    screen does not. Threshold is deliberately forgiving - a mid-range phone camera
+    in a dim room still passes.
+
+    ``legible`` answers the separate question of whether the photo can be read at
+    all, and it is deliberately not inferred from the score. Each band below measures
+    one property independently, so a photo far too small to read still collects the
+    aspect and sharpness points and lands mid-range - a number that cannot be
+    compared against a threshold to mean "readable".
+    """
+    path = uploaded_static_url_to_path(image_url)
+    if not path or not os.path.exists(path):
+        return 0, ['Photo did not arrive.'], False
+
+    score, reasons, legible = 0, [], True
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            width, height = img.size
+    except Exception as exc:
+        app.logger.info('Phone evidence image unreadable: %s', exc)
+        return 0, ['That file is not a readable photo.'], False
+
+    if width >= 640 and height >= 480:
+        score += 55
+    elif width >= 320 and height >= 240:
+        score += 25
+        reasons.append('Photo is low resolution - move closer and retake it.')
+    else:
+        reasons.append('Photo is too small to read. Retake it closer up.')
+        legible = False
+
+    aspect = max(width, height) / max(min(width, height), 1)
+    if aspect <= 3.0:
+        score += 15
+    else:
+        reasons.append('Photo is cropped too narrow to show the whole thing.')
+        legible = False
+
+    try:
+        import cv2
+        cv_img = cv2.imread(path)
+        if cv_img is None:
+            raise ValueError('cv2 could not decode the file')
+        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        if sharpness >= 60:
+            score += 30
+        elif sharpness >= 25:
+            score += 15
+            reasons.append('Photo is slightly soft - hold steady and retake it.')
+        else:
+            reasons.append('Photo is too blurred to read.')
+            legible = False
+    except Exception as exc:
+        # A missing or unhappy OpenCV must not fail an honest seller. Partial
+        # credit, and the resolution check above still did real work.
+        app.logger.info('Phone evidence sharpness check skipped: %s', exc)
+        score += 15
+
+    return min(score, 100), reasons, legible
+
+
+def evidence_image_freshness(image_url, max_age_days=180):
+    """Was this photographed recently, and by a camera?
+
+    EXIF is the signal here. A photo straight off a phone camera carries a capture
+    timestamp; a screenshot, a web download or a scan generally does not. Absent
+    EXIF is not treated as a failure - browser camera capture strips it, and that
+    is the flow this platform recommends - it just earns less than a fresh
+    timestamp does.
+    """
+    path = uploaded_static_url_to_path(image_url)
+    if not path or not os.path.exists(path):
+        return 0.0, ['Photo did not arrive.']
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            exif = img.getexif() or {}
+        # 36867 DateTimeOriginal, 306 DateTime.
+        stamp = exif.get(36867) or exif.get(306)
+    except Exception:
+        stamp = None
+
+    if not stamp:
+        # No timestamp to judge, so fall back to when it landed on disk. Half
+        # credit: it says the upload is fresh, not that the photo is.
+        return 0.5, []
+    try:
+        taken = datetime.strptime(str(stamp).strip(), '%Y:%m:%d %H:%M:%S')
+    except (ValueError, TypeError):
+        return 0.5, []
+    age_days = (datetime.utcnow() - taken).days
+    if age_days < -1:
+        return 0.0, ['Photo is dated in the future - check the phone\'s clock.']
+    if age_days <= max_age_days:
+        return 1.0, []
+    return 0.25, ['Photo was taken a long time ago. A recent one is stronger evidence.']
+
+
+def imei_hard_conflicts(imei, user, product_id=None):
+    """Reasons this IMEI cannot be listed at all. Empty list means it is clear.
+
+    Every one of these is an immediate reject rather than a score deduction,
+    because none of them get better with a nicer photograph.
+    """
+    reasons = []
+    user_id = getattr(user, 'id', None)
+
+    # Already on somebody's live listing. Scoped to active listings on purpose:
+    # relisting your own phone after the first one lapsed is legitimate.
+    clash = (db.session.query(PhoneOwnershipEvidence.id, PhoneOwnershipEvidence.user_id)
+             .join(Product, Product.id == PhoneOwnershipEvidence.product_id)
+             .filter(PhoneOwnershipEvidence.imei == imei,
+                     PhoneOwnershipEvidence.status.in_(('approved', 'manual_second_review')),
+                     Product.is_active.is_(True))
+             .filter(Product.id != (product_id or 0))
+             .first())
+    if clash:
+        reasons.append('This IMEI is already on an active listing.'
+                       if clash.user_id == user_id else
+                       'This IMEI is already listed by another account.')
+
+    # Still being financed on the platform's own BNPL. Free anti-fraud: the
+    # platform is the lienholder, so it does not need to ask anybody. A completed
+    # plan is paid off and the handset is the buyer's to sell.
+    financed = (db.session.query(BNPLPlan.id)
+                .filter(BNPLPlan.device_imei == imei,
+                        BNPLPlan.approval_status.in_(('approved', 'manual_review')))
+                .first())
+    if financed:
+        reasons.append('This handset is still on an active BNPL plan and cannot be resold yet.')
+
+    # The seller themselves is barred. Matched on identity rather than account id,
+    # because that is what the blacklist stores - a barred seller opening a second
+    # account still matches on name-and-country, phone, or card.
+    if user is not None:
+        legal_name = (f'{getattr(user, "first_name", "") or ""} '
+                      f'{getattr(user, "last_name", "") or ""}'.strip()
+                      or getattr(user, 'username', ''))
+        if matching_seller_blacklist(legal_name, getattr(user, 'country', None),
+                                     getattr(user, 'phone', None),
+                                     getattr(user, 'bank_card_last4', None)):
+            reasons.append('This account is not permitted to list second-hand devices.')
+
+    return reasons
+
+
+def score_phone_evidence(imei, imei_photo_url, proof_url, user, product_id=None):
+    """Score one evidence submission out of 100. Returns a dict, commits nothing.
+
+    Weighted so an honest seller who supplies exactly the two required items -
+    the IMEI with a photo of it on screen, and a photo of purchase proof - clears
+    the threshold, while a submission missing either one cannot.
+    """
+    imei = normalize_imei(imei)
+    result = {
+        'imei': imei, 'imei_valid': False, 'uniqueness_ok': False,
+        'photo_score': 0.0, 'proof_score': 0.0, 'originality_score': 0.0,
+        'total_score': 0.0, 'hard_fail': False, 'reasons': [],
+        'proof_fingerprint': '',
+    }
+
+    # Hard fails first. No score is computed for any of these: a reject with a
+    # number attached invites haggling over the number.
+    if not imei:
+        result.update(hard_fail=True, reasons=['Enter the handset\'s IMEI. Dial *#06# on the phone to see it.'])
+        return result
+    if not imei_checksum_valid(imei):
+        result.update(hard_fail=True, reasons=[
+            'That IMEI is not valid. It is 15 digits - dial *#06# on the handset and copy it exactly.'])
+        return result
+    if not imei_photo_url:
+        result.update(hard_fail=True, reasons=['Add a photo of the IMEI showing on the phone\'s screen.'])
+        return result
+    if not proof_url:
+        result.update(hard_fail=True, reasons=[
+            'Add proof of purchase: the receipt, the box IMEI label, or the original M-Pesa message.'])
+        return result
+
+    conflicts = imei_hard_conflicts(imei, user, product_id)
+    if conflicts:
+        result.update(hard_fail=True, reasons=conflicts)
+        return result
+
+    # Evidence reused across accounts. Same precedent as the KYC document
+    # fingerprint check: one receipt, six listings.
+    fingerprint = file_content_fingerprint(proof_url)
+    result['proof_fingerprint'] = fingerprint
+    if fingerprint:
+        reused = (db.session.query(PhoneOwnershipEvidence.id, PhoneOwnershipEvidence.user_id)
+                  .filter(PhoneOwnershipEvidence.proof_fingerprint == fingerprint,
+                          PhoneOwnershipEvidence.product_id != (product_id or 0))
+                  .first())
+        if reused:
+            # The fingerprint is cleared rather than carried. The column means "this is
+            # the attempt that claimed this image", and this attempt did not - the row
+            # it collides with holds the claim. Storing it here trips the unique
+            # constraint, so what should be a clean "already used elsewhere" rejection
+            # arrives as an IntegrityError instead, which the route can only answer
+            # with a misleading flash and no evidence row written at all: the record of
+            # precisely the attempt most worth keeping is the one thing lost.
+            result.update(hard_fail=True, proof_fingerprint='', reasons=[
+                'This exact proof image has already been used for another listing.'
+                if reused.user_id == getattr(user, 'id', None) else
+                'This proof image is already linked to another account.'])
+            return result
+        # This listing already registered this image on an earlier attempt, so the
+        # claim exists and stays unique platform-wide. Carrying it onto a second row
+        # would collide with the listing's own history and turn the resubmission
+        # after a rejection - the thing this flow promises is always available - into
+        # an integrity error on commit.
+        claimed = (db.session.query(PhoneOwnershipEvidence.id)
+                   .filter(PhoneOwnershipEvidence.proof_fingerprint == fingerprint,
+                           PhoneOwnershipEvidence.product_id == (product_id or 0))
+                   .first())
+        if claimed:
+            result['proof_fingerprint'] = ''
+
+    result['imei_valid'] = True
+    result['uniqueness_ok'] = True
+    total = 25.0 + 20.0  # valid IMEI, unique IMEI
+
+    photo_measure, photo_reasons, photo_legible = evidence_image_measure(imei_photo_url)
+    result['photo_score'] = round(25.0 * photo_measure / 100, 2)
+    total += result['photo_score']
+    result['reasons'].extend(f'IMEI photo: {reason}' for reason in photo_reasons)
+
+    proof_measure, proof_reasons, proof_legible = evidence_image_measure(proof_url)
+    result['proof_score'] = round(20.0 * proof_measure / 100, 2)
+    total += result['proof_score']
+    result['reasons'].extend(f'Purchase proof: {reason}' for reason in proof_reasons)
+
+    # A required photo nobody can read is materially a missing one: the platform
+    # cannot tell whether it shows what the seller says it shows, which is the whole
+    # question being asked. So it is a refusal, not a deduction - and it has to be,
+    # because the weights cannot express it. A flawless submission that forfeits every
+    # one of the 20 proof points still totals 80, a comfortable pass, so no threshold
+    # on this score could ever require both photos to be readable.
+    #
+    # Placed after both measures so a seller who got both wrong is told both at once,
+    # rather than fixing one and only then discovering the other. Scores zeroed to
+    # match the hard fails above: the named reasons are the useful diagnostic here,
+    # and a refusal carrying a two-thirds-of-the-way number invites an argument about
+    # the number instead of a retake.
+    if not photo_legible or not proof_legible:
+        result.update(hard_fail=True, photo_score=0.0, proof_score=0.0)
+        return result
+
+    imei_fresh, imei_fresh_reasons = evidence_image_freshness(imei_photo_url)
+    proof_fresh, _ = evidence_image_freshness(proof_url)
+    # Proof of purchase is legitimately old - a receipt from two years ago is
+    # still the receipt - so only the IMEI photo is judged on age, and the proof
+    # contributes just by being a readable photograph.
+    result['originality_score'] = round(10.0 * (0.7 * imei_fresh + 0.3 * min(proof_fresh + 0.5, 1.0)), 2)
+    total += result['originality_score']
+    result['reasons'].extend(f'IMEI photo: {reason}' for reason in imei_fresh_reasons)
+
+    result['total_score'] = round(total, 2)
+    return result
+
+
+def seller_has_prior_phone_listing(user_id):
+    """Has this seller had a phone listing verified before?
+
+    The first one always gets a human look regardless of score - the automated
+    checks measure the evidence, not the seller, and a first-time phone seller is
+    exactly where the platform has learned nothing yet.
+    """
+    return db.session.query(
+        db.session.query(PhoneOwnershipEvidence.id)
+        .filter(PhoneOwnershipEvidence.user_id == user_id,
+                PhoneOwnershipEvidence.status.in_(('approved', 'manual_second_review')))
+        .exists()
+    ).scalar()
+
+
+def record_phone_evidence(product, imei, imei_photo_url, proof_url, as_admin=False):
+    """Score a submission, store it, and set the listing's review status.
+
+    Returns the PhoneOwnershipEvidence row. Adds to the session but does not
+    commit - the caller owns the transaction, so a listing and its verdict land
+    together or not at all.
+    """
+    if as_admin:
+        # An admin listing platform stock they already know the history of. Recorded
+        # anyway, so the IMEI is still registered against the listing and the next
+        # person to submit that number hits the duplicate check.
+        evidence = PhoneOwnershipEvidence(
+            product_id=product.id, user_id=current_user.id,
+            imei=normalize_imei(imei), imei_photo_path=imei_photo_url or None,
+            proof_path=proof_url or None,
+            imei_valid=imei_checksum_valid(imei), uniqueness_ok=True,
+            total_score=100.0, status='approved',
+            notes=json.dumps(['Listed by an admin - device history already known.']),
+            reviewed_by=current_user.id, reviewed_at=utcnow())
+        product.review_status = 'approved'
+        db.session.add(evidence)
+        return evidence
+
+    scored = score_phone_evidence(imei, imei_photo_url, proof_url,
+                                  current_user, product_id=product.id)
+
+    if scored['hard_fail']:
+        status = 'auto_rejected'
+    elif not seller_has_prior_phone_listing(current_user.id):
+        # First phone from this seller. Their evidence may be perfect; one human
+        # look is the price of the first one.
+        status = 'manual_second_review'
+        scored['reasons'].insert(0, 'First phone listing on this account - a person will confirm it.')
+    elif scored['total_score'] >= PHONE_EVIDENCE_MIN_SCORE:
+        status = 'approved'
+    else:
+        status = 'auto_rejected'
+        scored['reasons'].insert(0, 'The evidence supplied was not strong enough to verify ownership '
+                                    'automatically. Fix the items below and submit again.')
+
+    evidence = PhoneOwnershipEvidence(
+        product_id=product.id, user_id=current_user.id, imei=scored['imei'],
+        imei_photo_path=imei_photo_url or None, proof_path=proof_url or None,
+        proof_fingerprint=scored['proof_fingerprint'] or None,
+        imei_valid=scored['imei_valid'], uniqueness_ok=scored['uniqueness_ok'],
+        photo_score=scored['photo_score'], proof_score=scored['proof_score'],
+        originality_score=scored['originality_score'],
+        total_score=scored['total_score'], status=status,
+        notes=json.dumps(scored['reasons']) if scored['reasons'] else None)
+    db.session.add(evidence)
+
+    product.review_status = status
+    # Passing publishes. The listing was parked with is_active=False when it was
+    # created, so carrying that flag forward would leave a verified phone invisible
+    # and waiting on a toggle the seller has no reason to look for - which is the
+    # manual step this whole flow exists to remove. Anything short of approved
+    # stays down.
+    product.is_active = status == 'approved'
+    return evidence
+
+
+def latest_phone_evidence(product_id):
+    """The submission that decides a listing: its newest one."""
+    return (PhoneOwnershipEvidence.query
+            .filter(PhoneOwnershipEvidence.product_id == product_id)
+            .order_by(PhoneOwnershipEvidence.created_at.desc(),
+                      PhoneOwnershipEvidence.id.desc())
+            .first())
+
 
 def seller_listing_gate():
     """Return (storefront, redirect) for the seller listing pages.
@@ -14153,6 +14881,11 @@ def save_seller_product(product, storefront, is_new):
 
     # Second-hand and thrifted goods still need a human to look at them; new
     # stock from a verified storefront goes live immediately.
+    #
+    # Second-hand phones are the exception, and the reason this branch is no longer
+    # the last word: they route to the evidence flow below instead of a queue. The
+    # status set here is the holding one, replaced by record_phone_evidence's verdict
+    # once the seller has submitted the IMEI and the two photos.
     if condition in ['second_hand', 'refurbished']:
         product.review_status = 'manual_second_review'
         product.is_active = False
@@ -14160,6 +14893,21 @@ def save_seller_product(product, storefront, is_new):
         product.review_status = 'admin_review'
     else:
         product.review_status = 'approved'
+
+    if phone_evidence_required(product):
+        blocked = phone_listing_gate(current_user)
+        if blocked:
+            return blocked
+        # An edit to a listing whose evidence already passed keeps its verdict.
+        # Re-verifying on every price change would send an approved phone back to
+        # the start for no new reason, and product.id is None on a new listing so
+        # there is nothing to look up there anyway.
+        settled = latest_phone_evidence(product.id) if product.id else None
+        if settled and settled.status == 'approved':
+            product.review_status = 'approved'
+        else:
+            product.review_status = 'pending_evidence'
+            product.is_active = False
 
     images = uploaded_product_images()
     if images:
@@ -14279,19 +15027,24 @@ def attach_digital_file(product, file, required=True):
     return None
 
 
-def apply_digital_defaults(product):
+def apply_digital_defaults(product, skip_review=False):
     """Force the fields a digital listing cannot meaningfully carry.
 
     Left to the form these would hold whatever the physical inputs posted, and a
     downloadable file with a shipping weight and a stock count of zero reads as
     out of stock everywhere that checks.
+
+    ``skip_review`` is for admin uploads. The review queue exists so somebody
+    checks a seller's copyright claim before academic material goes on sale, and
+    an admin holding their own upload for their own approval is a queue that
+    reviews itself. It deliberately does not change the default for sellers.
     """
     product.is_digital = True
     product.product_condition = 'new'
     product.stock = 0
     product.weight_kg = 0.0
     product.free_delivery = True
-    if DIGITAL_REVIEW_REQUIRED:
+    if DIGITAL_REVIEW_REQUIRED and not skip_review:
         product.review_status = 'admin_review'
         product.is_active = False
     return product
@@ -14329,7 +15082,7 @@ def digital_product_name(filename, fallback='Digital download'):
     return cleaned[:200]
 
 
-def read_bulk_digital_form():
+def read_bulk_digital_form(as_admin=False):
     """The fields shared by every file in the batch, read once.
 
     Returns (shared, error). These arrive on every request rather than being
@@ -14351,6 +15104,10 @@ def read_bulk_digital_form():
         'is_active': form_bool('is_active'),
         'first_page_preview': form_bool('first_page_preview'),
         'cover_url': (request.form.get('cover_url', '').strip() or None),
+        # Sellers are held to the standard rate; the admin form can set it within
+        # the same band the single-product admin form allows.
+        'commission_percent': (form_float('commission_percent', 15, minimum=10.0, maximum=15.0)
+                               if as_admin else 15.0),
     }, None
 
 
@@ -14365,6 +15122,10 @@ def bulk_digital_location(storefront):
     times, which is also why the empty label matters - it is the other branch in
     apply_product_location that would reach for the geocoder.
     """
+    # Admin uploads have no storefront at all. Platform stock ships from the
+    # platform, so there is no pin to resolve and nothing to geocode.
+    if storefront is None:
+        return {'storefront': None, 'lat': None, 'lng': None}
     try:
         geocode_storefront(storefront)
     except Exception:
@@ -14376,9 +15137,10 @@ def bulk_digital_location(storefront):
             'lng': storefront.location_lng}
 
 
-def build_bulk_digital_product(file, shared, location):
+def build_bulk_digital_product(file, shared, location, as_admin=False):
     """One uploaded file becomes one product. Returns (product, error)."""
-    product = Product(seller_id=current_user.id, commission_percent=15.0)
+    product = Product(seller_id=current_user.id,
+                      commission_percent=shared.get('commission_percent', 15.0))
     failure = attach_digital_file(product, file, required=True)
     if failure:
         return None, failure
@@ -14396,7 +15158,10 @@ def build_bulk_digital_product(file, shared, location):
     product.first_page_preview = shared['first_page_preview']
     product.is_active = shared['is_active']
     product.image_url = shared['cover_url']
-    apply_digital_defaults(product)
+    # Platform stock, listed by the same admin who would otherwise review it, so it
+    # carries admin placement and skips the copyright queue.
+    product.admin_priority = bool(as_admin)
+    apply_digital_defaults(product, skip_review=as_admin)
 
     # A download ships from nowhere, but the pin is what tells a buyer whose shop
     # this is, so it follows the storefront like every other listing.
@@ -14405,7 +15170,7 @@ def build_bulk_digital_product(file, shared, location):
     return product, None
 
 
-def save_bulk_digital_batch(files, shared, storefront):
+def save_bulk_digital_batch(files, shared, storefront, as_admin=False):
     """Persist a batch, isolating each file so one bad one does not sink the rest.
 
     Each product goes in inside a savepoint. Without one, a name collision or a
@@ -14419,7 +15184,8 @@ def save_bulk_digital_batch(files, shared, storefront):
         filename = file.filename or 'unnamed file'
         try:
             with db.session.begin_nested():
-                product, error = build_bulk_digital_product(file, shared, location)
+                product, error = build_bulk_digital_product(file, shared, location,
+                                                            as_admin=as_admin)
                 if error:
                     raise BulkFileRejected(error)
                 db.session.add(product)
@@ -14566,6 +15332,78 @@ def seller_products_bulk_upload():
     return jsonify(payload)
 
 
+# The admin side of the same machinery. Everything below reuses the seller helpers;
+# the only differences are the gate (admin rather than an approved storefront), the
+# absent storefront, and that these publish immediately - see apply_digital_defaults.
+@app.route('/admin/products/bulk')
+@login_required
+@admin_required
+def admin_products_bulk():
+    """The bulk document listing page for admins."""
+    return render_template(
+        'admin/admin_bulk_digital.html',
+        categories=nav_categories(active_only=False),
+        max_files_per_request=BULK_DIGITAL_MAX_FILES,
+        request_budget_bytes=bulk_digital_request_budget(),
+        max_file_bytes=bulk_digital_max_file_bytes(),
+        allowed_extensions=sorted(ALLOWED_DIGITAL_EXTENSIONS),
+    )
+
+
+@app.route('/admin/products/bulk/cover', methods=['POST'])
+@login_required
+@admin_required
+@limiter.limit(BULK_DIGITAL_RATE_LIMIT)
+def admin_products_bulk_cover():
+    """Store the shared cover image once and hand back its URL."""
+    cover = request.files.get('cover_image')
+    if not cover or not cover.filename:
+        return jsonify({'ok': False, 'error': 'No image arrived.'}), 400
+    try:
+        return jsonify({'ok': True, 'cover_url': save_product_image(cover)})
+    except (ValueError, OSError) as exc:
+        app.logger.info('Admin bulk digital cover rejected: %s', exc)
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+
+
+@app.route('/admin/products/bulk/upload', methods=['POST'])
+@login_required
+@admin_required
+@limiter.limit(BULK_DIGITAL_RATE_LIMIT)
+def admin_products_bulk_upload():
+    """Take one batch of admin-uploaded documents and report on each of them."""
+    shared, error = read_bulk_digital_form(as_admin=True)
+    if error:
+        return jsonify({'ok': False, 'error': error}), 400
+
+    files = [f for f in request.files.getlist('files') if f and f.filename]
+    if not files:
+        return jsonify({'ok': False, 'error': 'No files arrived in that batch.'}), 400
+    if len(files) > BULK_DIGITAL_MAX_FILES:
+        return jsonify({'ok': False,
+                        'error': f'Send at most {BULK_DIGITAL_MAX_FILES} files per batch.'}), 400
+
+    created, failed = save_bulk_digital_batch(files, shared, None, as_admin=True)
+
+    payload = {
+        'ok': True,
+        'created': created,
+        'failed': failed,
+        'cover_url': shared['cover_url'],
+        'summary': {'created': len(created), 'failed': len(failed)},
+    }
+
+    if created:
+        log_admin_action('admin_bulk_digital_upload', 'product', created[0]['id'], {
+            'admin_id': current_user.id,
+            'count': len(created),
+            'product_ids': [item['id'] for item in created],
+            # Kept even though an admin uploaded these: it is the record that
+            # matters if a takedown ever lands.
+            'rights_confirmed': True,
+        })
+    return jsonify(payload)
+
 
 @app.route('/seller/products', methods=['GET', 'POST'])
 @app.route('/seller/products/<int:product_id>', methods=['GET', 'POST'])
@@ -14604,6 +15442,11 @@ def seller_products(product_id=None):
                     notify_seller_listing_live(target, storefront)
                 else:
                     flash(f'"{target.name}" updated.', 'success')
+                # A second-hand phone goes straight to the evidence step. Sending
+                # the seller back to the product list here would leave the listing
+                # parked with nothing telling them what it is waiting for.
+                if target.review_status == 'pending_evidence':
+                    return redirect(url_for('seller_phone_ownership', product_id=target.id))
                 if target.review_status != 'approved':
                     flash('This condition needs an admin check before it appears in the shop.', 'info')
 
@@ -14653,6 +15496,123 @@ def seller_product_toggle(product_id):
     invalidate_product_cache()
     flash(f'"{product.name}" is now {"visible" if product.is_active else "hidden"}.', 'success')
     return redirect(url_for('seller_products'))
+
+
+@app.route('/seller/products/<int:product_id>/ownership', methods=['GET', 'POST'])
+@login_required
+@limiter.limit(PHONE_EVIDENCE_RATE_LIMIT)
+def seller_phone_ownership(product_id):
+    """The guided ownership-evidence step for a second-hand phone.
+
+    The guidance is the point. Because a submission below the threshold is rejected
+    outright with no middle band, the honest seller's protection is that every
+    problem is findable while the handset is still in their hand: the IMEI is
+    checksum-checked in the browser before it is sent, each photo is measured on
+    submission, and a rejection names the item that failed and can be resubmitted
+    on the spot.
+    """
+    storefront, bounce = seller_listing_gate()
+    if bounce:
+        return bounce
+    product = Product.query.filter_by(id=product_id, seller_id=current_user.id).first_or_404()
+
+    if not phone_evidence_required(product):
+        flash('That listing does not need ownership evidence.', 'info')
+        return redirect(url_for('seller_products'))
+
+    blocked = phone_listing_gate(current_user)
+    if blocked:
+        flash(blocked, 'warning')
+        return redirect(url_for('seller_products'))
+
+    if request.method == 'POST':
+        imei = normalize_imei(request.form.get('imei', ''))
+
+        # Camera capture first, file upload second. The guided flow uses the camera,
+        # and a seller who did both meant the one they just took.
+        imei_photo = (save_capture_data(request.form.get('imei_photo_capture', ''),
+                                       PHONE_EVIDENCE_FOLDER)
+                      or save_phone_evidence_upload(request.files.get('imei_photo')))
+        proof = (save_capture_data(request.form.get('proof_capture', ''),
+                                  PHONE_EVIDENCE_FOLDER)
+                 or save_phone_evidence_upload(request.files.get('proof_file')))
+
+        # Carry over what was already accepted, so fixing one rejected item does not
+        # mean rephotographing both.
+        previous = latest_phone_evidence(product.id)
+        if previous:
+            imei_photo = imei_photo or previous.imei_photo_path
+            proof = proof or previous.proof_path
+
+        try:
+            evidence = record_phone_evidence(product, imei, imei_photo, proof)
+            db.session.commit()
+        except IntegrityError:
+            # The unique constraint on proof_fingerprint caught a reuse that the
+            # query above raced past. Same answer, from the database instead.
+            db.session.rollback()
+            flash('That proof image is already linked to another listing. '
+                  'Use the proof for this handset.', 'danger')
+            return redirect(url_for('seller_phone_ownership', product_id=product.id))
+        except SQLAlchemyError:
+            db.session.rollback()
+            app.logger.exception('Phone evidence save failed for product %s', product.id)
+            flash('The evidence could not be saved. Please try again.', 'danger')
+            return redirect(url_for('seller_phone_ownership', product_id=product.id))
+
+        invalidate_product_cache()
+        if evidence.status == 'approved':
+            flash(f'Ownership verified. "{product.name}" is live in the shop now.', 'success')
+            return redirect(url_for('seller_products'))
+        if evidence.status == 'manual_second_review':
+            flash('Evidence received. Your first phone listing gets one human check - '
+                  'usually the same day.', 'info')
+            return redirect(url_for('seller_products'))
+        flash('That evidence was not enough to verify ownership. '
+              'The reasons are below, and you can submit again straight away.', 'warning')
+        return redirect(url_for('seller_phone_ownership', product_id=product.id))
+
+    evidence = latest_phone_evidence(product.id)
+    return render_template('seller_phone_ownership.html', product=product,
+                           storefront=storefront, evidence=evidence,
+                           # So the page can promise what it will actually do. The
+                           # explainer said verification is automatic with no waiting
+                           # for a person, which is false for exactly the seller
+                           # reading it for the first time - their first listing is
+                           # held for one human look whatever it scores. Telling them
+                           # that after they submit, in the status box, is the wrong
+                           # order: this page exists to set expectations before the
+                           # phone leaves their hand, and a promise broken on the
+                           # first use is the one that costs the most trust.
+                           first_listing=not seller_has_prior_phone_listing(
+                               current_user.id),
+                           attempts=PhoneOwnershipEvidence.query
+                           .filter_by(product_id=product.id)
+                           .order_by(PhoneOwnershipEvidence.created_at.desc())
+                           .limit(5).all(),
+                           min_score=PHONE_EVIDENCE_MIN_SCORE)
+
+
+@app.route('/seller/products/<int:product_id>/ownership/imei-check', methods=['POST'])
+@login_required
+@limiter.limit(PHONE_EVIDENCE_RATE_LIMIT)
+def seller_phone_imei_check(product_id):
+    """Check an IMEI before the seller photographs anything.
+
+    The browser already does the Luhn arithmetic. What it cannot know is whether
+    the number is already listed or still under finance, and finding that out after
+    taking two photos is a wasted trip.
+    """
+    product = Product.query.filter_by(id=product_id, seller_id=current_user.id).first_or_404()
+    imei = normalize_imei((request.get_json(silent=True) or {}).get('imei', ''))
+    if not imei_checksum_valid(imei):
+        return jsonify({'ok': False,
+                        'reason': 'That is not a valid IMEI. Dial *#06# on the handset '
+                                  'and copy all 15 digits.'})
+    conflicts = imei_hard_conflicts(imei, current_user, product.id)
+    if conflicts:
+        return jsonify({'ok': False, 'reason': conflicts[0]})
+    return jsonify({'ok': True, 'reason': 'IMEI looks good.'})
 
 
 @app.route('/seller/withdrawals', methods=['GET', 'POST'])
@@ -17244,6 +18204,11 @@ def phase_two_schema_spec():
         ('ix_products_active_category_created', 'products', 'is_active, category_id, created_at', False),
         ('ix_products_active_price', 'products', 'is_active, selling_price', False),
         ('ix_products_hot_priority_created', 'products', 'is_hot_sale, admin_priority, created_at', False),
+        # The admin moderation queue filters on review_status and orders by
+        # created_at. Every other products index leads with is_active, which a
+        # parked listing is not, so without this the queue is a full scan of a
+        # table whose whole point is to be large.
+        ('ix_products_review_created', 'products', 'review_status, created_at', False),
         ('ix_orders_user_created', 'orders', 'user_id, created_at', False),
         ('ix_orders_payment_status_created', 'orders', 'payment_status, created_at', False),
         ('ix_order_items_order', 'order_items', 'order_id', False),
@@ -17258,6 +18223,11 @@ def phase_two_schema_spec():
         ('ix_shopping_cards_user_status', 'shopping_cards', 'user_id, status', False),
         ('ix_card_transactions_card_created', 'shopping_card_transactions', 'card_id, created_at', False),
         ('ix_kyc_user_status_created', 'kyc_identity_verifications', 'user_id, status, created_at', False),
+        # Second-hand phone evidence. The IMEI lookup runs on every submission to
+        # answer "is this handset already listed", so it cannot be a table scan.
+        ('ix_phone_evidence_imei_status', 'phone_ownership_evidence', 'imei, status', False),
+        ('ix_phone_evidence_user_created', 'phone_ownership_evidence', 'user_id, created_at', False),
+        ('ix_phone_evidence_product_created', 'phone_ownership_evidence', 'product_id, created_at', False),
         ('ix_shipping_zones_active_priority', 'shipping_zones', 'is_active, priority', False),
         ('ix_shipping_quotes_created', 'shipping_quotes', 'created_at', False),
         ('ix_shipping_quotes_order', 'shipping_quotes', 'order_id', False),
