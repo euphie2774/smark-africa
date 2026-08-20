@@ -13,6 +13,15 @@ found one: an orphan admin template pointing at an endpoint that no longer exist
 The rest are cheap invariants worth asserting on every run rather than reasoning
 about: the phone-evidence folder stays off both Cloudinary folder sets, the new env
 vars all have working defaults, and the comparables cache actually caches.
+
+Two later groups cover failures that are invisible from inside the app. The
+crawlability checks assert robots.txt serves, sitemap.xml is well-formed, public-only
+and cached, and that a canonical tag actually reaches a rendered page - a sitemap
+that 500s looks perfectly healthy to every human visitor while costing the site every
+search result. The sizing checks assert worker_plan reads the container's limits
+rather than the host's, which is the 503 this suite now catches before a deploy does:
+nine workers of 200MB cannot start inside a 512MB instance, and the kernel kills them
+without an application log line to explain it.
 """
 import os, sys
 
@@ -235,6 +244,177 @@ def evidence_model_wired():
 
 
 check('evidence table and index specs', evidence_model_wired)
+
+
+# ---------- Crawlability ----------
+# These exist because the failure mode is silent. A missing robots.txt, a sitemap
+# that 500s, or a canonical tag that names the wrong host all serve a working site
+# to every human visitor while quietly costing it every search result, and nothing
+# in the application logs says so.
+
+def seo_routes_present():
+    for want in ('/robots.txt', '/sitemap.xml'):
+        assert want in routes, f'missing {want}'
+
+
+check('robots.txt and sitemap.xml routed', seo_routes_present)
+
+
+def robots_txt_body():
+    with app.test_client() as client:
+        resp = client.get('/robots.txt', base_url='https://localhost')
+        assert resp.status_code == 200, resp.status_code
+        assert resp.headers['Content-Type'].startswith('text/plain'), resp.headers['Content-Type']
+        body = resp.get_data(as_text=True)
+        assert body.startswith('User-agent: *'), body[:60]
+        assert 'Disallow: /admin/' in body, body
+        assert 'Disallow: /checkout' in body, body
+        # Absolute, and on the host that asked - a relative Sitemap line is ignored.
+        assert 'Sitemap: https://localhost/sitemap.xml' in body, body
+
+
+check('robots.txt serves and names the sitemap', robots_txt_body)
+
+
+def sitemap_xml_body():
+    import xml.etree.ElementTree as ET
+    with app.test_client() as client:
+        resp = client.get('/sitemap.xml', base_url='https://localhost')
+        # Was 500 before the cache lookup was fixed: TTLCache.get() returns None on
+        # a miss rather than the sentinel, so the build block was skipped entirely
+        # and the response body was None. Asserting the status code is what caught
+        # it, which is why this is a request and not a call to the function.
+        assert resp.status_code == 200, resp.status_code
+        assert resp.headers['Content-Type'].startswith('application/xml'), resp.headers['Content-Type']
+        root = ET.fromstring(resp.get_data(as_text=True))  # raises if malformed
+        ns = '{http://www.sitemaps.org/schemas/sitemap/0.9}'
+        locs = [el.text for el in root.iter(f'{ns}loc')]
+        assert 'https://localhost/' in locs, locs[:8]
+        assert any(loc.endswith('/shop') for loc in locs), locs[:8]
+        # Nothing private may ever appear here.
+        for loc in locs:
+            assert not any(p.rstrip('/') in loc for p in ('/admin', '/seller', '/cart')), loc
+
+
+check('sitemap.xml is well-formed and public-only', sitemap_xml_body)
+
+
+def sitemap_cached():
+    before = main._sitemap_cache.stats().get('hits', 0)
+    with app.test_client() as client:
+        client.get('/sitemap.xml', base_url='https://localhost')
+        client.get('/sitemap.xml', base_url='https://localhost')
+    after = main._sitemap_cache.stats().get('hits', 0)
+    assert after > before, f'sitemap not cached: {before} -> {after}'
+
+
+check('sitemap.xml caches between crawls', sitemap_cached)
+
+
+def noindex_vectors():
+    public = ['/', '/shop', '/product/some-slug', '/categories/phones', '/about', '/terms']
+    private = ['/admin/products', '/cart', '/checkout', '/login', '/register',
+               '/seller/dashboard', '/api/anything', '/notifications', '/healthz']
+    for path in public:
+        with app.test_request_context(path):
+            assert not main.page_is_noindex(), f'should be indexable: {path}'
+    for path in private:
+        with app.test_request_context(path):
+            assert main.page_is_noindex(), f'should be noindex: {path}'
+
+
+check('page_is_noindex vectors', noindex_vectors)
+
+
+def canonical_vectors():
+    for key in ('APP_BASE_URL', 'PUBLIC_URL'):
+        os.environ.pop(key, None)
+    # Tracking parameters collapse; pagination does not.
+    with app.test_request_context('/shop?utm_source=fb&ref=x&page=2'):
+        url = main.canonical_url()
+        assert url.endswith('/shop?page=2'), url
+        assert 'utm_source' not in url and 'ref=' not in url, url
+    with app.test_request_context('/shop?page=1'):
+        assert main.canonical_url().endswith('/shop'), main.canonical_url()
+    # A configured base wins, and is forced to https even when written bare.
+    os.environ['APP_BASE_URL'] = 'www.smark-africa.com'
+    try:
+        with app.test_request_context('/shop', base_url='http://smark-africa.com'):
+            assert main.canonical_url() == 'https://www.smark-africa.com/shop', main.canonical_url()
+    finally:
+        os.environ.pop('APP_BASE_URL', None)
+    # Outside a request there is no one URL to name, and it must not raise.
+    assert main.canonical_url() == ''
+
+
+check('canonical_url normalises host and query', canonical_vectors)
+
+
+def canonical_tag_rendered():
+    """The helper being right is worth nothing if the tag never reaches the page."""
+    with app.test_client() as client:
+        resp = client.get('/about', base_url='https://localhost')
+        assert resp.status_code == 200, resp.status_code
+        body = resp.get_data(as_text=True)
+        assert '<link rel="canonical"' in body, 'no canonical tag on /about'
+        assert 'https://localhost/about' in body, 'canonical does not name this page'
+        assert 'name="robots"' not in body, 'public page must not be noindex'
+
+
+check('canonical tag reaches a rendered page', canonical_tag_rendered)
+
+
+# ---------- Container-aware sizing ----------
+def worker_plan_respects_container():
+    """A 512MB / 0.1-CPU instance must plan one worker, not nine.
+
+    This is the 503 in a single assertion. os.cpu_count() reports the host's cores
+    inside a container, so the classic formula asked for nine workers of roughly
+    200MB each on an instance with 512MB, and the kernel killed them before any of
+    them logged a reason.
+    """
+    import scale
+    saved_env = {k: os.environ.pop(k, None)
+                 for k in ('WEB_CONCURRENCY', 'MAX_WEB_CONCURRENCY', 'WORKER_MEMORY_MB',
+                           'GUNICORN_THREADS')}
+    orig_mem, orig_cpu = scale.container_memory_limit, scale.container_cpu_quota
+    try:
+        scale.container_memory_limit = lambda: 512 * 1024 * 1024
+        scale.container_cpu_quota = lambda: 0.1
+        workers, threads = scale.worker_plan()
+        assert workers == 1, f'512MB instance planned {workers} workers'
+        assert threads == 4, threads
+        # A roomier box still scales up, so the cap is not a permanent ceiling.
+        scale.container_memory_limit = lambda: 4 * 1024 * 1024 * 1024
+        scale.container_cpu_quota = lambda: 4.0
+        bigger, _ = scale.worker_plan()
+        assert bigger > 1, f'4GB/4cpu instance planned only {bigger}'
+        # Unrestricted (no cgroup) must still return something sane.
+        scale.container_memory_limit = lambda: 0
+        scale.container_cpu_quota = lambda: 0.0
+        free, _ = scale.worker_plan()
+        assert free >= 1, free
+    finally:
+        scale.container_memory_limit, scale.container_cpu_quota = orig_mem, orig_cpu
+        for key, value in saved_env.items():
+            if value is not None:
+                os.environ[key] = value
+
+
+check('worker_plan sizes to the container, not the host', worker_plan_respects_container)
+
+
+def cgroup_parsers_are_safe():
+    """The parsers must return "unlimited" rather than a wrong number when read fails."""
+    import scale
+    assert scale._cgroup_value('/definitely/not/a/path') == ''
+    # On Windows and any non-cgroup host both must report unrestricted, not crash.
+    assert isinstance(scale.container_memory_limit(), int)
+    assert isinstance(scale.container_cpu_quota(), float)
+
+
+check('cgroup readers tolerate a host without cgroups', cgroup_parsers_are_safe)
+
 
 print()
 if failures:

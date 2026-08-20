@@ -90,6 +90,32 @@ init_logging(config_class)
 logger = logging.getLogger(__name__)
 app.config.from_object(config_class)
 
+# Behind a hosting platform's proxy, every request arrives from the proxy, so
+# without this the app sees one client address for the entire internet and an
+# http:// scheme on an https:// site. Both matter more than they look:
+#
+#   * key_func=get_remote_address below keys rate limits on request.remote_addr.
+#     One address for everyone means one shared bucket, so default_limits of
+#     "50 per minute" becomes fifty requests per minute for the whole platform
+#     and the site starts refusing everybody at once. Per-IP limiting cannot work
+#     until the real address is visible.
+#   * url_for(..., _external=True) builds canonical tags, sitemap entries and
+#     emailed links from request.scheme. Emitting http:// URLs that then redirect
+#     to https:// is how a crawler ends up reporting "page with redirect" for
+#     pages that are perfectly fine when a person visits them.
+#
+# Deliberately conditional. Trusting X-Forwarded-For when nothing is actually in
+# front of the app lets any client claim any address and walk past every per-IP
+# limit, so this is on where there is a real proxy and off otherwise. One hop:
+# the value the trusted proxy appended, not whatever the client sent.
+_behind_proxy = bool_env('TRUST_PROXY_HEADERS',
+                         os.environ.get('FLASK_ENV') == 'production'
+                         or bool(os.environ.get('RENDER')))
+if _behind_proxy:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    logger.info('Trusting one hop of X-Forwarded-* headers (proxy deployment).')
+
 # ========== SECURITY INITIALIZATION ==========
 
 # CSRF Protection
@@ -6772,6 +6798,79 @@ def seller_nav_state(user=None):
     return state
 
 
+# Paths that are not search results: authenticated views, payment callbacks and
+# actions. One list, read by both robots.txt and the per-page noindex tag, because
+# the two must not be allowed to drift - a path crawlers are asked to skip but
+# whose page still invites indexing is the ambiguity that produces "crawled,
+# currently not indexed" rather than a clean exclusion.
+NON_PUBLIC_PREFIXES = (
+    '/admin/', '/seller/', '/api/', '/pos/',
+    '/cart', '/checkout', '/orders', '/order/', '/notifications',
+    '/login', '/logout', '/register', '/healthz', '/test-email',
+    '/mpesa/', '/flutterwave/', '/track/', '/coins/', '/affiliate/',
+    '/bnpl/', '/shopping-card', '/my-rewards-card', '/support/',
+    '/feedback', '/raffle/', '/compare', '/smart-shopping',
+    '/shop/image-search', '/storefront/apply', '/services/create',
+)
+
+
+def page_is_noindex():
+    """Whether this page should ask search engines not to index it.
+
+    robots.txt asks crawlers not to fetch these paths, which is a request about
+    crawling rather than about indexing: a path that is linked from elsewhere can
+    still be indexed from the link alone while robots.txt keeps the crawler from
+    seeing the page well enough to describe it. The meta tag is what actually
+    settles it, so both are worth having.
+    """
+    if not has_request_context():
+        return False
+    path = request.path or '/'
+    return any(path == prefix.rstrip('/') or path.startswith(prefix)
+               for prefix in NON_PUBLIC_PREFIXES)
+
+
+def canonical_url():
+    """The one URL this page should be indexed under, or '' outside a request.
+
+    Search engines treat every distinct URL that returns the same content as a
+    separate page competing with itself, and there are more of those than anyone
+    writes down: the apex and www forms of the host, http and https, and every
+    variant carrying a tracking parameter a link was shared with. Declaring one
+    preferred URL per page is what collapses them, and its absence is precisely
+    what "duplicate without user-selected canonical" reports.
+
+    Two deliberate choices. The host comes from APP_BASE_URL or PUBLIC_URL when
+    either is set - existing variables, not new ones - so the operator picks the
+    preferred form once; without them it falls back to the host the request
+    arrived on, which is honest but leaves apex and www each canonicalising to
+    themselves. And the query string is dropped except for ``page``, because
+    pagination genuinely is a different page while a utm_ tag is the same one.
+    """
+    if not has_request_context():
+        return ''
+    try:
+        configured = (os.environ.get('APP_BASE_URL') or os.environ.get('PUBLIC_URL') or '').strip()
+        if configured:
+            base = configured.rstrip('/')
+            if '://' not in base:
+                base = f'https://{base}'
+        else:
+            # Local development keeps whatever scheme it is actually using; a real
+            # host is https, since that is what the certificate and every existing
+            # inbound link already assume.
+            host = request.host
+            is_local = host.split(':')[0] in ('localhost', '127.0.0.1', '0.0.0.0')
+            base = f"{request.scheme if is_local else 'https'}://{host}"
+        url = f'{base}{request.path}'
+        page = request.args.get('page', type=int)
+        if page and page > 1:
+            url = f'{url}?page={page}'
+        return url
+    except Exception:
+        return ''
+
+
 @app.context_processor
 def inject_globals():
     """Inject settings and utility vars into all templates"""
@@ -6796,12 +6895,16 @@ def inject_globals():
             seller_signup_enabled=s.get('seller_signup_enabled', '0') == '1',
             unread_notifications=unread_notification_count(),
             seller_nav=seller_nav_state(),
+            canonical=canonical_url(),
+            noindex=page_is_noindex(),
             country_phone_codes=COUNTRY_PHONE_CODES
         )
     except Exception:
         return dict(settings={}, auth_user={'is_authenticated': False, 'is_admin': False, 'admin_level': '', 'username': ''}, now=datetime.utcnow(), platform_ad=None, platform_ads=[],
                     hot_sale_pop=None, seller_signup_enabled=False, unread_notifications=0,
                     seller_nav={'can_sell': False, 'has_storefront': False, 'storefront_pending': False},
+                    canonical=canonical_url(),
+                    noindex=page_is_noindex(),
                     country_phone_codes=COUNTRY_PHONE_CODES)
 # ---------- Error Handlers ----------
 @app.errorhandler(404)
@@ -6836,12 +6939,120 @@ def healthz():
         checks['database'] = f'error: {exc.__class__.__name__}'
         status = 503
     upload_root = app.config.get('UPLOAD_FOLDER')
+    # Create it rather than only inspect it. On a host with an ephemeral disk the
+    # directory is gone after every deploy, and it is this process that needs it.
+    if upload_root:
+        try:
+            os.makedirs(upload_root, exist_ok=True)
+        except OSError as exc:
+            app.logger.warning('Could not create upload folder %s: %s', upload_root, exc)
     if upload_root and os.path.isdir(upload_root) and os.access(upload_root, os.W_OK):
         checks['uploads'] = 'ok'
     else:
+        # Reported, but deliberately not fatal. When this path is the platform's
+        # health check, a non-writable upload directory used to fail it, and
+        # failing a health check takes every page offline - including the entire
+        # catalog, which only reads. Losing uploads degrades one feature; losing
+        # the health check loses the site, so the two must not share a verdict.
         checks['uploads'] = 'not_writable'
-        status = 503
+        checks['degraded'] = 'uploads'
     return jsonify(checks), status
+
+
+_sitemap_cache = TTLCache(ttl_seconds=int_env('SITEMAP_TTL', 3600), max_entries=4)
+
+
+@app.route('/robots.txt')
+def robots_txt():
+    """Tell crawlers what is worth reading and where the sitemap is.
+
+    There was no robots.txt at all before this, which is not the neutral state it
+    sounds like. A missing file returns 404 and Google reads that as "crawl
+    everything" - but a file that returns 5xx is read as "crawl nothing", and a
+    site returning 503 returns it for this path too. That is how an outage turns
+    into pages reported as blocked by a robots.txt that was never written: the
+    block is the outage, wearing another name.
+
+    Serving it from a route rather than a static file keeps the sitemap URL on
+    whatever host the request arrived on, so the apex and www forms each name
+    themselves instead of pointing at a guess.
+    """
+    lines = ['User-agent: *']
+    lines += [f'Disallow: {path}' for path in NON_PUBLIC_PREFIXES]
+    lines += [
+        # Named explicitly because they are the pages worth indexing, and because
+        # a bare Allow makes the intent readable to whoever edits this next.
+        'Allow: /$',
+        'Allow: /shop',
+        'Allow: /product/',
+        'Allow: /categories/',
+        'Allow: /services',
+        'Allow: /about',
+        'Allow: /terms',
+        '',
+        f'Sitemap: {url_for("sitemap_xml", _external=True)}',
+    ]
+    response = make_response('\n'.join(lines) + '\n')
+    response.headers['Content-Type'] = 'text/plain; charset=utf-8'
+    return response
+
+
+@app.route('/sitemap.xml')
+def sitemap_xml():
+    """Every public URL worth crawling, cached so a crawl is not a table scan.
+
+    Cached rather than computed per request because crawlers fetch this far more
+    often than a human loads any page, and the whole point is to make discovery
+    cheap for both sides. Only approved, active, in-stock-or-not listings appear;
+    a listing parked in review is not a page anyone should be sent to.
+    """
+    # lookup(), not get(): get() collapses a miss into None, and None is a value
+    # this cache could legitimately hold. Only lookup() reports the miss.
+    cached = _sitemap_cache.lookup(request.host)
+    if cached is CACHE_MISS:
+        entries = []
+        for endpoint in ('home', 'shop', 'services_marketplace', 'about', 'terms'):
+            try:
+                entries.append((url_for(endpoint, _external=True), None, '0.9'))
+            except Exception as exc:
+                # Logged rather than skipped in silence. A typo here drops a page
+                # from the sitemap without changing the status code, so the only
+                # symptom is a URL Google never hears about - which looks exactly
+                # like a URL Google chose to ignore. Getting 'home' wrong once
+                # already cost the homepage its entry.
+                app.logger.warning('sitemap: no endpoint %s (%s)', endpoint, exc)
+        categories = (db.session.query(Category.slug)
+                      .filter(Category.is_active.is_(True))
+                      .order_by(Category.slug).limit(500).all())
+        for (slug,) in categories:
+            entries.append((url_for('category_products', slug=slug, _external=True), None, '0.7'))
+        products = (db.session.query(Product.slug, Product.updated_at, Product.created_at)
+                    .filter(Product.is_active.is_(True),
+                            or_(Product.review_status == 'approved',
+                                Product.review_status.is_(None)))
+                    .order_by(Product.created_at.desc())
+                    .limit(int_env('SITEMAP_MAX_PRODUCTS', 20000)).all())
+        for slug, updated, created in products:
+            if not slug:
+                continue
+            stamp = updated or created
+            entries.append((url_for('product_page', slug=slug, _external=True),
+                            stamp.date().isoformat() if stamp else None, '0.8'))
+        parts = ['<?xml version="1.0" encoding="UTF-8"?>',
+                 '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+        for loc, lastmod, priority in entries:
+            parts.append('  <url>')
+            parts.append(f'    <loc>{html.escape(loc)}</loc>')
+            if lastmod:
+                parts.append(f'    <lastmod>{lastmod}</lastmod>')
+            parts.append(f'    <priority>{priority}</priority>')
+            parts.append('  </url>')
+        parts.append('</urlset>')
+        cached = '\n'.join(parts)
+        _sitemap_cache.set(request.host, cached)
+    response = make_response(cached)
+    response.headers['Content-Type'] = 'application/xml; charset=utf-8'
+    return response
 
 
 @app.route('/test-email')
@@ -6877,17 +7088,31 @@ def home():
 @app.route('/categories/<string:slug>')
 def category_products(slug):
     category = Category.query.filter_by(slug=slug).first_or_404()
+    # Products already respect is_active on their public page; categories did not,
+    # so a category switched off still served a browsable page to everyone. It is
+    # the same inconsistency twice over: a retired category is not a public page,
+    # and returning 200 with an empty catalog is what a crawler reports as a soft
+    # 404 - a page that says "nothing here" while claiming to be fine. Admins keep
+    # their preview.
+    viewer_is_admin = current_user.is_authenticated and getattr(current_user, 'is_admin', False)
+    if not category.is_active and not viewer_is_admin:
+        abort(404)
+    page = request.args.get('page', 1, type=int)
     # Same cached, capped path the shop uses. Loading every active product in a
     # category worked while a category held dozens; a category holding 40,000
     # listings would build 40,000 objects to render twelve of them, on a page
     # anonymous visitors hit constantly.
-    page = request.args.get('page', 1, type=int)
     product_ids = cached_product_search_ids(category_slug=slug)
     pagination = paginate_cached_product_ids(product_ids, page=page, per_page=12)
     music = is_music_category(category)
     return render_template('category_products.html', category=category,
                            products=pagination.items, pagination=pagination,
                            is_music_category=music,
+                           # An active category with nothing in it yet is a real
+                           # page that should exist and simply is not worth
+                           # indexing today. Asking to be skipped is a clean
+                           # state; being catalogued as a soft 404 is not.
+                           noindex=not pagination.items,
                            voiceover_experts=voiceover_listings(category.id) if music else [])
 @app.route('/shop')
 def shop():
@@ -6910,6 +7135,12 @@ def shop():
         current_category=current_category,
         current_type=product_type,
         search=search,
+        # A search results page is generated for whatever string someone typed, so
+        # indexing it means inviting an unbounded set of near-identical pages built
+        # from user input - and an empty result set is a page that says "nothing
+        # found" while returning 200, which is the definition of a soft 404. The
+        # bare /shop catalog stays indexable; these variants do not.
+        noindex=bool(search) or not pagination.items,
         sort=sort
     )
 
@@ -19222,7 +19453,14 @@ with app.app_context():
     init_database()
 
 background_scheduler = start_background_jobs()
-outbound_worker = start_outbound_worker()
+# Under gunicorn with preload_app this module is imported once, in the master, and
+# threads are not inherited through fork() - so a drainer started here would run in
+# the supervisor while every worker had none. gunicorn.conf.py sets
+# DEFER_OUTBOUND_WORKER and starts one per worker from post_fork instead. The guard
+# lives at this call site rather than inside the function so that post_fork can still
+# call it directly. Every other way of running the app - flask run, python main.py,
+# the check scripts - is unaffected and starts it here as before.
+outbound_worker = None if bool_env('DEFER_OUTBOUND_WORKER') else start_outbound_worker()
 
 
 if __name__ == '__main__':

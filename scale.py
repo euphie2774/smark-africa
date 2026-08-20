@@ -21,6 +21,7 @@ path has a working fallback, so no existing environment variable has to change
 for the app to boot.
 """
 
+import math
 import os
 import socket
 import threading
@@ -256,6 +257,71 @@ class CounterBuffer:
         }
 
 
+def _cgroup_value(*paths):
+    """The first of these cgroup files that can be read, stripped. '' if none."""
+    for path in paths:
+        try:
+            with open(path) as handle:
+                return handle.read().strip()
+        except OSError:
+            continue
+    return ''
+
+
+def container_memory_limit():
+    """Bytes of RAM this process is allowed, or 0 when nothing limits it.
+
+    Inside a container the host's total RAM is the wrong number, and it is the
+    only number Python offers. A 512MB instance scheduled onto a sixteen-core
+    host still reports sixteen cores to ``os.cpu_count()``, so the classic worker
+    formula sizes for the machine and the process gets killed for exceeding its
+    slice. An OOM kill produces no application traceback and, on a small
+    instance, often no log line at all - the failure that is hardest to diagnose
+    is the one this function exists to prevent.
+    """
+    raw = _cgroup_value('/sys/fs/cgroup/memory.max',                    # cgroup v2
+                        '/sys/fs/cgroup/memory/memory.limit_in_bytes')  # cgroup v1
+    if not raw or raw == 'max':
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        return 0
+    # cgroup v1 spells "unlimited" as a sentinel just under 2**63 rather than as
+    # a word, and treating that as a real limit would cap nothing while looking
+    # like it capped something.
+    if value <= 0 or value > (1 << 62):
+        return 0
+    return value
+
+
+def container_cpu_quota():
+    """CPUs this process may use, as a float. 0.0 when unrestricted.
+
+    Render's free and starter instances sell a fraction of a core, so this is
+    usually well below one and ``os.cpu_count()`` is off by more than an order
+    of magnitude.
+    """
+    raw = _cgroup_value('/sys/fs/cgroup/cpu.max')  # v2: "<quota> <period>" or "max <period>"
+    if raw:
+        parts = raw.split()
+        if len(parts) == 2 and parts[0] != 'max':
+            try:
+                period = int(parts[1])
+                return int(parts[0]) / period if period > 0 else 0.0
+            except ValueError:
+                return 0.0
+        return 0.0
+    quota = _cgroup_value('/sys/fs/cgroup/cpu/cpu.cfs_quota_us')       # v1
+    period = _cgroup_value('/sys/fs/cgroup/cpu/cpu.cfs_period_us')
+    try:
+        if int(quota) > 0 and int(period) > 0:
+            return int(quota) / int(period)
+    except ValueError:
+        pass
+    return 0.0
+
+
 def worker_plan():
     """The worker and thread counts the web server will actually run with.
 
@@ -264,18 +330,43 @@ def worker_plan():
     deriving it from the CPU count would agree on the day they were written and
     quietly disagree after the first edit.
 
-    The worker count is capped. ``cpu_count * 2 + 1`` is the classic sync-worker
-    formula and it assumes one request per worker, but these workers run four
-    threads each, so on a sixteen-core host the uncapped formula asks for 33
-    processes and 132 concurrent requests against one database. WEB_CONCURRENCY
-    overrides the cap for anyone who has measured their own host.
+    The worker count is capped three ways. ``cpu_count * 2 + 1`` is the classic
+    sync-worker formula and it assumes one request per worker, but these workers
+    run four threads each, so on a sixteen-core host the uncapped formula asks
+    for 33 processes and 132 concurrent requests against one database.
+
+    The other two caps come from the container rather than the host, and they are
+    the ones that decide whether the app boots at all. Each worker is a separate
+    process holding its own copy of this application, so RAM - not CPU - is the
+    binding constraint on a small instance: nine workers of roughly 110MB each
+    cannot start inside 512MB, and what the operator sees is a service that
+    returns 503 with an empty log, because the kernel killed the processes before
+    anything got far enough to write a line. WEB_CONCURRENCY still overrides
+    everything for anyone who has measured their own host.
     """
     try:
         cpus = os.cpu_count() or 1
     except NotImplementedError:
         cpus = 1
+    quota = container_cpu_quota()
+    if quota:
+        # Round up, so half a core still gets one worker rather than zero.
+        cpus = max(1, int(math.ceil(quota)))
     threads = max(1, int_env('GUNICORN_THREADS', 4))
     default_workers = min(cpus * 2 + 1, int_env('MAX_WEB_CONCURRENCY', 12))
+
+    limit = container_memory_limit()
+    if limit:
+        # Measured at import, not guessed: this app is a single large module plus
+        # SQLAlchemy and Flask. Deliberately generous, because being one worker
+        # short costs a little throughput while being one worker over costs the
+        # whole service.
+        per_worker = max(1, int_env('WORKER_MEMORY_MB', 200)) * 1024 * 1024
+        # Not the whole limit: the master process, the pooled connections and any
+        # request holding an uploaded image all live in the same budget.
+        affordable = int(limit * 0.75) // per_worker
+        default_workers = max(1, min(default_workers, affordable))
+
     workers = max(1, int_env('WEB_CONCURRENCY', default_workers))
     return workers, threads
 

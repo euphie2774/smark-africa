@@ -13,6 +13,12 @@
     <meta name="description" content="{{ settings.get('site_description', 'shop smarter, live better') }}">
     <meta name="keywords" content="{{ settings.get('site_keywords', 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products') }}">
     <meta name="csrf-token" content="{{ csrf_token() if csrf_token else '' }}">
+    {# One preferred URL per page, so the apex/www forms and any shared link
+       carrying a tracking parameter all resolve to the same indexed page instead
+       of competing as separate ones. Overridable per template for the few pages
+       that legitimately canonicalise elsewhere. #}
+    {% block canonical %}{% if canonical %}<link rel="canonical" href="{{ canonical }}">{% endif %}{% endblock %}
+    {% block robots %}{% if noindex %}<meta name="robots" content="noindex, follow">{% endif %}{% endblock %}
     {% block head %}{% endblock %}
 </head>
 <body>
