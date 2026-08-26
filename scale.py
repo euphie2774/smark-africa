@@ -26,6 +26,7 @@ import os
 import socket
 import threading
 import time
+from array import array
 from datetime import timedelta
 
 
@@ -167,6 +168,44 @@ class TTLCache:
             'evictions': self.evictions,
             'hit_rate': round(self.hits / total, 4) if total else 0.0,
         }
+
+
+def pack_ids(ids):
+    """Compact a list of primary keys for storage in a long-lived cache.
+
+    Measured on 1000 ids: 35.2KB as a list of Python ints against 7.9KB as an
+    ``array('q')``, 4.5x, because the array holds raw 8-byte slots instead of a
+    thousand separately boxed integers plus a thousand pointers to them.
+
+    **Why:** the caches this exists for hold one entry per distinct search, so their
+    resident size is the entry cap times the per-entry cost, and both product and
+    service searches cap their id list at 1000. At a 2048-entry cap that is 70MB of
+    every gunicorn worker against a WORKER_MEMORY_MB budget of 200 - and reachable
+    on purpose, not just in theory, since short substrings each match a large slice
+    of the catalogue and are distinct cache keys. Packed, the same cap costs 16MB,
+    so the entry cap can stay where the hit rate wants it.
+
+    Falls back to a plain list rather than raising: these caches sit on public
+    search paths, so a value that cannot pack - an id outside signed 64-bit, or a
+    non-integer key from some future model - must cost memory, never a 500 on a
+    page anyone can load.
+    """
+    try:
+        return array('q', ids)
+    except (TypeError, OverflowError, ValueError):
+        return list(ids)
+
+
+def unpack_ids(packed):
+    """Whatever ``pack_ids`` stored, back as a plain list of ints.
+
+    Callers slice and count the result, and one of them hands it to ``in_()``, so
+    the packing stays strictly internal to the cache: nothing outside these two
+    functions ever sees an array. Copying is also what keeps a cached entry
+    immutable - a caller that sorted the returned list in place would otherwise be
+    editing what every later hit reads.
+    """
+    return list(packed)
 
 
 class CounterBuffer:

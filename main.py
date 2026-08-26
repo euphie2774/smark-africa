@@ -57,7 +57,7 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     Invoice, InvoiceItem, InvoicePayment, generate_invoice_token
 
 from scale import (CACHE_MISS, CounterBuffer, JobLease, TTLCache, bool_env, float_env,
-                   int_env, worker_identity)
+                   int_env, pack_ids, unpack_ids, worker_identity)
 from runtime import (acquire_lease, drain_outbound, enqueue, enqueue_detached, enqueue_email,
                      enqueue_many, enqueue_sms, ephemeral_delete, ephemeral_get,
                      ephemeral_get_json, ephemeral_set, fanout_notifications, housekeeping,
@@ -3550,6 +3550,55 @@ def slugify(value, max_length=100):
     return (cleaned or uuid.uuid4().hex[:8])[:max_length]
 
 
+def exact_cache_token(value, max_length=60, fold_case=False):
+    """Injective cache-key segment for a value the query compares directly.
+
+    Two jobs, and the second is the one that is easy to get wrong.
+
+    **Stable.** ``slugify`` ends in ``uuid4().hex[:8]`` when the cleaned value is
+    empty, which is right for a product slug - a title of nothing but punctuation
+    still needs a unique URL - and wrong in a cache key. The default search on /shop
+    is '' and so is the default product type, and /categories/<slug> passes no search
+    at all, so every one of those requests was building a key with a random segment
+    in it: the busiest anonymous pages on the site never once read their own cache
+    (measured as ``hits 0, misses 1`` on two identical calls) and wrote a fresh entry
+    per request instead of per distinct search. That is per-request key growth - on
+    Redis, memory that climbs with traffic until eviction; on FileSystemCache, a new
+    file per request straight over CACHE_THRESHOLD and into the 896ms cliff.
+
+    **Injective.** Anything that reaches SQL as a value - a LIKE pattern, a slug
+    matched with ``=`` - must not be collapsed, or two different queries share one
+    entry and whichever missed first decides what the other asker is shown. Wrong
+    results that look entirely plausible, and nothing logs an error. ``slugify``
+    collapsed 'SM A14' onto 'SM-A14', 'Phones' onto 'phones', and any two long
+    searches sharing a prefix onto each other. So the readable half here is for
+    debuggability only and the identity is a digest of the exact text.
+
+    ``fold_case`` is for text that reaches an ILIKE, where the database itself does
+    not distinguish case, so folding it is not a collapse - it is the same query.
+    Values compared with ``=`` keep their case, because there the database does care.
+    """
+    text = value or ''
+    if fold_case:
+        text = text.lower()
+    if not text.strip():
+        return 'none'
+    readable = ''.join(ch if ch.isalnum() else '-' for ch in text)[:max_length].strip('-')
+    return f'{readable or "q"}~{hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]}'
+
+
+def search_cache_token(value, max_length=60):
+    """Cache-key segment for search text, which reaches SQL as an ILIKE pattern.
+
+    Case-folded because ILIKE is case-insensitive: 'Phone' and 'phone' really are one
+    query, and giving them separate entries would halve the hit rate for nothing.
+    Everything else about the text is preserved - '  phone  ' is a different pattern
+    from 'phone' because the route does not strip it, and the database will answer it
+    differently.
+    """
+    return exact_cache_token(value, max_length, fold_case=True)
+
+
 def form_bool(name):
     return (request.form.get(name) or '').strip().lower() in {'1', 'on', 'true', 'yes'}
 
@@ -5555,12 +5604,48 @@ def product_search_cache_key(search='', category_slug='', product_type='', sort=
         version = cache.get('product_search_cache_version') or 'v1'
     clean = '|'.join([
         str(version),
-        slugify(search or '', 120),
-        slugify(category_slug or 'all', 80),
-        slugify(product_type or 'all', 40),
-        slugify(sort or 'newest', 40),
+        # The first two reach SQL as values, so they must stay injective: search
+        # becomes an ILIKE pattern, and category_slug is matched with a
+        # case-sensitive '=', which is why it keeps its case where search does not.
+        search_cache_token(search or '', 60),
+        exact_cache_token(category_slug or 'all', 80),
+        # The last two are read through the same functions the query branches on, so
+        # every value producing identical SQL lands in one bucket and no value that
+        # changes the SQL can share one. Collapsing them here rather than trusting
+        # the raw text is what keeps ?sort=! from being a fresh entry per request,
+        # and reading them from the query's own helpers is what keeps that collapse
+        # from ever becoming false sharing.
+        effective_product_type(product_type),
+        effective_sort(sort),
     ])
     return f'product_search_ids:{clean}'
+
+
+def effective_product_type(value):
+    """The only two product-type values the search actually filters on.
+
+    Anything else - '', 'DIGITAL', 'nonsense' - filters on nothing, so it is the same
+    query as no filter at all and belongs in one cache bucket. Keeping this beside
+    the builder, and having the builder branch on it, is what stops the cache key
+    from disagreeing with the SQL: a key that lowercased its input mapped 'DIGITAL',
+    which does not filter, onto the same entry as 'digital', which does.
+    """
+    return value if value in ('digital', 'physical') else 'any'
+
+
+def effective_sort(value):
+    """The ORDER BY branch a sort value selects.
+
+    'rating' and 'popular' take the same branch, and every unrecognised value takes
+    the default, so all of them are one cached result. This is what makes ?sort=!
+    one cache entry instead of one per request, and it is safe only because the
+    builder below branches on this same function rather than on the raw value.
+    """
+    if value in ('price_low', 'price_high'):
+        return value
+    if value in ('rating', 'popular'):
+        return 'popular'
+    return 'newest'
 
 
 def build_product_search_query(search='', category_slug='', product_type='', sort='newest',
@@ -5578,6 +5663,7 @@ def build_product_search_query(search='', category_slug='', product_type='', sor
         current_category = Category.query.filter_by(slug=category_slug).first()
         if current_category:
             query = query.filter_by(category_id=current_category.id)
+    product_type = effective_product_type(product_type)
     if product_type == 'digital':
         query = query.filter_by(is_digital=True)
     elif product_type == 'physical':
@@ -5592,11 +5678,12 @@ def build_product_search_query(search='', category_slug='', product_type='', sor
                 Product.short_description.ilike(like),
             ])
         query = query.filter(or_(*clauses))
+    sort = effective_sort(sort)
     if sort == 'price_low':
         query = query.outerjoin(User, Product.seller_id == User.id).order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), User.seller_rating.desc(), Product.selling_price.asc())
     elif sort == 'price_high':
         query = query.outerjoin(User, Product.seller_id == User.id).order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), User.seller_rating.desc(), Product.selling_price.desc())
-    elif sort in ['rating', 'popular']:
+    elif sort == 'popular':
         query = query.outerjoin(User, Product.seller_id == User.id).order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), User.seller_rating.desc(), Product.sales_count.desc())
     else:
         query = query.outerjoin(User, Product.seller_id == User.id).order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), User.seller_rating.desc(), Product.created_at.desc())
@@ -5947,7 +6034,7 @@ def cached_product_search_ids(search='', category_slug='', product_type='', sort
     if target == 'local':
         cached_ids = _product_ids_cache.get(key)
         if cached_ids is not None:
-            return cached_ids
+            return unpack_ids(cached_ids)
     elif target == 'shared':
         cached_ids = cache.get(key)
         if cached_ids is not None:
@@ -5982,7 +6069,14 @@ def cached_product_search_ids(search='', category_slug='', product_type='', sort
         # The one thing it does not follow is the product_search_cache_seconds
         # Setting, since a TTLCache fixes its TTL at construction; PRODUCT_SEARCH_IDS_TTL
         # carries the same 300s default.
-        _product_ids_cache.set(key, ids)
+        #
+        # Packed because this cache is resident for the life of the worker and its
+        # size is the entry cap times the per-entry cost: 2048 entries of up to 1000
+        # ids each is 70MB as lists and 16MB packed, against WORKER_MEMORY_MB=200.
+        # See pack_ids in scale.py - short substrings each match a large slice of the
+        # catalogue and are distinct keys, so the worst case is drivable, not just
+        # theoretical.
+        _product_ids_cache.set(key, pack_ids(ids))
     elif target == 'shared':
         cache.set(key, ids, timeout=int(Setting.get('product_search_cache_seconds', '300') or 300))
     return ids
@@ -7466,6 +7560,36 @@ def healthz():
 
 
 _sitemap_cache = TTLCache(ttl_seconds=int_env('SITEMAP_TTL', 3600), max_entries=4)
+# The host-independent half: paths and timestamps, which is where the query cost is.
+# One key, so a request naming an unfamiliar host cannot make the database work.
+_sitemap_entry_cache = TTLCache(ttl_seconds=int_env('SITEMAP_TTL', 3600), max_entries=1,
+                                name='sitemap-entries')
+
+
+def sitemap_base():
+    """The absolute base every ``<loc>`` in the sitemap is written against.
+
+    Reads APP_BASE_URL then PUBLIC_URL - the same two existing variables
+    ``canonical_url`` already prefers, so neither is new and neither becomes
+    required - and only falls back to the host the request arrived on when neither
+    is set.
+
+    **Why not just ``request.host``:** with ``ProxyFix(x_host=1)`` that value is
+    whatever ``X-Forwarded-Host`` carried, and it was being written into every URL
+    of a document crawlers read and other visitors are served from cache. A
+    configured deploy now publishes its own name no matter what a request claims.
+    The unconfigured fallback still names itself, which is what robots.txt
+    deliberately does, and it can no longer cost a query either way.
+    """
+    configured = (os.environ.get('APP_BASE_URL') or os.environ.get('PUBLIC_URL') or '').strip()
+    if configured:
+        base = configured.rstrip('/')
+        return base if '://' in base else f'https://{base}'
+    if not has_request_context():
+        return ''
+    host = request.host
+    is_local = host.split(':')[0] in ('localhost', '127.0.0.1', '0.0.0.0')
+    return f"{request.scheme if is_local else 'https'}://{host}"
 
 
 @app.route('/robots.txt')
@@ -7511,15 +7635,26 @@ def sitemap_xml():
     often than a human loads any page, and the whole point is to make discovery
     cheap for both sides. Only approved, active, in-stock-or-not listings appear;
     a listing parked in review is not a page anyone should be sent to.
+
+    Cached in two layers, because only one of them depends on the host. The paths
+    and timestamps - the 20,000-row query - are the same document whoever asked for
+    it, so they are cached once under one key. Only the absolute-URL assembly is per
+    host. Before this split the whole thing was keyed on ``request.host``, which
+    ``ProxyFix(x_host=1)`` takes from ``X-Forwarded-Host`` wherever
+    TRUST_PROXY_HEADERS or RENDER is set, in a cache holding four entries: a client
+    varying that header per request missed every time and re-ran the full query, on
+    an unauthenticated GET, with no login and no body. Rate-limiting the endpoint is
+    not the answer - a 429 here is read by a crawler as a sitemap it could not
+    fetch, which is the same class of problem as the 503s this work started from.
     """
     # lookup(), not get(): get() collapses a miss into None, and None is a value
     # this cache could legitimately hold. Only lookup() reports the miss.
-    cached = _sitemap_cache.lookup(request.host)
-    if cached is CACHE_MISS:
+    entries = _sitemap_entry_cache.lookup('entries')
+    if entries is CACHE_MISS:
         entries = []
         for endpoint in ('home', 'shop', 'services_marketplace', 'about', 'terms'):
             try:
-                entries.append((url_for(endpoint, _external=True), None, '0.9'))
+                entries.append((url_for(endpoint), None, '0.9'))
             except Exception as exc:
                 # Logged rather than skipped in silence. A typo here drops a page
                 # from the sitemap without changing the status code, so the only
@@ -7531,7 +7666,7 @@ def sitemap_xml():
                       .filter(Category.is_active.is_(True))
                       .order_by(Category.slug).limit(500).all())
         for (slug,) in categories:
-            entries.append((url_for('category_products', slug=slug, _external=True), None, '0.7'))
+            entries.append((url_for('category_products', slug=slug), None, '0.7'))
         products = (db.session.query(Product.slug, Product.updated_at, Product.created_at)
                     .filter(Product.is_active.is_(True),
                             or_(Product.review_status == 'approved',
@@ -7542,20 +7677,24 @@ def sitemap_xml():
             if not slug:
                 continue
             stamp = updated or created
-            entries.append((url_for('product_page', slug=slug, _external=True),
+            entries.append((url_for('product_page', slug=slug),
                             stamp.date().isoformat() if stamp else None, '0.8'))
+        _sitemap_entry_cache.set('entries', entries)
+    base = sitemap_base()
+    cached = _sitemap_cache.lookup(base)
+    if cached is CACHE_MISS:
         parts = ['<?xml version="1.0" encoding="UTF-8"?>',
                  '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-        for loc, lastmod, priority in entries:
+        for path, lastmod, priority in entries:
             parts.append('  <url>')
-            parts.append(f'    <loc>{html.escape(loc)}</loc>')
+            parts.append(f'    <loc>{html.escape(base + path)}</loc>')
             if lastmod:
                 parts.append(f'    <lastmod>{lastmod}</lastmod>')
             parts.append(f'    <priority>{priority}</priority>')
             parts.append('  </url>')
         parts.append('</urlset>')
         cached = '\n'.join(parts)
-        _sitemap_cache.set(request.host, cached)
+        _sitemap_cache.set(base, cached)
     response = make_response(cached)
     response.headers['Content-Type'] = 'application/xml; charset=utf-8'
     return response
@@ -18803,10 +18942,14 @@ def cached_service_ids(service_key='', search=''):
     scan on every anonymous hit. Ids only, capped, and cached for a minute: a
     thousand people opening the laundry tile is one query, not a thousand.
     """
-    key = f'{service_key}|{search.lower()}'
+    # Both halves reach SQL as values, so both stay injective. service_key is
+    # compared with '=' and so keeps its case; search becomes a LIKE pattern, which
+    # is why it needs the token at all rather than .lower() - 'dry clean' and
+    # 'dry-clean' are different queries and must not share an entry.
+    key = f'{exact_cache_token(service_key or "all", 60)}|{search_cache_token(search, 60)}'
     cached = _service_ids_cache.lookup(key)
     if cached is not CACHE_MISS:
-        return cached
+        return unpack_ids(cached)
     query = ServiceListing.query.filter_by(is_active=True)
     if service_key:
         query = query.filter(ServiceListing.service_key == service_key)
@@ -18818,7 +18961,11 @@ def cached_service_ids(service_key='', search=''):
                           ServiceListing.created_at.desc()
                           ).with_entities(ServiceListing.id).limit(1000).all()
     ids = [row[0] for row in rows]
-    _service_ids_cache.set(key, ids)
+    # Packed for the same reason as the product twin: 256 entries of up to 1000 ids
+    # is 8.8MB resident as lists and 2MB packed, and every distinct search text is a
+    # distinct key here, so a public search box is all it takes to fill it. See
+    # pack_ids in scale.py.
+    _service_ids_cache.set(key, pack_ids(ids))
     return ids
 
 
