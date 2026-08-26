@@ -1,62 +1,172 @@
 {% extends "base.html" %}
-{% block title %}Services Marketplace - {{ super() }}{% endblock %}
+{#
+  The one services category. Everything the MVP described lives on this page and
+  its detail page - there is no second services section anywhere.
+
+  Two things are deliberate here. The catalogue tiles come from
+  ServiceCatalogueItem rather than a DISTINCT over the listings table, so adding
+  the nineteenth service is an admin edit and not a deploy. And no card carries a
+  phone number: a client reaches a provider through an admin, so the only call to
+  action on a card is "View details".
+#}
+{% block title %}Services - {{ super() }}{% endblock %}
+
 {% block content %}
-<div class="container py-5">
-    <div class="d-flex justify-content-between align-items-center mb-4">
+<div class="container py-4 py-md-5">
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
         <div>
-            <h3><i class="fas fa-hands-helping me-2"></i>Services Marketplace</h3>
-            <p class="text-muted mb-0">Hire skilled professionals or offer your services.</p>
+            <h3 class="mb-1"><i class="fas fa-hands-helping me-2"></i>Services</h3>
+            <p class="text-muted mb-0">
+                Printing, laundry, repairs, deliveries and more from providers near you.
+                {% if not direct_contact %}
+                We connect you ourselves — press <strong>Contact admin</strong> on any service
+                and we will link you with the provider.
+                {% endif %}
+            </p>
         </div>
         {% if current_user.is_authenticated %}
-        <a href="{{ url_for('create_service') }}" class="btn btn-success"><i class="fas fa-plus me-1"></i>Offer a Service</a>
+        <a href="{{ url_for('create_service') }}" class="btn btn-success">
+            <i class="fas fa-plus me-1"></i>Offer a service
+        </a>
         {% endif %}
     </div>
 
-    {% if categories %}
-    <div class="mb-4">
-        <a href="{{ url_for('services_marketplace') }}" class="btn btn-sm {{ 'btn-primary' if not current_category else 'btn-outline-primary' }} me-1">All</a>
-        {% for cat in categories %}
-        <a href="{{ url_for('services_marketplace', category=cat) }}" class="btn btn-sm {{ 'btn-primary' if current_category == cat else 'btn-outline-primary' }} me-1">{{ cat }}</a>
+    <form method="GET" action="{{ url_for('services_marketplace') }}" class="row g-2 mb-3">
+        {% if current_service %}
+        <input type="hidden" name="service" value="{{ current_service }}">
+        {% endif %}
+        <div class="col">
+            <input name="q" class="form-control" value="{{ search }}"
+                   placeholder="Search services — laundry, printing, repair…"
+                   aria-label="Search services">
+        </div>
+        <div class="col-auto d-flex gap-2">
+            <button class="btn btn-primary"><i class="fas fa-search"></i><span class="d-none d-sm-inline ms-1">Search</span></button>
+            {% if search or current_service %}
+            <a href="{{ url_for('services_marketplace') }}" class="btn btn-outline-secondary"
+               title="Clear"><i class="fas fa-xmark"></i></a>
+            {% endif %}
+        </div>
+    </form>
+
+    {% if catalogue %}
+    {#
+      Horizontally scrollable on a phone rather than wrapping into a wall of
+      nineteen buttons that pushes the listings below the fold.
+    #}
+    <div class="service-chips mb-4">
+        <a href="{{ url_for('services_marketplace', q=search or None) }}"
+           class="btn btn-sm {{ 'btn-primary' if not current_service else 'btn-outline-primary' }}">All</a>
+        {% for row in catalogue %}
+        <a href="{{ url_for('services_marketplace', service=row.key, q=search or None) }}"
+           class="btn btn-sm {{ 'btn-primary' if current_service == row.key else 'btn-outline-primary' }}">
+            {% if row.emoji %}<span aria-hidden="true">{{ row.emoji }}</span> {% endif %}{{ row.label }}
+        </a>
         {% endfor %}
     </div>
     {% endif %}
 
-    <div class="row g-4">
+    {% if current_item %}
+    <h5 class="mb-3">
+        {% if current_item.emoji %}<span aria-hidden="true">{{ current_item.emoji }}</span> {% endif %}
+        {{ current_item.label }}
+        <span class="text-muted fw-normal">— {{ pagination.total }}
+            provider{{ '' if pagination.total == 1 else 's' }}</span>
+    </h5>
+    {% endif %}
+
+    <div class="row g-3 g-md-4">
         {% for service in services %}
-        <div class="col-md-4">
-            <div class="card h-100">
+        <div class="col-12 col-sm-6 col-lg-4">
+            <div class="card h-100 shadow-sm border-0">
                 {% if service.image_url %}
-                <img src="{{ service.image_url }}" class="card-img-top" style="height:180px;object-fit:cover;" alt="{{ service.title }}">
+                <a href="{{ url_for('service_detail', service_id=service.id) }}">
+                    <img src="{{ service.image_url }}" class="card-img-top" loading="lazy"
+                         style="height:170px;object-fit:cover;" alt="{{ service.title }}">
+                </a>
                 {% endif %}
-                <div class="card-body">
-                    <h5 class="card-title">{{ service.title }}</h5>
-                    <p class="text-muted small">{{ service.category }} | {{ service.delivery_days }} days delivery</p>
-                    <p class="card-text">{{ service.description[:100] }}{% if service.description|length > 100 %}...{% endif %}</p>
-                    <div class="d-flex justify-content-between align-items-center">
-                        <span class="fw-bold text-success">KSh {{ "{:,.0f}".format(service.price) }}</span>
-                        <span class="text-muted small"><i class="fas fa-check-circle me-1"></i>{{ service.orders_completed }} orders</span>
+                <div class="card-body d-flex flex-column">
+                    <h5 class="card-title h6 mb-1">
+                        <a href="{{ url_for('service_detail', service_id=service.id) }}"
+                           class="text-decoration-none text-reset">{{ service.title }}</a>
+                    </h5>
+                    <p class="text-muted small mb-2">
+                        {{ service.category }}
+                        {% if service.has_location %}
+                        &middot; <i class="fas fa-location-dot"></i> {{ service.location_display }}
+                        {% endif %}
+                    </p>
+                    {% if service.description %}
+                    <p class="card-text small text-muted">
+                        {{ service.description[:110] }}{% if service.description|length > 110 %}…{% endif %}
+                    </p>
+                    {% endif %}
+
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-1 mt-auto">
+                        <span class="fw-bold text-success">
+                            {% if service.price %}KSh {{ "{:,.0f}".format(service.price) }}
+                            {% else %}Price on request{% endif %}
+                        </span>
+                        {% if service.orders_completed %}
+                        <span class="text-muted small">
+                            <i class="fas fa-check-circle me-1"></i>{{ service.orders_completed }} done
+                        </span>
+                        {% endif %}
+                    </div>
+                    <div class="small text-muted mt-1">
+                        <i class="fas fa-truck-pickup me-1"></i>{{ service.pickup_display }}
                     </div>
                 </div>
-                <div class="card-footer">
-                    {% if current_user.is_authenticated and current_user.id != service.provider_id %}
-                    <form method="POST" action="{{ url_for('order_service', service_id=service.id) }}">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                        <button type="submit" class="btn btn-primary btn-sm w-100">Order Service</button>
-                    </form>
-                    {% elif not current_user.is_authenticated %}
-                    <a href="{{ url_for('login') }}" class="btn btn-outline-primary btn-sm w-100">Login to Order</a>
-                    {% else %}
-                    <span class="badge bg-info">Your listing</span>
-                    {% endif %}
+                <div class="card-footer bg-white border-0 pt-0">
+                    <a href="{{ url_for('service_detail', service_id=service.id) }}"
+                       class="btn btn-outline-primary btn-sm w-100">
+                        View details
+                    </a>
                 </div>
             </div>
         </div>
         {% else %}
         <div class="col-12 text-center py-5">
-            <i class="fas fa-briefcase fa-3x text-muted mb-3"></i>
-            <p class="text-muted">No services listed yet. Be the first to offer a service!</p>
+            <i class="fas fa-briefcase fa-3x text-muted mb-3 d-block"></i>
+            {% if search or current_service %}
+            <p class="text-muted mb-2">Nothing listed under that yet.</p>
+            <a href="{{ url_for('services_marketplace') }}" class="btn btn-sm btn-outline-primary">
+                See all services
+            </a>
+            {% else %}
+            <p class="text-muted mb-2">No services listed yet.</p>
+            {% if current_user.is_authenticated %}
+            <a href="{{ url_for('create_service') }}" class="btn btn-sm btn-success">Be the first</a>
+            {% endif %}
+            {% endif %}
         </div>
         {% endfor %}
     </div>
+
+    {% if pagination.pages > 1 %}
+    <nav class="mt-4">
+        <ul class="pagination justify-content-center flex-wrap mb-0">
+            {% for p in pagination.iter_pages(left_edge=1, right_edge=1, left_current=1, right_current=1) %}
+                {% if p %}
+                <li class="page-item {{ 'active' if p == pagination.page }}">
+                    <a class="page-link"
+                       href="{{ url_for('services_marketplace', page=p, service=current_service or None, q=search or None) }}">{{ p }}</a>
+                </li>
+                {% else %}
+                <li class="page-item disabled"><span class="page-link">…</span></li>
+                {% endif %}
+            {% endfor %}
+        </ul>
+    </nav>
+    {% endif %}
+
+    {% if not requests_enabled or not duty_active %}
+    <div class="alert alert-light border small mt-4 mb-0">
+        <i class="fab fa-whatsapp text-success me-1"></i>
+        Our linking desk is quiet right now.
+        <a href="{{ whatsapp_url }}" target="_blank" rel="noopener">Message us on WhatsApp</a>
+        and we will sort you out straight away.
+    </div>
+    {% endif %}
 </div>
 {% endblock %}

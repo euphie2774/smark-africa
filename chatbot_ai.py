@@ -6,6 +6,26 @@ import re
 from datetime import datetime, timedelta
 from sqlalchemy import func
 
+# The number this file used to hardcode in three replies. Still the default, so
+# behaviour is identical until an admin edits the setting.
+DEFAULT_SUPPORT_NUMBER = '0708615309'
+
+
+def support_number():
+    """The admin-set WhatsApp number, falling back to the old literal.
+
+    Read from Setting rather than imported from main.py: main.py imports *this*
+    module, so reaching back the other way is a circular import. models.py imports
+    nothing from main.py, so Setting is safe. Wrapped because this is also called
+    from replies that must still render if the table is mid-migration.
+    """
+    try:
+        from models import Setting
+        return (Setting.get('support_whatsapp_number', DEFAULT_SUPPORT_NUMBER)
+                or DEFAULT_SUPPORT_NUMBER).strip()
+    except Exception:
+        return DEFAULT_SUPPORT_NUMBER
+
 
 class ChatbotAI:
     """Enhanced AI chatbot with natural language processing"""
@@ -21,7 +41,35 @@ class ChatbotAI:
         """Extract user intent from message"""
         message_lower = message.lower()
 
+        # An order the client already placed beats every other reading, including
+        # service_search below. Several catalogue words are also delivery words:
+        # "track my parcel" is somebody chasing their order, not somebody wanting
+        # to hire a courier, and answering it with a courier list is the single
+        # most annoying thing this chatbot could do.
+        #
+        # Mirrored from main.SERVICE_ORDER_TRACKING_PHRASES rather than imported,
+        # to keep this class usable without main. Safe to mirror because these are
+        # fixed English phrases - unlike the service catalogue, which admins edit
+        # and which is therefore never copied into a keyword list.
+        order_tracking = (
+            'my order', 'my delivery', 'my parcel', 'my package', 'my item',
+            'order number', 'order id', 'order status', 'tracking number',
+            'track my', 'where is my', 'not arrived', 'not delivered',
+        )
+        if any(phrase in message_lower for phrase in order_tracking):
+            return 'order_status'
+
+        # service_search sits ahead of product_search deliberately. Dicts keep
+        # insertion order and the loop below returns the first match, so without
+        # this "I need laundry" matches product_search on the word "need" and the
+        # client is shown washing machines for sale.
         intents = {
+            'service_search': ['service', 'services', 'provider', 'laundry', 'printing',
+                               'photocopy', 'repair', 'barber', 'salon', 'cleaning',
+                               'tutor', 'tuition', 'errand', 'courier', 'parcel',
+                               'hostel', 'accommodation', 'freelance', 'cyber',
+                               'food delivery', 'grocery', 'groceries', 'stationery',
+                               'event ticket', 'career service', 'resume'],
             'product_search': ['find', 'search', 'looking for', 'want to buy', 'need', 'show me'],
             'order_status': ['order', 'track', 'delivery', 'shipping', 'where is my'],
             'payment': ['payment', 'pay', 'mpesa', 'stk', 'receipt', 'transaction'],
@@ -144,6 +192,27 @@ class ChatbotAI:
             greeting += "I can help you find products, track orders, or answer questions. What would you like to do?"
             return greeting
 
+        # Services
+        #
+        # Deliberately thin. /api/support/chatbot answers services questions before
+        # it ever reaches this class, with the real provider list, prices and pickup
+        # lines - that needs the catalogue cache, the duty cache and Setting, none of
+        # which belong in here. This branch is the fallback for a caller that talks
+        # to ChatbotAI directly, so it points at the same place rather than
+        # inventing a second, poorer answer.
+        if intent == 'service_search':
+            return """**Services on SMARKAFRICA:**
+
+🧺 Laundry · 🖨️ Printing · 🔧 Repairs · 💇 Barber & Beauty · 📚 Tutoring · 🚚 Errands, and more.
+
+Open **/services**, pick what you need, and you'll see each provider's price, location
+and whether they collect from you.
+
+Tap **Contact admin** on the one you want — an admin introduces you to the provider and
+stays on the thread until the job is agreed.
+
+Need it handled now? WhatsApp: """ + support_number()
+
         # Product search
         if intent == 'product_search':
             query = self.extract_product_query(message)
@@ -180,7 +249,7 @@ class ChatbotAI:
 - Transaction failed? Try again or check M-Pesa balance
 - Wrong amount deducted? Contact support with receipt
 
-Need urgent help? WhatsApp: 0708615309"""
+Need urgent help? WhatsApp: """ + support_number()
 
         # Refund
         if intent == 'refund':
@@ -198,7 +267,7 @@ Need urgent help? WhatsApp: 0708615309"""
 ✓ Wrong item received
 ✓ Delivery too late
 
-Urgent refund? WhatsApp: 0708615309"""
+Urgent refund? WhatsApp: """ + support_number()
 
         # BNPL
         if intent == 'bnpl':
@@ -308,6 +377,7 @@ View reviews on any product page!"""
             return """**I Can Help With:**
 
 🛍️ **Shopping** - Find products, compare prices
+🧰 **Services** - Laundry, printing, repairs, tutoring
 📦 **Orders** - Track delivery, order status
 💳 **Payments** - M-Pesa, BNPL, refunds
 👤 **Account** - Login, profile, seller status
@@ -318,6 +388,7 @@ Just ask me anything or use voice commands!
 
 **Quick Links:**
 - Shop: /shop
+- Services: /services
 - My Orders: /orders
 - Track Order: /track
 - Support: /support"""
@@ -326,6 +397,7 @@ Just ask me anything or use voice commands!
         return """I'm here to help! I can assist with:
 
 • **Finding products** - "Show me laptops"
+• **Booking a service** - "I need laundry"
 • **Order tracking** - "Where is my order?"
 • **Payment help** - "How do I pay?"
 • **Account issues** - "Reset password"
@@ -333,7 +405,7 @@ Just ask me anything or use voice commands!
 
 What would you like to know?
 
-For urgent help: WhatsApp 0708615309"""
+For urgent help: WhatsApp """ + support_number()
 
 
 def create_chatbot_instance(app):

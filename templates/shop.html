@@ -1,4 +1,5 @@
 {% extends 'base.html' %}
+{% from '_badges.html' import product_badges %}
 {% block title %}Shop - SMARKAFRICA{% endblock %}
 
 {% block content %}
@@ -87,10 +88,7 @@
                     {% elif product.discount_percent and product.discount_percent > 0 %}
                     <strong class="price-drop-tag"><small>Save</small>{{ product.discount_percent|int }}% OFF</strong>
                     {% endif %}
-                    {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
-                    {% set brand_label = product_brand_label(product) %}
-                    {% if brand_label %}<strong class="brand-tag"><i class="fas fa-crown"></i><span>{{ brand_label }}</span></strong>{% endif %}
-                    {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+                    {{ product_badges(product) }}
                 </a>
                 <div class="product-copy">
                     <a href="{{ url_for('product_page', slug=product.slug) }}" class="product-title">{{ product.name[:70] }}</a>

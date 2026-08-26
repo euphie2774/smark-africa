@@ -1,0 +1,280 @@
+{#
+  Shared client + line editor for raising and editing an invoice.
+
+  Included by admin/invoice_form.html (creating) and admin/invoice_detail.html
+  (editing) so the two cannot drift: a field added on one screen and forgotten on
+  the other is an invoice that loses data depending on where it was touched.
+
+  `invoice` is None when creating. `form` is the posted form when a validation
+  error bounced the admin back here, so their typing survives the round trip.
+#}
+{% set f = form or {} %}
+{% set posted = f.getlist is defined %}
+{% set descs = f.getlist('line_description') if posted else [] %}
+{% set qtys = f.getlist('line_quantity') if posted else [] %}
+{% set prices = f.getlist('line_price') if posted else [] %}
+
+<div class="row g-3">
+    <div class="col-12 col-lg-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="text-uppercase text-muted small fw-bold mb-3">
+                    <i class="fas fa-user me-1"></i> Bill to
+                </h6>
+                <div class="mb-2">
+                    <label class="form-label small mb-1">Client name <span class="text-danger">*</span></label>
+                    <input name="client_name" class="form-control" maxlength="160" required
+                           value="{{ f.get('client_name', invoice.client_name if invoice else '') }}">
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small mb-1">
+                        Client email <span class="text-danger">*</span>
+                        <span class="text-muted fw-normal">— the payment request goes here</span>
+                    </label>
+                    <input type="email" name="client_email" class="form-control" maxlength="160" required
+                           value="{{ f.get('client_email', invoice.client_email if invoice else '') }}">
+                </div>
+                <div class="row g-2">
+                    <div class="col-12 col-sm-6 mb-2">
+                        <label class="form-label small mb-1">Phone <span class="text-muted fw-normal">(for M-Pesa)</span></label>
+                        <input name="client_phone" class="form-control" maxlength="30"
+                               placeholder="07XXXXXXXX"
+                               value="{{ f.get('client_phone', invoice.client_phone if invoice else '') }}">
+                    </div>
+                    <div class="col-12 col-sm-6 mb-2">
+                        <label class="form-label small mb-1">Reference</label>
+                        <input name="reference" class="form-control" maxlength="80"
+                               placeholder="PO number, contract, job ref"
+                               value="{{ f.get('reference', invoice.reference if invoice else '') }}">
+                    </div>
+                </div>
+                <div class="mb-0">
+                    <label class="form-label small mb-1">Address</label>
+                    <textarea name="client_address" class="form-control" rows="2" maxlength="600"
+                    >{{ f.get('client_address', invoice.client_address if invoice else '') }}</textarea>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-12 col-lg-6">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="text-uppercase text-muted small fw-bold mb-3">
+                    <i class="fas fa-file-invoice me-1"></i> Invoice
+                </h6>
+                <div class="mb-2">
+                    <label class="form-label small mb-1">Title</label>
+                    <input name="title" class="form-control" maxlength="200"
+                           placeholder="e.g. Campus laundry service — August"
+                           value="{{ f.get('title', invoice.title if invoice else '') }}">
+                </div>
+                <div class="row g-2">
+                    <div class="col-12 col-sm-6 mb-2">
+                        <label class="form-label small mb-1">Due date</label>
+                        <input type="date" name="due_date" class="form-control"
+                               value="{{ f.get('due_date', invoice.due_date.strftime('%Y-%m-%d') if invoice and invoice.due_date else '') }}">
+                        {% if not invoice %}
+                        <div class="form-text">Left blank, it falls to {{ default_due_days or 7 }} days from today.</div>
+                        {% endif %}
+                    </div>
+                    <div class="col-6 col-sm-3 mb-2">
+                        <label class="form-label small mb-1">Discount</label>
+                        <input type="number" step="0.01" min="0" name="discount_amount"
+                               class="form-control inv-calc"
+                               value="{{ f.get('discount_amount', '%.2f'|format(invoice.discount_amount or 0) if invoice else '0') }}">
+                    </div>
+                    <div class="col-6 col-sm-3 mb-2">
+                        <label class="form-label small mb-1">Tax %</label>
+                        <input type="number" step="0.01" min="0" max="100" name="tax_percent"
+                               class="form-control inv-calc"
+                               value="{{ f.get('tax_percent', ('%.2f'|format(invoice.tax_percent or 0)) if invoice else (default_tax or '0')) }}">
+                    </div>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small mb-1">Notes <span class="text-muted fw-normal">(shown to the client)</span></label>
+                    <textarea name="notes" class="form-control" rows="2" maxlength="2000"
+                    >{{ f.get('notes', invoice.notes if invoice else '') }}</textarea>
+                </div>
+                <div class="mb-0">
+                    <label class="form-label small mb-1">Terms</label>
+                    <textarea name="terms" class="form-control" rows="2" maxlength="2000"
+                    >{{ f.get('terms', (invoice.terms if invoice else default_terms) or '') }}</textarea>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card border-0 shadow-sm mt-3">
+    <div class="card-body">
+        <h6 class="text-uppercase text-muted small fw-bold mb-3">
+            <i class="fas fa-list me-1"></i> What is being billed
+        </h6>
+
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-2">
+                <thead>
+                    <tr class="text-muted small">
+                        <th style="min-width:220px">Description</th>
+                        <th style="width:110px" class="text-end">Qty</th>
+                        <th style="width:140px" class="text-end">Unit price</th>
+                        <th style="width:130px" class="text-end">Amount</th>
+                        <th style="width:44px"></th>
+                    </tr>
+                </thead>
+                <tbody id="invLines">
+                    {% if invoice and invoice.items and not posted %}
+                        {% for item in invoice.items %}
+                        <tr class="inv-line">
+                            <td><input name="line_description" class="form-control form-control-sm"
+                                       maxlength="300" value="{{ item.description }}"></td>
+                            <td><input name="line_quantity" type="number" step="0.01" min="0"
+                                       class="form-control form-control-sm text-end inv-qty inv-calc"
+                                       value="{{ '%g'|format(item.quantity or 1) }}"></td>
+                            <td><input name="line_price" type="number" step="0.01" min="0"
+                                       class="form-control form-control-sm text-end inv-price inv-calc"
+                                       value="{{ '%.2f'|format(item.unit_price or 0) }}"></td>
+                            <td class="text-end text-nowrap"><span class="inv-line-total">0.00</span></td>
+                            <td class="text-end">
+                                <button type="button" class="btn btn-sm btn-link text-danger p-0 inv-drop"
+                                        title="Remove this line"><i class="fas fa-xmark"></i></button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% elif posted and descs %}
+                        {% for i in range(descs|length) %}
+                        <tr class="inv-line">
+                            <td><input name="line_description" class="form-control form-control-sm"
+                                       maxlength="300" value="{{ descs[i] }}"></td>
+                            <td><input name="line_quantity" type="number" step="0.01" min="0"
+                                       class="form-control form-control-sm text-end inv-qty inv-calc"
+                                       value="{{ qtys[i] if i < qtys|length else '1' }}"></td>
+                            <td><input name="line_price" type="number" step="0.01" min="0"
+                                       class="form-control form-control-sm text-end inv-price inv-calc"
+                                       value="{{ prices[i] if i < prices|length else '0' }}"></td>
+                            <td class="text-end text-nowrap"><span class="inv-line-total">0.00</span></td>
+                            <td class="text-end">
+                                <button type="button" class="btn btn-sm btn-link text-danger p-0 inv-drop"
+                                        title="Remove this line"><i class="fas fa-xmark"></i></button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% else %}
+                        {% for i in range(2) %}
+                        <tr class="inv-line">
+                            <td><input name="line_description" class="form-control form-control-sm"
+                                       maxlength="300" placeholder="What are you billing for?"></td>
+                            <td><input name="line_quantity" type="number" step="0.01" min="0"
+                                       class="form-control form-control-sm text-end inv-qty inv-calc" value="1"></td>
+                            <td><input name="line_price" type="number" step="0.01" min="0"
+                                       class="form-control form-control-sm text-end inv-price inv-calc" value="0"></td>
+                            <td class="text-end text-nowrap"><span class="inv-line-total">0.00</span></td>
+                            <td class="text-end">
+                                <button type="button" class="btn btn-sm btn-link text-danger p-0 inv-drop"
+                                        title="Remove this line"><i class="fas fa-xmark"></i></button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="d-flex flex-wrap justify-content-between align-items-end gap-3">
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="invAddLine">
+                <i class="fas fa-plus me-1"></i> Add line
+            </button>
+            <div class="text-end small" style="min-width:230px">
+                <div class="d-flex justify-content-between">
+                    <span class="text-muted">Subtotal</span><span id="invSubtotal">KES 0.00</span>
+                </div>
+                <div class="d-flex justify-content-between">
+                    <span class="text-muted">Discount</span><span id="invDiscount">KES 0.00</span>
+                </div>
+                <div class="d-flex justify-content-between">
+                    <span class="text-muted">Tax</span><span id="invTax">KES 0.00</span>
+                </div>
+                <div class="d-flex justify-content-between border-top pt-1 mt-1 fw-bold fs-6">
+                    <span>Total</span><span id="invTotal">KES 0.00</span>
+                </div>
+                <div class="text-muted mt-1" style="font-size:11px">
+                    A preview. The server recomputes the totals it stores.
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Preview only. Every number the invoice keeps is recomputed by
+// recalculate_invoice() on the server, so nothing here can be trusted into a
+// total - it exists so the admin sees the figure before the client does.
+(function () {
+    var box = document.getElementById('invLines');
+    if (!box) { return; }
+
+    function money(value) {
+        return 'KES ' + (value || 0).toLocaleString('en-KE',
+            {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    }
+
+    function recalc() {
+        var subtotal = 0;
+        box.querySelectorAll('.inv-line').forEach(function (row) {
+            var qty = parseFloat((row.querySelector('.inv-qty') || {}).value) || 0;
+            var price = parseFloat((row.querySelector('.inv-price') || {}).value) || 0;
+            var line = Math.round(qty * price * 100) / 100;
+            subtotal += line;
+            var cell = row.querySelector('.inv-line-total');
+            if (cell) { cell.textContent = line.toFixed(2); }
+        });
+        var discountField = document.querySelector('[name="discount_amount"]');
+        var taxField = document.querySelector('[name="tax_percent"]');
+        var discount = Math.min(parseFloat(discountField && discountField.value) || 0, subtotal);
+        var taxable = Math.max(0, subtotal - discount);
+        var tax = Math.round(taxable * ((parseFloat(taxField && taxField.value) || 0) / 100) * 100) / 100;
+        document.getElementById('invSubtotal').textContent = money(subtotal);
+        document.getElementById('invDiscount').textContent = money(discount);
+        document.getElementById('invTax').textContent = money(tax);
+        document.getElementById('invTotal').textContent = money(taxable + tax);
+    }
+
+    document.addEventListener('input', function (event) {
+        if (event.target.classList.contains('inv-calc')) { recalc(); }
+    });
+
+    var addBtn = document.getElementById('invAddLine');
+    if (addBtn) {
+        addBtn.addEventListener('click', function () {
+            var rows = box.querySelectorAll('.inv-line');
+            var copy = rows[rows.length - 1].cloneNode(true);
+            copy.querySelectorAll('input').forEach(function (input) {
+                input.value = input.classList.contains('inv-qty') ? '1'
+                    : (input.classList.contains('inv-price') ? '0' : '');
+            });
+            box.appendChild(copy);
+            recalc();
+        });
+    }
+
+    // Delegated, so it also catches the rows cloned above.
+    box.addEventListener('click', function (event) {
+        var drop = event.target.closest('.inv-drop');
+        if (!drop) { return; }
+        // Never leave zero rows: the last one is cleared instead of removed, or
+        // the admin is left with a form that cannot be submitted.
+        if (box.querySelectorAll('.inv-line').length > 1) {
+            drop.closest('.inv-line').remove();
+        } else {
+            drop.closest('.inv-line').querySelectorAll('input').forEach(function (input) {
+                input.value = input.classList.contains('inv-qty') ? '1'
+                    : (input.classList.contains('inv-price') ? '0' : '');
+            });
+        }
+        recalc();
+    });
+
+    recalc();
+})();
+</script>

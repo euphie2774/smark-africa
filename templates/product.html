@@ -1,4 +1,5 @@
 {% extends 'base.html' %}
+{% from '_badges.html' import product_badges, product_badge_pills %}
 {% block title %}{{ product.name }} - SMARKAFRICA{% endblock %}
 
 {% block content %}
@@ -10,21 +11,18 @@
 </nav>
 
 <div class="row g-5">
+    {# col-lg-6, not col-md-6: at 768px two halves give the photo ~350px and leave
+       the details column too narrow for the quantity row, which is a label, an
+       input and a large button on one line. Stacked up to 992px, side by side
+       above it. The tablet band in style.css caps the photo height to match. #}
     <!-- Product Image -->
-    <div class="col-md-6">
+    <div class="col-lg-6">
         {% if gallery_images %}
         <div class="position-relative">
             <img src="{{ gallery_images[0] }}" id="main-product-image" class="img-fluid shadow-sm product-main-image" alt="{{ product.name }}">
             {% if product.is_hot_sale %}<strong class="hot-sale-tag">Hot Sale</strong>{% endif %}
-            {% set brand_label = product_brand_label(product) %}
-            {% if brand_label %}
-            <strong class="brand-tag{% if product.is_hot_sale %} brand-tag-stacked{% endif %}">
-                <i class="fas fa-crown"></i><span>{{ brand_label }}</span>
-            </strong>
-            {% endif %}
             {% if product.discount_percent and product.discount_percent > 0 and not product.is_hot_sale %}<strong class="price-drop-tag"><small>Save</small>{{ product.discount_percent|int }}% OFF</strong>{% endif %}
-            {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
-            {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+            {{ product_badges(product) }}
         </div>
         {% if gallery_images|length > 1 %}
         <div class="d-flex gap-2 mt-3 flex-wrap">
@@ -65,13 +63,15 @@
     </div>
 
     <!-- Product Details -->
-    <div class="col-md-6">
-        <span class="badge bg-secondary mb-2">{{ product.category.name if product.category else 'General' }}</span>
-        {% if product.is_digital %}<span class="badge bg-info mb-2">Digital Product</span>{% endif %}
-        {% if product.is_featured %}<span class="badge bg-warning mb-2">Featured</span>{% endif %}
-        {% if product.is_hot_sale %}<span class="badge bg-danger mb-2">Hot Sale</span>{% endif %}
-        {% if product.is_original_source %}<span class="badge bg-primary mb-2">Original</span>{% endif %}
-        {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<span class="badge bg-success mb-2">Verified Seller</span>{% endif %}
+    <div class="col-lg-6">
+        {# flex-wrap so four badges plus the category never overflow the column. #}
+        <div class="d-flex flex-wrap gap-1 align-items-center mb-2 product-badge-row">
+            <span class="badge bg-secondary">{{ product.category.name if product.category else 'General' }}</span>
+            {% if product.is_digital %}<span class="badge bg-info">Digital Product</span>{% endif %}
+            {% if product.is_featured %}<span class="badge bg-warning text-dark">Featured</span>{% endif %}
+            {% if product.is_hot_sale %}<span class="badge bg-danger">Hot Sale</span>{% endif %}
+            {{ product_badge_pills(product) }}
+        </div>
 
         <h1 class="fw-bold">{{ product.name }}</h1>
         {% if product.has_location %}

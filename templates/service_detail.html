@@ -1,0 +1,433 @@
+{% extends "base.html" %}
+{#
+  One service.
+
+  The rule that shapes this page: a client never gets the provider's number. They
+  press "Contact admin", an on-duty admin sees the request together with the
+  number, and the admin makes the introduction.
+
+  So the number appears in three blocks and no others. Two of them read a variable
+  the view populates only for the viewer entitled to it - `provider_phone` for an
+  admin, `direct_phone` only while the MVP has direct contact switched on - and for
+  an ordinary client both are None, so no edit here can leak it: for that viewer the
+  number was never in the context. The third reads `service.provider_phone` straight
+  off the row and is therefore the one to be careful with; it sits inside the
+  `is_owner` branch, where the viewer is the provider and the number is their own.
+#}
+{% block title %}{{ service.title }} - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb small">
+            <li class="breadcrumb-item"><a href="{{ url_for('services_marketplace') }}">Services</a></li>
+            {% if item %}
+            <li class="breadcrumb-item">
+                <a href="{{ url_for('services_marketplace', service=item.key) }}">
+                    {% if item.emoji %}<span aria-hidden="true">{{ item.emoji }}</span> {% endif %}{{ item.label }}
+                </a>
+            </li>
+            {% endif %}
+            <li class="breadcrumb-item active" aria-current="page">{{ service.title[:40] }}</li>
+        </ol>
+    </nav>
+
+    {% if not service.is_active %}
+    <div class="alert alert-warning small">
+        <i class="fas fa-eye-slash me-1"></i>
+        This listing is switched off. Only admins can see this page.
+    </div>
+    {% endif %}
+
+    <div class="row g-4">
+        <div class="col-12 col-lg-7">
+            <div class="card border-0 shadow-sm mb-3">
+                {% if service.image_url %}
+                <img src="{{ service.image_url }}" class="card-img-top"
+                     style="max-height:320px;object-fit:cover;" alt="{{ service.title }}">
+                {% endif %}
+                <div class="card-body">
+                    <h2 class="h4 mb-1">{{ service.title }}</h2>
+                    <p class="text-muted small mb-3">
+                        {% if item %}
+                        {% if item.emoji %}<span aria-hidden="true">{{ item.emoji }}</span>{% endif %} {{ item.label }}
+                        {% else %}{{ service.category }}{% endif %}
+                        {% if service.orders_completed %}
+                        &middot; {{ service.orders_completed }} job{{ '' if service.orders_completed == 1 else 's' }} completed
+                        {% endif %}
+                    </p>
+
+                    <div class="d-flex flex-wrap gap-3 align-items-baseline mb-3">
+                        <span class="h3 mb-0 text-success">
+                            {% if service.price %}KSh {{ "{:,.0f}".format(service.price) }}
+                            {% else %}Price on request{% endif %}
+                        </span>
+                        {% if service.price_type and service.price_type != 'fixed' %}
+                        <span class="badge bg-light text-dark">{{ service.price_type|title }}</span>
+                        {% endif %}
+                    </div>
+
+                    <ul class="list-unstyled mb-0 small">
+                        <li class="mb-2">
+                            <i class="fas fa-truck-pickup text-primary me-2"></i>
+                            {{ service.pickup_display }}
+                            {% if service.pickup_required and service.pickup_via_platform %}
+                            <span class="badge bg-info-subtle text-dark ms-1">Our courier collects</span>
+                            {% endif %}
+                        </li>
+                        {% if service.has_location %}
+                        <li class="mb-2">
+                            <i class="fas fa-location-dot text-primary me-2"></i>
+                            {{ service.location_display }}
+                            {% if service.location_lat is not none and service.location_lng is not none %}
+                            <a class="ms-1" target="_blank" rel="noopener"
+                               href="https://www.openstreetmap.org/?mlat={{ service.location_lat }}&mlon={{ service.location_lng }}#map=16/{{ service.location_lat }}/{{ service.location_lng }}">
+                                view on map
+                            </a>
+                            {% endif %}
+                        </li>
+                        {% endif %}
+                        {% if service.delivery_days %}
+                        <li class="mb-2">
+                            <i class="fas fa-clock text-primary me-2"></i>
+                            Usually done within {{ service.delivery_days }}
+                            day{{ '' if service.delivery_days == 1 else 's' }}
+                        </li>
+                        {% endif %}
+                    </ul>
+                </div>
+            </div>
+
+            {% if service.description %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h6 class="text-uppercase text-muted small fw-bold mb-2">About this service</h6>
+                    <p class="mb-0" style="white-space:pre-line">{{ service.description }}</p>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="col-12 col-lg-5">
+            {% if is_owner %}
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body">
+                    <h6 class="mb-2"><i class="fas fa-user-check me-1"></i>This is your listing</h6>
+                    <p class="small text-muted mb-2">
+                        Clients reach you through an admin. We show them your price, location and
+                        pickup terms — never your number.
+                    </p>
+                    {% if service.provider_phone %}
+                    <p class="small mb-2">
+                        Admins will call you on <strong>{{ service.provider_phone }}</strong>.
+                    </p>
+                    {% endif %}
+                    {% if service.listing_fee_amount and not service.listing_fee_paid %}
+                    <div class="alert alert-warning small mb-0">
+                        A listing fee of KSh {{ "{:,.0f}".format(service.listing_fee_amount) }}
+                        is outstanding on this listing.
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% elif direct_phone %}
+            {#
+              Direct contact is on: the MVP has decided clients may call providers
+              themselves. This is the only block that shows a client the number,
+              and it exists only because a setting says so.
+            #}
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body">
+                    <h6 class="mb-2"><i class="fas fa-phone me-1"></i>Contact the provider</h6>
+                    <a class="btn btn-success w-100 mb-2" href="tel:{{ direct_phone }}">
+                        <i class="fas fa-phone me-1"></i>Call {{ direct_phone }}
+                    </a>
+                    <p class="small text-muted mb-0">
+                        Agree the job and the price with them directly. Pay through the platform
+                        if you would like the payment protected.
+                    </p>
+                </div>
+            </div>
+
+            {% else %}
+            <div class="card border-0 shadow-sm mb-3" id="contactCard">
+                <div class="card-body">
+                    <h6 class="mb-1"><i class="fas fa-headset me-1"></i>Request this service</h6>
+                    <p class="small text-muted mb-3">
+                        Tell us what you need and we will connect you with this provider.
+                        {% if duty_active and requests_enabled %}
+                        Someone is on the desk now.
+                        {% endif %}
+                    </p>
+
+                    {% if not current_user.is_authenticated %}
+                    <a class="btn btn-primary w-100"
+                       href="{{ url_for('login', next=url_for('service_detail', service_id=service.id)) }}">
+                        Sign in to request this
+                    </a>
+                    <div class="text-center small text-muted mt-2">
+                        Or <a href="{{ whatsapp_url }}" target="_blank" rel="noopener">message us on WhatsApp</a>.
+                    </div>
+
+                    {% elif open_request %}
+                    <div class="alert alert-info small mb-2">
+                        <i class="fas fa-hourglass-half me-1"></i>
+                        You already have an open request on this service.
+                    </div>
+                    <button class="btn btn-outline-primary w-100" type="button"
+                            data-thread="{{ open_request.id }}" id="openThreadBtn">
+                        Open the conversation
+                    </button>
+
+                    {% else %}
+                    <form id="contactForm">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <div class="mb-2">
+                            <label class="form-label small mb-1" for="svcNote">What do you need?</label>
+                            <textarea class="form-control" id="svcNote" name="note" rows="3"
+                                      maxlength="1000"
+                                      placeholder="e.g. 2 kg of laundry, collected today from Hostel B"></textarea>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small mb-1" for="svcPhone">Your phone</label>
+                            <input class="form-control" id="svcPhone" name="phone" type="tel"
+                                   inputmode="numeric" maxlength="30"
+                                   value="{{ current_user.phone or '' }}" placeholder="07XXXXXXXX">
+                        </div>
+                        <button class="btn btn-primary w-100" type="submit" id="contactBtn">
+                            <i class="fas fa-paper-plane me-1"></i>Contact admin
+                        </button>
+                    </form>
+                    {% endif %}
+
+                    <div class="alert mt-3 mb-0 d-none" id="contactMsg" role="status" aria-live="polite"></div>
+
+                    <a class="btn btn-outline-success w-100 mt-2 d-none" id="waBtn"
+                       href="{{ whatsapp_url }}" target="_blank" rel="noopener">
+                        <i class="fab fa-whatsapp me-1"></i>Continue on WhatsApp
+                    </a>
+                </div>
+            </div>
+
+            <div class="card border-0 shadow-sm mb-3 d-none" id="threadCard">
+                <div class="card-header bg-white">
+                    <h6 class="mb-0"><i class="fas fa-comments me-1"></i>Conversation with support</h6>
+                </div>
+                <div class="card-body">
+                    <div id="threadBody" class="mb-2"
+                         style="max-height:280px;overflow-y:auto;-webkit-overflow-scrolling:touch">
+                        <p class="text-muted small mb-0">Loading…</p>
+                    </div>
+                    <form id="threadForm" class="d-flex gap-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input class="form-control form-control-sm" name="body" maxlength="2000"
+                               placeholder="Write a message…" aria-label="Message" required>
+                        <button class="btn btn-sm btn-primary" type="submit">Send</button>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if provider_phone %}
+            {#
+              Admins only. The view passes provider_phone to nobody else, so this
+              block simply does not render for a client.
+            #}
+            <div class="card border-warning mb-3">
+                <div class="card-body">
+                    <h6 class="text-warning mb-2">
+                        <i class="fas fa-user-shield me-1"></i>Admin only
+                    </h6>
+                    <p class="small mb-2">
+                        Provider: <strong>{{ service.provider.username if service.provider else '—' }}</strong><br>
+                        Phone: <a href="tel:{{ provider_phone }}"><strong>{{ provider_phone }}</strong></a>
+                    </p>
+                    <p class="small text-muted mb-2">
+                        Never share this number with the client. Introduce them yourself.
+                    </p>
+                    <div class="d-grid gap-2">
+                        <a class="btn btn-sm btn-outline-primary"
+                           href="{{ url_for('admin_service_requests') }}">Open the linking desk</a>
+                        <a class="btn btn-sm btn-outline-secondary"
+                           href="{{ url_for('admin_service_catalogue') }}">Service catalogue</a>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if direct_contact and current_user.is_authenticated and not is_owner and service.price %}
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body">
+                    <h6 class="mb-2"><i class="fas fa-shield-halved me-1"></i>Pay through the platform</h6>
+                    <p class="small text-muted mb-2">
+                        Book the job here and we hold the payment until it is done.
+                    </p>
+                    <form method="POST" action="{{ url_for('order_service', service_id=service.id) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input class="form-control form-control-sm mb-2" name="requirements"
+                               maxlength="500" placeholder="Anything the provider should know">
+                        <button class="btn btn-success btn-sm w-100">
+                            Book for KSh {{ "{:,.0f}".format(service.price) }}
+                        </button>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="card border-0 bg-light">
+                <div class="card-body small text-muted">
+                    <i class="fas fa-circle-info me-1"></i>
+                    {% if service.pickup_required and service.pickup_via_platform %}
+                    Our courier collects for this service and the provider pays that leg — you
+                    are not charged for the collection.
+                    {% elif service.pickup_required %}
+                    Pickup is arranged by the provider.
+                    {% else %}
+                    Take your items to the location shown above.
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    var form = document.getElementById('contactForm');
+    var openBtn = document.getElementById('openThreadBtn');
+    var message = document.getElementById('contactMsg');
+    var waButton = document.getElementById('waBtn');
+    var threadCard = document.getElementById('threadCard');
+    var threadBody = document.getElementById('threadBody');
+    var threadForm = document.getElementById('threadForm');
+    var requestId = openBtn ? openBtn.getAttribute('data-thread') : null;
+    var poll = null;
+
+    function say(text, kind) {
+        if (!message) { return; }
+        message.className = 'alert mt-3 mb-0 alert-' + kind;
+        message.textContent = text;
+    }
+
+    function threadUrl(id) {
+        // Built from a template-side url_for on a placeholder so a route rename is
+        // caught by the url_for audit rather than by a 404 in production.
+        return '{{ url_for("service_request_thread", request_id=0) }}'.replace('/0/', '/' + id + '/');
+    }
+
+    // Message bodies are whatever a client or an admin typed, so they are escaped
+    // before they go anywhere near innerHTML.
+    function escapeHtml(text) {
+        var holder = document.createElement('div');
+        holder.textContent = text == null ? '' : String(text);
+        return holder.innerHTML;
+    }
+
+    function renderMessages(rows) {
+        if (!rows.length) {
+            threadBody.innerHTML = '<p class="text-muted small mb-0">' +
+                'No replies yet. An admin will answer here.</p>';
+            return;
+        }
+        var html = '';
+        rows.forEach(function (row) {
+            var mine = !row.from_admin;
+            html += '<div class="d-flex mb-2 ' + (mine ? 'justify-content-end' : '') + '">' +
+                '<div class="px-2 py-1 rounded small ' +
+                (mine ? 'bg-primary text-white' : 'bg-light border') +
+                '" style="max-width:85%">' + escapeHtml(row.body) + '</div></div>';
+        });
+        threadBody.innerHTML = html;
+        threadBody.scrollTop = threadBody.scrollHeight;
+    }
+
+    function loadThread() {
+        if (!requestId) { return; }
+        fetch(threadUrl(requestId), {headers: {'Accept': 'application/json'}})
+            .then(function (response) { return response.json(); })
+            .then(function (data) {
+                if (data.success) { renderMessages(data.messages || []); }
+            })
+            .catch(function () { /* a dropped poll is not worth an error banner */ });
+    }
+
+    function showThread(id) {
+        requestId = String(id);
+        threadCard.classList.remove('d-none');
+        loadThread();
+        // 12s, not 2s: this is a human conversation with an admin, and a tighter
+        // poll would multiply into real load once thousands of clients wait at once.
+        if (!poll) { poll = setInterval(loadThread, 12000); }
+    }
+
+    if (openBtn) {
+        openBtn.addEventListener('click', function () { showThread(requestId); });
+    }
+
+    if (form) {
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            var button = document.getElementById('contactBtn');
+            button.disabled = true;
+            say('Sending your request…', 'info');
+            fetch('{{ url_for("service_contact_admin", service_id=service.id) }}',
+                  {method: 'POST', body: new FormData(form)})
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        return {ok: response.ok, data: data};
+                    });
+                })
+                .then(function (result) {
+                    var data = result.data || {};
+                    if (!result.ok || !data.success) {
+                        say(data.error || 'That did not go through. Please try again.', 'danger');
+                        button.disabled = false;
+                        return;
+                    }
+                    if (data.mode === 'whatsapp') {
+                        // The exact sentence the server sent, shown verbatim.
+                        say(data.reply, 'warning');
+                        if (waButton) {
+                            waButton.classList.remove('d-none');
+                            if (data.whatsapp_url) { waButton.setAttribute('href', data.whatsapp_url); }
+                        }
+                        form.classList.add('d-none');
+                        return;
+                    }
+                    say(data.reply || 'An admin will reply here shortly.', 'success');
+                    form.classList.add('d-none');
+                    if (data.request_id) { showThread(data.request_id); }
+                })
+                .catch(function () {
+                    say('We could not reach the server. Check your connection and try again.', 'danger');
+                    button.disabled = false;
+                });
+        });
+    }
+
+    if (threadForm) {
+        threadForm.addEventListener('submit', function (event) {
+            event.preventDefault();
+            if (!requestId) { return; }
+            var data = new FormData(threadForm);
+            fetch(threadUrl(requestId), {method: 'POST', body: data})
+                .then(function (response) { return response.json(); })
+                .then(function (payload) {
+                    if (payload.success) {
+                        threadForm.reset();
+                        renderMessages(payload.messages || []);
+                    }
+                })
+                .catch(function () { /* the message stays in the box to retry */ });
+        });
+    }
+
+    window.addEventListener('beforeunload', function () {
+        if (poll) { clearInterval(poll); }
+    });
+})();
+</script>
+{% endblock %}

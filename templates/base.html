@@ -7,6 +7,11 @@
     <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='images/favicon.png', v='20260730') }}">
     <link rel="shortcut icon" href="{{ url_for('favicon') }}">
     <link rel="apple-touch-icon" href="{{ url_for('static', filename='images/favicon.png', v='20260730') }}">
+    <link rel="manifest" href="{{ url_for('web_app_manifest') }}">
+    {# Colours the phone's status bar to match the navbar below it. Same value as
+       theme_color in the manifest; both have to agree or the bar changes colour
+       when the app is opened from the home screen instead of the browser. #}
+    <meta name="theme-color" content="#212529">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
@@ -28,16 +33,36 @@
             <a class="navbar-brand fw-bold" href="{{ url_for('home') }}">
                 <img src="{{ url_for('static', filename='images/smarkafrica-logo.png') }}" alt="SMARKAFRICA" class="site-logo">
             </a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+            <button class="navbar-toggler" type="button" data-bs-toggle="offcanvas" data-bs-target="#navbarNav"
+                    aria-controls="navbarNav" aria-label="Open the menu">
                 <span class="navbar-toggler-icon"></span>
             </button>
-            <div class="collapse navbar-collapse" id="navbarNav">
+            {#
+              offcanvas-lg, not collapse: below 992px this is a side drawer that
+              scrolls on its own, and at 992px and up Bootstrap stops treating it as
+              a drawer and the links sit inline exactly as before. The inline
+              collapse it replaced expanded downwards and pushed the page off the
+              phone screen, which is the whole complaint.
+            #}
+            <div class="offcanvas-lg offcanvas-end text-bg-dark" tabindex="-1" id="navbarNav"
+                 aria-labelledby="navbarNavLabel">
+                <div class="offcanvas-header border-bottom border-secondary">
+                    <h6 class="offcanvas-title mb-0" id="navbarNavLabel">
+                        <i class="fas fa-bars me-2"></i>Menu
+                    </h6>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"
+                            data-bs-target="#navbarNav" aria-label="Close the menu"></button>
+                </div>
+                <div class="offcanvas-body">
                 <ul class="navbar-nav me-auto">
                     <li class="nav-item">
                         <a class="nav-link" href="{{ url_for('home') }}"><i class="fas fa-home me-1"></i>Home</a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" href="{{ url_for('shop') }}"><i class="fas fa-tags me-1"></i>Shop</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('services_marketplace') }}"><i class="fas fa-screwdriver-wrench me-1"></i>Services</a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" href="{{ url_for('raffles') }}"><i class="fas fa-ticket me-1"></i>Raffles</a>
@@ -120,6 +145,26 @@
                             <li><a class="dropdown-item" href="{{ url_for('seller_ads') }}"><i class="fas fa-bullhorn me-2"></i>Ads</a></li>
                             <li><hr class="dropdown-divider"></li>
                             {% if auth_user.is_admin %}
+                            {#
+                              The duty switch lives here, not only on the linking
+                              desk, because its consequence is invisible from
+                              anywhere else: off duty means every client pressing
+                              "Contact admin" is sent to WhatsApp instead.
+                            #}
+                            <li>
+                                <form method="POST" action="{{ url_for('admin_service_duty') }}" class="px-3 py-2">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                    <input type="hidden" name="duty" value="{{ '0' if auth_user.service_duty_on else '1' }}">
+                                    <button class="btn btn-sm w-100 {{ 'btn-success' if auth_user.service_duty_on else 'btn-outline-success' }}">
+                                        <i class="fas fa-{{ 'toggle-on' if auth_user.service_duty_on else 'toggle-off' }} me-1"></i>
+                                        {{ 'On duty for services' if auth_user.service_duty_on else 'Go on duty' }}
+                                    </button>
+                                </form>
+                            </li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_service_requests') }}"><i class="fas fa-link me-2"></i>Service Linking Desk</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_service_catalogue') }}"><i class="fas fa-list-check me-2"></i>Service Catalogue</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_invoices') }}"><i class="fas fa-file-invoice-dollar me-2"></i>Invoices</a></li>
+                            <li><hr class="dropdown-divider"></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_dashboard') }}"><i class="fas fa-shield-alt me-2"></i>Admin Panel</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_market_intelligence') }}"><i class="fas fa-chart-line me-2"></i>Interactive Analysis</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_market_news') }}"><i class="fas fa-newspaper me-2"></i>Price News</a></li>
@@ -164,6 +209,7 @@
                     </li>
                     {% endif %}
                 </ul>
+                </div>
             </div>
         </div>
     </nav>
@@ -292,6 +338,72 @@
             const closeHotSale = () => hotSale.remove();
             hotSale.querySelector('.platform-ad-close')?.addEventListener('click', closeHotSale);
             setTimeout(closeHotSale, 6500);
+        }
+    })();
+    </script>
+
+    {# Installable web app. The install button itself lives on the home page, but
+       this script is site-wide on purpose: beforeinstallprompt fires once, early,
+       and on whatever page the visitor happened to land on, so capturing it here
+       means it is never missed by being registered too late. #}
+    <script>
+    (function () {
+        var deferredPrompt = null;
+
+        function installButton() {
+            return document.getElementById('pwaInstallButton');
+        }
+
+        function reveal() {
+            var button = installButton();
+            if (button && deferredPrompt) {
+                button.classList.remove('d-none');
+            }
+        }
+
+        window.addEventListener('beforeinstallprompt', function (event) {
+            // Suppress the browser's own mini-infobar so the install comes from
+            // our button, rather than the two competing for the same tap.
+            event.preventDefault();
+            deferredPrompt = event;
+            reveal();
+        });
+
+        document.addEventListener('DOMContentLoaded', function () {
+            var button = installButton();
+            if (!button) { return; }
+            // The button ships hidden and is revealed only once the browser has
+            // said an install is actually possible. On iOS the event never fires,
+            // so it stays hidden rather than being a button that does nothing.
+            reveal();
+            button.addEventListener('click', function () {
+                if (!deferredPrompt) { return; }
+                var prompted = deferredPrompt.prompt();
+                // The event is single-use: prompt() cannot be called on it twice.
+                // So the button goes away whatever the person chooses - the
+                // browser fires the event again on a later visit if they
+                // dismissed it, which is what brings the button back.
+                deferredPrompt = null;
+                button.classList.add('d-none');
+                if (prompted && prompted.catch) { prompted.catch(function () {}); }
+            });
+        });
+
+        window.addEventListener('appinstalled', function () {
+            deferredPrompt = null;
+            var button = installButton();
+            if (button) { button.classList.add('d-none'); }
+        });
+
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function () {
+                navigator.serviceWorker.register("{{ url_for('service_worker') }}")
+                    .catch(function () {
+                        // A failed registration must not affect the page: the site
+                        // behaves identically without a worker, which is the whole
+                        // reason this one does nothing but exist.
+                    });
+            });
         }
     })();
     </script>

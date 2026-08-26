@@ -1,0 +1,298 @@
+{% extends "base.html" %}
+{#
+  The linking desk. The one page on the platform where a provider's phone number is
+  shown, and it is shown next to the client's so that one admin can make one
+  introduction from one screen.
+
+  The duty switch is at the top rather than buried in settings, because a client
+  who presses "Contact admin" while nobody is on duty is sent to WhatsApp with a
+  fixed sentence - so whether this switch is on is a decision with a visible
+  consequence, and it should be visible to the person making it.
+#}
+{% block title %}Service linking desk - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-link me-2"></i>Service linking desk</h2>
+            <p class="text-muted mb-0 small">
+                Clients asking to be connected to a provider.
+                {{ on_duty_count }} admin{{ '' if on_duty_count == 1 else 's' }} on duty
+                &middot; {{ agent_count }} nominated agent{{ '' if agent_count == 1 else 's' }} on duty.
+            </p>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="{{ url_for('admin_service_catalogue') }}" class="btn btn-outline-secondary">
+                <i class="fas fa-list-check me-1"></i>Catalogue
+            </a>
+            <form method="POST" action="{{ url_for('admin_service_duty') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="hidden" name="duty" value="{{ '0' if duty_on else '1' }}">
+                <button class="btn {{ 'btn-success' if duty_on else 'btn-outline-success' }}">
+                    <i class="fas fa-{{ 'toggle-on' if duty_on else 'toggle-off' }} me-1"></i>
+                    {{ 'You are on duty' if duty_on else 'Go on duty' }}
+                </button>
+            </form>
+        </div>
+    </div>
+
+    {% if not on_duty_count %}
+    <div class="alert alert-warning">
+        <i class="fas fa-triangle-exclamation me-1"></i>
+        <strong>Nobody is on duty.</strong> Every client pressing “Contact admin” right now is
+        told our agents are busy and sent to WhatsApp.
+    </div>
+    {% endif %}
+
+    <ul class="nav nav-pills mb-3 flex-wrap gap-1">
+        {% for value, label in [('open', 'Open'), ('linked', 'Linked'), ('closed', 'Closed'),
+                                ('whatsapp_redirected', 'Sent to WhatsApp'), ('all', 'Everything')] %}
+        <li class="nav-item">
+            <a class="nav-link {{ 'active' if status == value }}"
+               href="{{ url_for('admin_service_requests', status=value) }}">{{ label }}</a>
+        </li>
+        {% endfor %}
+    </ul>
+
+    {% if not requests %}
+    <div class="card border-0 shadow-sm">
+        <div class="card-body text-center text-muted py-5">
+            <i class="fas fa-inbox fa-2x mb-2 d-block"></i>
+            {% if status == 'open' %}Nothing waiting. The desk is clear.
+            {% else %}No requests here.{% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="row g-3">
+        {% for row in requests %}
+        <div class="col-12 col-xl-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-2">
+                        <div>
+                            <h6 class="mb-1">
+                                {% if row.service %}
+                                <a href="{{ url_for('service_detail', service_id=row.service_id) }}"
+                                   class="text-decoration-none">{{ row.service.title }}</a>
+                                {% else %}
+                                <span class="text-muted">Listing removed</span>
+                                {% endif %}
+                            </h6>
+                            <div class="small text-muted">
+                                #{{ row.id }}
+                                {% if row.created_at %}
+                                &middot; {{ row.created_at.strftime('%d %b %Y %H:%M') }}
+                                {% endif %}
+                                {% if row.channel == 'whatsapp' %}
+                                &middot; <i class="fab fa-whatsapp text-success"></i> WhatsApp
+                                {% endif %}
+                            </div>
+                        </div>
+                        <span class="badge bg-{{ 'warning text-dark' if row.status == 'open'
+                            else ('info' if row.status == 'claimed'
+                            else ('success' if row.status == 'linked'
+                            else 'secondary')) }}">{{ row.status.replace('_', ' ') }}</span>
+                    </div>
+
+                    <div class="row g-2 small mb-2">
+                        <div class="col-12 col-sm-6">
+                            <div class="border rounded p-2 h-100">
+                                <div class="text-uppercase text-muted" style="font-size:11px">Client</div>
+                                <strong>{{ row.client.username if row.client else '—' }}</strong>
+                                {% if row.client_phone %}
+                                <div><a href="tel:{{ row.client_phone }}">{{ row.client_phone }}</a></div>
+                                {% elif row.client and row.client.phone %}
+                                <div><a href="tel:{{ row.client.phone }}">{{ row.client.phone }}</a></div>
+                                {% endif %}
+                                {% if row.client and row.client.email %}
+                                <div class="text-muted text-truncate">{{ row.client.email }}</div>
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div class="col-12 col-sm-6">
+                            <div class="border rounded p-2 h-100 border-warning">
+                                <div class="text-uppercase text-muted" style="font-size:11px">
+                                    Provider <i class="fas fa-lock" title="Never share with the client"></i>
+                                </div>
+                                <strong>{{ row.service.provider.username
+                                    if row.service and row.service.provider else '—' }}</strong>
+                                {% if row.service and row.service.provider_phone %}
+                                <div>
+                                    <a href="tel:{{ row.service.provider_phone }}">
+                                        {{ row.service.provider_phone }}</a>
+                                </div>
+                                {% else %}
+                                <div class="text-muted">No number on the listing</div>
+                                {% endif %}
+                                {% if row.service %}
+                                <div class="text-muted">{{ row.service.pickup_display }}</div>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+
+                    {% if row.client_note %}
+                    <div class="bg-light rounded p-2 small mb-2" style="white-space:pre-line">{{ row.client_note }}</div>
+                    {% endif %}
+
+                    {% if row.service and row.service.has_location %}
+                    <div class="small text-muted mb-2">
+                        <i class="fas fa-location-dot me-1"></i>{{ row.service.location_display }}
+                        {% if row.service.price %}
+                        &middot; KSh {{ "{:,.0f}".format(row.service.price) }}
+                        {% endif %}
+                    </div>
+                    {% endif %}
+
+                    <div class="small text-muted mb-2">
+                        Routed to:
+                        <strong>{{ row.assigned_admin.username if row.assigned_admin else 'anyone on duty' }}</strong>
+                    </div>
+
+                    {% if row.status in ['open', 'claimed'] %}
+                    <div class="d-flex flex-wrap gap-2 mb-2">
+                        {% if row.status == 'open' %}
+                        <form method="POST"
+                              action="{{ url_for('admin_service_request_action', request_id=row.id, action='claim') }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-primary">
+                                <i class="fas fa-hand me-1"></i>Claim
+                            </button>
+                        </form>
+                        {% endif %}
+                        <form method="POST"
+                              action="{{ url_for('admin_service_request_action', request_id=row.id, action='link') }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-success">
+                                <i class="fas fa-handshake me-1"></i>Mark linked
+                            </button>
+                        </form>
+                        <form method="POST"
+                              action="{{ url_for('admin_service_request_action', request_id=row.id, action='close') }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-outline-secondary">Close</button>
+                        </form>
+                    </div>
+                    {% endif %}
+
+                    <button class="btn btn-sm btn-outline-primary w-100" type="button"
+                            data-thread-toggle="{{ row.id }}">
+                        <i class="fas fa-comments me-1"></i>Open the conversation
+                    </button>
+
+                    <div class="mt-2 d-none" data-thread-panel="{{ row.id }}">
+                        <div class="border rounded p-2 mb-2" data-thread-body="{{ row.id }}"
+                             style="max-height:240px;overflow-y:auto;-webkit-overflow-scrolling:touch">
+                            <p class="text-muted small mb-0">Loading…</p>
+                        </div>
+                        {% if row.status != 'closed' %}
+                        <form class="d-flex gap-2" data-thread-form="{{ row.id }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input class="form-control form-control-sm" name="body" maxlength="2000"
+                                   placeholder="Reply to the client…" aria-label="Reply" required>
+                            <button class="btn btn-sm btn-primary" type="submit">Send</button>
+                        </form>
+                        <div class="form-text">
+                            Replying claims the request if it is still unclaimed.
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if pagination.pages > 1 %}
+    <nav class="mt-3">
+        <ul class="pagination justify-content-center flex-wrap mb-0">
+            {% for p in pagination.iter_pages(left_edge=1, right_edge=1, left_current=2, right_current=2) %}
+                {% if p %}
+                <li class="page-item {{ 'active' if p == pagination.page }}">
+                    <a class="page-link"
+                       href="{{ url_for('admin_service_requests', page=p, status=status) }}">{{ p }}</a>
+                </li>
+                {% else %}
+                <li class="page-item disabled"><span class="page-link">…</span></li>
+                {% endif %}
+            {% endfor %}
+        </ul>
+    </nav>
+    {% endif %}
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    // One delegated listener for the whole page rather than one per card: this list
+    // is 25 requests deep and grows, and 25 sets of handlers is 25 closures held
+    // for a page an admin leaves open all day.
+    var base = '{{ url_for("service_request_thread", request_id=0) }}';
+
+    function threadUrl(id) { return base.replace('/0/', '/' + id + '/'); }
+
+    function escapeHtml(text) {
+        var holder = document.createElement('div');
+        holder.textContent = text == null ? '' : String(text);
+        return holder.innerHTML;
+    }
+
+    function render(id, rows) {
+        var body = document.querySelector('[data-thread-body="' + id + '"]');
+        if (!body) { return; }
+        if (!rows || !rows.length) {
+            body.innerHTML = '<p class="text-muted small mb-0">Nothing said yet.</p>';
+            return;
+        }
+        var html = '';
+        rows.forEach(function (row) {
+            var mine = row.from_admin;
+            html += '<div class="d-flex mb-2 ' + (mine ? 'justify-content-end' : '') + '">' +
+                '<div class="px-2 py-1 rounded small ' +
+                (mine ? 'bg-primary text-white' : 'bg-light border') +
+                '" style="max-width:85%">' + escapeHtml(row.body) + '</div></div>';
+        });
+        body.innerHTML = html;
+        body.scrollTop = body.scrollHeight;
+    }
+
+    function load(id) {
+        fetch(threadUrl(id), {headers: {'Accept': 'application/json'}})
+            .then(function (response) { return response.json(); })
+            .then(function (data) { if (data.success) { render(id, data.messages); } })
+            .catch(function () { /* leave the panel as it is */ });
+    }
+
+    document.addEventListener('click', function (event) {
+        var button = event.target.closest('[data-thread-toggle]');
+        if (!button) { return; }
+        var id = button.getAttribute('data-thread-toggle');
+        var panel = document.querySelector('[data-thread-panel="' + id + '"]');
+        if (!panel) { return; }
+        panel.classList.toggle('d-none');
+        if (!panel.classList.contains('d-none')) { load(id); }
+    });
+
+    document.addEventListener('submit', function (event) {
+        var form = event.target.closest('[data-thread-form]');
+        if (!form) { return; }
+        event.preventDefault();
+        var id = form.getAttribute('data-thread-form');
+        fetch(threadUrl(id), {method: 'POST', body: new FormData(form)})
+            .then(function (response) { return response.json(); })
+            .then(function (data) {
+                if (data.success) {
+                    form.reset();
+                    render(id, data.messages);
+                } else if (data.error) {
+                    alert(data.error);
+                }
+            })
+            .catch(function () { alert('Could not send that. Try again.'); });
+    });
+})();
+</script>
+{% endblock %}

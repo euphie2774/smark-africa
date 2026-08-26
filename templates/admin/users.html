@@ -151,6 +151,35 @@
                                 </form>
                                 {% endif %}
 
+                                {#
+                                  Desk assignments, MVP only - and only shown for admins, because
+                                  both routes refuse a non-admin target and would just flash an
+                                  error. The linking desk toggle carries no confirm: it only
+                                  changes who a request is routed to first, and any on-duty admin
+                                  can still claim an unclaimed one. The invoice toggle does,
+                                  because it hands someone the power to email a payment demand to
+                                  a client under the company name.
+                                #}
+                                {% if current_user.admin_level == 'mvp' and user.is_admin %}
+                                <div class="d-flex flex-wrap gap-1 mt-2">
+                                    <form method="POST" action="{{ url_for('admin_toggle_service_agent', user_id=user.id) }}">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button type="submit" class="btn btn-sm text-nowrap {{ 'btn-primary' if user.service_linking_agent else 'btn-outline-primary' }}"
+                                                title="{{ 'Remove from the service linking desk' if user.service_linking_agent else 'Route service link requests to this admin first' }}">
+                                            <i class="fas fa-hands-helping me-1"></i>Linking desk
+                                        </button>
+                                    </form>
+                                    <form method="POST" action="{{ url_for('admin_toggle_invoice_agent', user_id=user.id) }}">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                        <button type="submit" class="btn btn-sm text-nowrap {{ 'btn-info' if user.invoice_agent else 'btn-outline-info' }}"
+                                                title="{{ 'Remove invoice issuing rights' if user.invoice_agent else 'Allow this admin to issue invoices to clients' }}"
+                                                onclick="return confirm('{{ 'Remove' if user.invoice_agent else 'Grant' }} invoice issuing rights for this admin?');">
+                                            <i class="fas fa-file-invoice-dollar me-1"></i>Invoices
+                                        </button>
+                                    </form>
+                                </div>
+                                {% endif %}
+
                                 {% if is_seller %}
                                 <form method="POST" action="{{ url_for('admin_update_seller_rating', uid=user.id) }}" class="d-flex flex-wrap gap-1 mt-2 align-items-center">
                                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>

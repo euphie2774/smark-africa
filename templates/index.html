@@ -1,4 +1,5 @@
 {% extends 'base.html' %}
+{% from '_badges.html' import product_badges %}
 {% block title %}SMARKAFRICA - Gold Marketplace{% endblock %}
 
 {% block content %}
@@ -31,6 +32,14 @@
             {% if current_user.is_authenticated %}
             <a href="{{ url_for('orders') }}" class="btn btn-outline-gold btn-lg">My Orders</a>
             {% endif %}
+            {# Ships hidden and is revealed by the script in base.html only once the
+               browser has confirmed the app can actually be installed. It therefore
+               never appears on iOS, which does not fire that event, instead of
+               offering an install that would do nothing. #}
+            <button type="button" id="pwaInstallButton"
+                    class="btn btn-soft-dark btn-lg d-none">
+                <i class="fas fa-download me-2"></i>Install App
+            </button>
         </div>
     </div>
 </section>
@@ -76,10 +85,7 @@
                     {% elif product.discount_percent and product.discount_percent > 0 %}
                     <strong class="price-drop-tag"><small>Save</small>{{ product.discount_percent|int }}% OFF</strong>
                     {% endif %}
-                    {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
-                    {% set brand_label = product_brand_label(product) %}
-                    {% if brand_label %}<strong class="brand-tag"><i class="fas fa-crown"></i><span>{{ brand_label }}</span></strong>{% endif %}
-                    {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+                    {{ product_badges(product) }}
                 </span>
                 <span class="hot-deal-copy">
                     <strong>{{ product.name[:44] }}</strong>
@@ -100,10 +106,7 @@
                     {% elif product.discount_percent and product.discount_percent > 0 %}
                     <strong class="price-drop-tag"><small>Save</small>{{ product.discount_percent|int }}% OFF</strong>
                     {% endif %}
-                    {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
-                    {% set brand_label = product_brand_label(product) %}
-                    {% if brand_label %}<strong class="brand-tag"><i class="fas fa-crown"></i><span>{{ brand_label }}</span></strong>{% endif %}
-                    {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+                    {{ product_badges(product) }}
                 </span>
                 <span class="hot-deal-copy">
                     <strong>{{ product.name[:44] }}</strong>
@@ -200,10 +203,7 @@
                 {% elif product.discount_percent and product.discount_percent > 0 %}
                 <strong class="price-drop-tag"><small>Save</small>{{ product.discount_percent|int }}% OFF</strong>
                 {% endif %}
-                {% if product.is_original_source %}<strong class="authenticity-seal">Original</strong>{% endif %}
-                {% set brand_label = product_brand_label(product) %}
-                {% if brand_label %}<strong class="brand-tag"><i class="fas fa-crown"></i><span>{{ brand_label }}</span></strong>{% endif %}
-                {% if product.seller and product.seller.is_verified_seller and product.seller.verified_seller_badge_enabled %}<strong class="authenticity-seal verified-seller-seal">Verified Seller</strong>{% endif %}
+                {{ product_badges(product) }}
             </a>
             <div class="product-copy">
                 <a href="{{ url_for('product_page', slug=product.slug) }}" class="product-title">{{ product.name[:70] }}</a>

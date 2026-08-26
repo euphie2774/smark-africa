@@ -2,7 +2,7 @@
 
 Run with: python tools/run_all_checks.py
 
-There are nineteen of these now, spread between the repository root and tools/, and
+There are twenty-two of these now, spread between the repository root and tools/, and
 they are the only evidence that any of the scaling work actually holds. Running them
 one at a time invites running only the ones you remember, which is how a regression
 in the fourteenth survives a green run of the first three.
@@ -36,6 +36,9 @@ SCRIPTS = [
     'tools/admin_bulk_digital_smoke.py',
     'tools/phone_evidence_smoke.py',
     'tools/private_storage_smoke.py',
+    'tools/services_smoke.py',
+    'tools/invoice_smoke.py',
+    'tools/semantic_search_smoke.py',
 ]
 
 

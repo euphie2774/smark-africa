@@ -1,4 +1,5 @@
 import json
+import secrets
 import uuid
 from datetime import datetime, timedelta
 from flask_sqlalchemy import SQLAlchemy
@@ -53,6 +54,25 @@ class User(UserMixin, db.Model):
     seller_rating = db.Column(db.Float, default=0.0)
     seller_rating_notes = db.Column(db.Text)
     verified_seller_badge_enabled = db.Column(db.Boolean, default=True)
+    # Service linking desk. Two separate ideas on purpose:
+    #   service_duty_on      - this admin says they are at the desk right now. Their
+    #                          own switch, flipped by them, and the only thing that
+    #                          decides whether a client is offered the platform or
+    #                          the WhatsApp fallback. Presence is never guessed:
+    #                          there is no last_seen on this table, and adding a
+    #                          heartbeat would mean a write per request.
+    #   service_linking_agent - the MVP nominated this admin for the desk. Routing
+    #                          only: their requests come to them first. It does not
+    #                          make them on duty, and an unclaimed request stays
+    #                          claimable by any admin who is, so a nominated agent
+    #                          who never logs in cannot strand a client.
+    service_duty_on = db.Column(db.Boolean, default=False)
+    service_duty_since = db.Column(db.DateTime)
+    service_linking_agent = db.Column(db.Boolean, default=False)
+    # Separately assignable: billing a client is not the same trust as introducing
+    # one, so the invoice desk is its own nomination rather than a reuse of the
+    # linking flag.
+    invoice_agent = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     last_login = db.Column(db.DateTime)
@@ -1847,13 +1867,27 @@ class FeaturedPlacementBid(db.Model):
 
 
 class ServiceListing(db.Model):
-    """Freelance/service marketplace - platform takes commission."""
+    """A service someone offers - laundry, printing, repairs, tutoring.
+
+    Sold differently from a product on purpose. The client never receives the
+    provider's number: they press "contact admin", an on-duty admin sees the
+    request together with ``provider_phone``, and the admin introduces the two.
+    ``provider_phone`` is therefore admin-only in every template that touches it -
+    the whole design collapses if it renders once to a customer.
+
+    ``service_direct_contact_enabled`` is the switch that changes the model later:
+    with it on, clients contact providers themselves and listing stops being free,
+    which is what ``listing_fee_*`` is for.
+    """
     __tablename__ = 'service_listings'
     id = db.Column(db.Integer, primary_key=True)
     provider_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     title = db.Column(db.String(200), nullable=False)
     description = db.Column(db.Text)
     category = db.Column(db.String(80), nullable=False)
+    # Catalogue key from ServiceCatalogueItem. category stays for rows written
+    # before the catalogue existed, so nothing has to be backfilled to keep working.
+    service_key = db.Column(db.String(60), index=True)
     price_type = db.Column(db.String(30), default='fixed')
     price = db.Column(db.Float, nullable=False)
     delivery_days = db.Column(db.Integer, default=3)
@@ -1862,9 +1896,69 @@ class ServiceListing(db.Model):
     orders_completed = db.Column(db.Integer, default=0)
     rating = db.Column(db.Float, default=0.0)
     platform_commission = db.Column(db.Float, default=15.0)
+
+    # Admins only. Never rendered to a client.
+    provider_phone = db.Column(db.String(30))
+
+    # Same four columns as Product (see Product.location_label) so the
+    # location_display / has_location properties below are the same logic buyers
+    # already see on a product card rather than a second dialect of it.
+    location_label = db.Column(db.String(200))
+    location_county = db.Column(db.String(100))
+    location_lat = db.Column(db.Float)
+    location_lng = db.Column(db.Float)
+
+    # Pickup. Drives the third field of the chatbot's provider line, which is why
+    # eta is free text: "today" and "tomorrow" are what a provider actually says.
+    pickup_required = db.Column(db.Boolean, default=False)
+    pickup_is_free = db.Column(db.Boolean, default=False)
+    pickup_cost = db.Column(db.Float, default=0.0)
+    pickup_eta = db.Column(db.String(60))
+    # Platform courier does the pickup. The provider is billed for that leg, not
+    # the client - a client who only wanted the service never sees a delivery fee.
+    pickup_via_platform = db.Column(db.Boolean, default=False)
+
+    # Only consulted while direct contact is on; free and admin-brokered otherwise.
+    listing_fee_amount = db.Column(db.Float, default=0.0)
+    listing_fee_paid = db.Column(db.Boolean, default=False)
+    # Listed by the MVP or an admin, so exempt from the seller_listable filter.
+    is_admin_listing = db.Column(db.Boolean, default=False)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     provider = db.relationship('User', lazy=True)
+
+    @property
+    def location_display(self):
+        label = (self.location_label or self.location_county or '').strip()
+        if label:
+            return label
+        if self.location_lat is not None and self.location_lng is not None:
+            return f'{self.location_lat:.3f}, {self.location_lng:.3f}'
+        return None
+
+    @property
+    def has_location(self):
+        return bool(self.location_label or self.location_county
+                    or (self.location_lat is not None and self.location_lng is not None))
+
+    @property
+    def pickup_display(self):
+        """The pickup half of a provider line, in the provider's own terms.
+
+        One property rather than the same three-branch conditional in the detail
+        page, the card and the chatbot formatter - three copies would drift, and a
+        client told "pickup today" by one and "no pickup" by another has no way to
+        know which is true.
+        """
+        if not self.pickup_required:
+            return 'No pickup offered, take to the location as directed'
+        when = (self.pickup_eta or '').strip()
+        if self.pickup_is_free:
+            return f'free pickup {when}'.strip()
+        if self.pickup_cost and self.pickup_cost > 0:
+            return f'pickup {when} (KES {self.pickup_cost:,.0f})'.replace('  ', ' ').strip()
+        return f'pickup {when}'.strip() if when else 'pickup available'
 
 
 class ServiceOrder(db.Model):
@@ -1887,6 +1981,271 @@ class ServiceOrder(db.Model):
     service = db.relationship('ServiceListing', lazy=True)
     client = db.relationship('User', foreign_keys=[client_id], lazy=True)
     provider = db.relationship('User', foreign_keys=[provider_id], lazy=True)
+
+
+class ServiceCatalogueItem(db.Model):
+    """The set of services that may exist on the platform, owned by the admin.
+
+    A table rather than a list in the source, for two reasons that matter to you:
+    the admin can add a service that was never on the original eighteen without a
+    deploy, and ``seller_listable`` lets them decide which of them a seller may
+    choose. Admins are never filtered by that flag - they may list anything.
+
+    Read on every services page, so it is cached in main.service_catalogue() and
+    only ever queried once per worker per TTL.
+    """
+    __tablename__ = 'service_catalogue_items'
+    __table_args__ = (
+        db.Index('ix_service_catalogue_active_order', 'is_active', 'sort_order'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(60), unique=True, nullable=False)
+    label = db.Column(db.String(120), nullable=False)
+    emoji = db.Column(db.String(16))
+    # Off by default: a service the admin adds is not something sellers may list
+    # until the admin says so. Opt-in is the safe direction for this switch.
+    seller_listable = db.Column(db.Boolean, default=False)
+    is_active = db.Column(db.Boolean, default=True)
+    sort_order = db.Column(db.Integer, default=100)
+    created_by_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    created_by = db.relationship('User', lazy=True)
+
+    @property
+    def display(self):
+        return f'{self.emoji} {self.label}'.strip() if self.emoji else self.label
+
+
+class ServiceLinkRequest(db.Model):
+    """One client asking to be introduced to one provider, through an admin.
+
+    This is the record the linking desk works from. The client never sees the
+    provider's number; the admin sees both sides and makes the introduction.
+
+    ``channel`` records how the client was actually served, so "how often is
+    nobody on duty" is answerable from the table instead of guessed - a row with
+    channel='whatsapp' is a client we could not serve on the platform.
+    """
+    __tablename__ = 'service_link_requests'
+    __table_args__ = (
+        db.Index('ix_service_requests_status_created', 'status', 'created_at'),
+        db.Index('ix_service_requests_client_created', 'client_id', 'created_at'),
+        db.Index('ix_service_requests_service_created', 'service_id', 'created_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.Integer, db.ForeignKey('service_listings.id'), nullable=False)
+    client_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    # Pre-filled with a nominated agent when there is one on duty. Routing, not
+    # ownership: an open request stays claimable by any admin on duty.
+    assigned_admin_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    # open | claimed | linked | closed | whatsapp_redirected
+    status = db.Column(db.String(30), default='open')
+    client_note = db.Column(db.Text)
+    client_phone = db.Column(db.String(30))
+    channel = db.Column(db.String(20), default='platform')  # platform | whatsapp
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    claimed_at = db.Column(db.DateTime)
+    linked_at = db.Column(db.DateTime)
+    closed_at = db.Column(db.DateTime)
+
+    service = db.relationship('ServiceListing', lazy=True)
+    client = db.relationship('User', foreign_keys=[client_id], lazy=True)
+    assigned_admin = db.relationship('User', foreign_keys=[assigned_admin_id], lazy=True)
+
+    @property
+    def is_open(self):
+        return self.status in ('open', 'claimed')
+
+
+class ServiceLinkMessage(db.Model):
+    """A message on a link request thread.
+
+    Purpose-built rather than reusing AdminMessage, which has no thread key: every
+    reply there would mean scanning to reassemble a conversation, and this is a
+    conversation a client refreshes while waiting.
+    """
+    __tablename__ = 'service_link_messages'
+    __table_args__ = (
+        db.Index('ix_service_messages_request_created', 'request_id', 'created_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    request_id = db.Column(db.Integer, db.ForeignKey('service_link_requests.id'), nullable=False)
+    sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    from_admin = db.Column(db.Boolean, default=False)
+    body = db.Column(db.Text, nullable=False)
+    read_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    sender = db.relationship('User', lazy=True)
+    request = db.relationship('ServiceLinkRequest', lazy=True)
+
+
+def generate_invoice_token():
+    """Unguessable path segment for the client's pay page.
+
+    The invoice link is emailed to someone who may have no account here, so the
+    token is the only thing standing between a stranger and a named customer's
+    billing details. token_urlsafe(32) is 256 bits from the OS CSPRNG - not
+    uuid4().hex, which is what the rest of this file uses for order numbers and is
+    the wrong tool for a bearer credential.
+    """
+    return secrets.token_urlsafe(32)
+
+
+class Invoice(db.Model):
+    """A payment request an admin issues to a client, delivered by email.
+
+    Separate from PosSale on purpose. A POS sale is a record of money already
+    taken across a counter; this is a request for money not yet paid, addressed to
+    someone who may not have an account, and it therefore needs the things a
+    receipt does not: a due date, a status that can go overdue, and a public token
+    so the client can open and pay it from an email link.
+
+    Totals are stored rather than recomputed from items at read time. An invoice is
+    a statement of what was asked for on the day it was sent: if a rate or tax rate
+    changes next month, a recomputed total would silently rewrite history on a
+    document the client already has in their inbox.
+    """
+    __tablename__ = 'invoices'
+    __table_args__ = (
+        db.Index('ix_invoices_status_due', 'status', 'due_date'),
+        db.Index('ix_invoices_client_created', 'client_id', 'created_at'),
+        db.Index('ix_invoices_issuer_created', 'issued_by_id', 'created_at'),
+        db.Index('ix_invoices_email_created', 'client_email', 'created_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    invoice_number = db.Column(db.String(40), unique=True, nullable=False)
+    # Unguessable, and unique so a token can never address two invoices.
+    public_token = db.Column(db.String(64), unique=True, nullable=False,
+                             default=generate_invoice_token)
+
+    # The client. client_id is optional because an invoice may be raised for
+    # someone who has never registered; the email is what the request is sent to
+    # and is therefore the one contact field that is required.
+    client_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    client_name = db.Column(db.String(160), nullable=False)
+    client_email = db.Column(db.String(160), nullable=False)
+    client_phone = db.Column(db.String(30))
+    client_address = db.Column(db.Text)
+
+    issued_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    title = db.Column(db.String(200))
+    reference = db.Column(db.String(80))
+    notes = db.Column(db.Text)
+    terms = db.Column(db.Text)
+    currency = db.Column(db.String(8), default='KES')
+
+    subtotal = db.Column(db.Float, default=0.0)
+    discount_amount = db.Column(db.Float, default=0.0)
+    tax_percent = db.Column(db.Float, default=0.0)
+    tax_amount = db.Column(db.Float, default=0.0)
+    total_amount = db.Column(db.Float, default=0.0)
+    amount_paid = db.Column(db.Float, default=0.0)
+
+    # draft | sent | viewed | partially_paid | paid | overdue | cancelled
+    status = db.Column(db.String(30), default='draft')
+    due_date = db.Column(db.Date)
+    issued_at = db.Column(db.DateTime)
+    sent_at = db.Column(db.DateTime)
+    viewed_at = db.Column(db.DateTime)
+    paid_at = db.Column(db.DateTime)
+    cancelled_at = db.Column(db.DateTime)
+
+    payment_method = db.Column(db.String(30))
+    mpesa_receipt = db.Column(db.String(50))
+    checkout_request_id = db.Column(db.String(80))
+    # How many times the request has been emailed, so a client cannot be reminded
+    # into a spam folder and an admin can see that a resend actually happened.
+    email_sent_count = db.Column(db.Integer, default=0)
+    last_email_at = db.Column(db.DateTime)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    items = db.relationship('InvoiceItem', backref='invoice', lazy=True,
+                            order_by='InvoiceItem.sort_order',
+                            cascade='all, delete-orphan')
+    payments = db.relationship('InvoicePayment', backref='invoice', lazy=True,
+                               order_by='InvoicePayment.created_at',
+                               cascade='all, delete-orphan')
+    client = db.relationship('User', foreign_keys=[client_id], lazy=True)
+    issued_by = db.relationship('User', foreign_keys=[issued_by_id], lazy=True)
+
+    @property
+    def balance_due(self):
+        return round(max(0.0, (self.total_amount or 0.0) - (self.amount_paid or 0.0)), 2)
+
+    @property
+    def is_settled(self):
+        return self.status == 'paid' or self.balance_due <= 0.009
+
+    @property
+    def is_payable(self):
+        """Whether the client may still pay this from the emailed link."""
+        return self.status not in ('draft', 'cancelled') and not self.is_settled
+
+    @property
+    def is_overdue(self):
+        """Derived, not trusted from status.
+
+        status only becomes 'overdue' when something writes it, and nothing runs at
+        midnight to do that. Reading the date means a client's page and an admin's
+        list agree on the day it happens rather than the day a job next fires.
+        """
+        if not self.due_date or self.is_settled or self.status in ('draft', 'cancelled'):
+            return False
+        return self.due_date < datetime.utcnow().date()
+
+    @property
+    def status_display(self):
+        if self.is_overdue:
+            return 'overdue'
+        return (self.status or 'draft').replace('_', ' ')
+
+
+class InvoiceItem(db.Model):
+    """One billed line. line_total is stored for the same reason invoice totals are."""
+    __tablename__ = 'invoice_items'
+    __table_args__ = (
+        db.Index('ix_invoice_items_invoice_order', 'invoice_id', 'sort_order'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    invoice_id = db.Column(db.Integer, db.ForeignKey('invoices.id'), nullable=False)
+    description = db.Column(db.String(300), nullable=False)
+    quantity = db.Column(db.Float, default=1.0)
+    unit_price = db.Column(db.Float, default=0.0)
+    line_total = db.Column(db.Float, default=0.0)
+    sort_order = db.Column(db.Integer, default=0)
+
+
+class InvoicePayment(db.Model):
+    """Each attempt and each settlement against an invoice.
+
+    A log rather than a single amount_paid field, because an invoice can be paid in
+    parts and an STK push can be tried three times before it lands. Without the log
+    a client who paid twice and an M-Pesa receipt that arrived late are
+    indistinguishable from a mistake, and money is the one thing on this platform
+    that must never be reconstructed from a guess.
+    """
+    __tablename__ = 'invoice_payments'
+    __table_args__ = (
+        db.Index('ix_invoice_payments_invoice_created', 'invoice_id', 'created_at'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    invoice_id = db.Column(db.Integer, db.ForeignKey('invoices.id'), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    method = db.Column(db.String(30), default='mpesa')
+    # pending | success | failed
+    status = db.Column(db.String(20), default='pending')
+    mpesa_receipt = db.Column(db.String(50))
+    checkout_request_id = db.Column(db.String(80), index=True)
+    phone = db.Column(db.String(30))
+    note = db.Column(db.String(255))
+    recorded_by_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    recorded_by = db.relationship('User', lazy=True)
 
 
 class VendorOnboardingFee(db.Model):

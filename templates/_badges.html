@@ -1,0 +1,83 @@
+{#
+  The four product badges, in one place.
+
+  This markup was copy-pasted in five places (index.html three times, shop.html,
+  product.html) and had already drifted: product.html stacked the brand tag and the
+  others did not. One macro means a badge change lands everywhere at once.
+
+  The emoji is in the markup rather than a CSS ::before, so a screen reader reads it
+  in document order with the label instead of skipping it.
+
+  Order matters. The seals are absolutely positioned in the bottom-left corner and
+  style.css stacks them with sibling selectors, which only works because this macro
+  always emits Original, then Verified, then Trusted.
+
+  `brand_label` prints the literal word "Brand" as the MVP asked. The actual brand
+  name is not dropped - it moves to the tooltip, so hovering still says whose it is.
+#}
+{% macro product_badges(product, trusted=None) %}
+    {%- set seller = product.seller if product else None -%}
+    {%- set brand_label = product_brand_label(product) -%}
+    {%- if brand_label -%}
+    <strong class="brand-tag{% if product.is_hot_sale %} brand-tag-stacked{% endif %}"
+            title="{{ brand_label }}">
+        <span aria-hidden="true">👑</span><span>Brand</span>
+    </strong>
+    {%- endif -%}
+    {%- if product.is_original_source -%}
+    <strong class="authenticity-seal" title="Sourced from the original maker or importer">
+        <span aria-hidden="true">💎</span>Original
+    </strong>
+    {%- endif -%}
+    {%- if seller and seller.is_verified_seller and seller.verified_seller_badge_enabled -%}
+    <strong class="authenticity-seal verified-seller-seal" title="Identity checked by SMARKAFRICA">
+        <span aria-hidden="true">☑️</span>Verified Seller
+    </strong>
+    {%- endif -%}
+    {#
+      `trusted` is accepted as an argument so a caller that already knows the answer
+      can pass it, but the default calls the cached helper - it is a set membership
+      test against one cached frozenset, not a query per card.
+
+      Resolved in a set tag rather than inline in the if-test on purpose. Jinja
+      parses an if-test with conditional expressions switched off, so writing
+      "if trusted if trusted is not none else ..." directly in the tag is a syntax
+      error rather than a working default - and this file is imported by the home
+      page, the shop and every product page, so a syntax error in it takes all
+      three down together.
+    #}
+    {%- set show_trusted = trusted if trusted is not none else seller_is_trusted(seller) -%}
+    {%- if show_trusted -%}
+    <strong class="authenticity-seal trusted-seller-seal" title="Consistently high trust score">
+        <span aria-hidden="true">🛡️</span>Trusted
+    </strong>
+    {%- endif -%}
+{% endmacro %}
+
+
+{#
+  The same four badges as inline pills, for the product page's details column.
+
+  A separate macro rather than a flag on the one above, because these are not the
+  same thing: product_badges emits absolutely positioned seals that sit on top of
+  the photo, and these are ordinary flow content beside the title. Sharing one macro
+  would mean a caller could ask for absolute pills in a flex row and get a badge
+  stacked on the corner of the page.
+#}
+{% macro product_badge_pills(product, trusted=None) %}
+    {%- set seller = product.seller if product else None -%}
+    {%- set brand_label = product_brand_label(product) -%}
+    {%- if brand_label -%}
+    <span class="badge text-bg-dark" title="{{ brand_label }}"><span aria-hidden="true">👑</span> Brand</span>
+    {%- endif -%}
+    {%- if seller and seller.is_verified_seller and seller.verified_seller_badge_enabled -%}
+    <span class="badge bg-success" title="Identity checked by SMARKAFRICA"><span aria-hidden="true">☑️</span> Verified Seller</span>
+    {%- endif -%}
+    {%- if product.is_original_source -%}
+    <span class="badge bg-primary" title="Sourced from the original maker or importer"><span aria-hidden="true">💎</span> Original</span>
+    {%- endif -%}
+    {%- set show_trusted = trusted if trusted is not none else seller_is_trusted(seller) -%}
+    {%- if show_trusted -%}
+    <span class="badge trusted-pill" title="Consistently high trust score"><span aria-hidden="true">🛡️</span> Trusted</span>
+    {%- endif -%}
+{% endmacro %}

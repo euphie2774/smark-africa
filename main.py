@@ -5,6 +5,7 @@ SECURITY ENHANCED VERSION
 """
 
 import os, json, uuid, base64, datetime, hashlib, requests, traceback, re, html, mimetypes, logging, csv, socket, hmac, sys
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO, StringIO
 from datetime import datetime, timedelta, timezone
@@ -51,7 +52,9 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     PromotedListing, AffiliateLink, AffiliateConversion, SellerSubscription, SponsoredBanner, \
     EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue, AuditLog, \
     ShippingZone, ShippingQuote, DriverProfile, DriverLocationPing, DeliveryAssignment, \
-    StorefrontFollow, SocialAdPost, PromoCode, PromoCodeRedemption, PhoneOwnershipEvidence
+    StorefrontFollow, SocialAdPost, PromoCode, PromoCodeRedemption, PhoneOwnershipEvidence, \
+    ServiceCatalogueItem, ServiceLinkRequest, ServiceLinkMessage, \
+    Invoice, InvoiceItem, InvoicePayment, generate_invoice_token
 
 from scale import (CACHE_MISS, CounterBuffer, JobLease, TTLCache, bool_env, float_env,
                    int_env, worker_identity)
@@ -94,11 +97,11 @@ app.config.from_object(config_class)
 # without this the app sees one client address for the entire internet and an
 # http:// scheme on an https:// site. Both matter more than they look:
 #
-#   * key_func=get_remote_address below keys rate limits on request.remote_addr.
-#     One address for everyone means one shared bucket, so default_limits of
-#     "50 per minute" becomes fifty requests per minute for the whole platform
-#     and the site starts refusing everybody at once. Per-IP limiting cannot work
-#     until the real address is visible.
+#   * rate_limit_key below falls back to request.remote_addr for anonymous
+#     traffic, which is most of it. One address for everyone means one shared
+#     bucket, so a per-minute ceiling becomes that many requests per minute for
+#     the whole platform and the site starts refusing everybody at once. Per-IP
+#     limiting cannot work until the real address is visible.
 #   * url_for(..., _external=True) builds canonical tags, sitemap entries and
 #     emailed links from request.scheme. Emitting http:// URLs that then redirect
 #     to https:// is how a crawler ends up reporting "page with redirect" for
@@ -135,13 +138,129 @@ def favicon():
     return response
 
 
+# ---------- Installable web app ----------
+# Both routes below are served from the site root deliberately. A service
+# worker's scope is the directory it is served from, so a worker at
+# /static/sw.js could only ever control /static/* - it would register without
+# any error and then silently do nothing for the pages that matter. Served at
+# /sw.js its scope is the whole site.
+
+@app.route('/manifest.webmanifest')
+def web_app_manifest():
+    """Install metadata, read by the browser before it offers "add to home screen".
+
+    The icon sizes declared here are 192 and 512 because that is what
+    tools/optimize_brand_images.py produces from the 1254x1254 source art. The
+    icons still work before that script has run - they are just the full-size
+    originals, so the only cost of the mismatch is bytes, not a failed install.
+    """
+    name = (Setting.get('site_name', 'SMARKAFRICA') or 'SMARKAFRICA').strip()
+    manifest = {
+        'name': name,
+        # short_name is what fits under a home-screen icon; anything longer gets
+        # truncated by the launcher anyway.
+        'short_name': name[:12],
+        'description': Setting.get('site_description', 'shop smarter, live better'),
+        'start_url': '/',
+        'scope': '/',
+        'display': 'standalone',
+        # Matches the navbar (navbar-dark bg-dark) so the phone's status bar is
+        # not a different colour from the header directly beneath it.
+        'theme_color': '#212529',
+        'background_color': '#ffffff',
+        'icons': [
+            {'src': url_for('static', filename='images/favicon.png'),
+             'sizes': '192x192', 'type': 'image/png'},
+            {'src': url_for('static', filename='images/smark-africa-logo.png'),
+             'sizes': '512x512', 'type': 'image/png'},
+        ],
+    }
+    response = make_response(jsonify(manifest))
+    response.mimetype = 'application/manifest+json'
+    response.headers['Cache-Control'] = 'public, max-age=86400'
+    return response
+
+
+@app.route('/sw.js')
+def service_worker():
+    """Serve the worker from the root so its scope covers every page."""
+    response = make_response(send_from_directory(
+        os.path.join(app.root_path, 'static'), 'sw.js',
+        mimetype='application/javascript'))
+    # Deliberately not cached for long: this is the file the browser re-fetches
+    # to decide whether the worker changed, so a long max-age would pin people
+    # to an old worker with no way to push a new one.
+    response.headers['Cache-Control'] = 'public, max-age=0, must-revalidate'
+    return response
+
+
 # Rate Limiting
+#
+# Two departures from the obvious configuration, both about how this platform is
+# actually reached.
+#
+# Static files are exempt from the blanket ceilings. Flask-Limiter applies
+# default_limits to every registered endpoint and 'static' is an endpoint, so
+# without this a shop page carrying a dozen locally stored product images spends
+# thirteen requests of the caller's allowance instead of one. At the previous
+# "200 per hour" that was roughly fifteen page views before a real shopper started
+# collecting 429s. /healthz sat in the same bucket, which is worse than a refused
+# page: the platform reads a 429 as an unhealthy service and restarts the
+# container, so a busy address could knock the site over without trying.
+#
+# Signed-in requests key on the account rather than the address - see
+# rate_limit_key.
+#
+# Only the DEFAULT limits are exempted or widened here. Every endpoint that spends
+# money, sends mail, mints a document or writes a file keeps its own explicit and
+# far tighter @limiter.limit, and none of this can loosen one of those.
+RATE_LIMIT_PER_HOUR = os.environ.get('RATE_LIMIT_PER_HOUR', '2000 per hour')
+RATE_LIMIT_PER_MINUTE = os.environ.get('RATE_LIMIT_PER_MINUTE', '180 per minute')
+# Two of these the browser fetches on every page; refusing the other two breaks the
+# platform's own machinery rather than any one user's browsing.
+RATE_LIMIT_EXEMPT_ENDPOINTS = frozenset({
+    'static', 'favicon', 'web_app_manifest', 'service_worker', 'healthz',
+    'robots_txt',
+})
+
+
+def rate_limit_key():
+    """The bucket a request counts against.
+
+    A signed-in request keys on the account, not the address. Kenyan mobile
+    networks put many subscribers behind one public IPv4, so an address here is not
+    a person: keyed purely on it, a few heavy browsers on a carrier NAT pool spend
+    the allowance of everyone else sharing it and the site answers 429 to people
+    who have made one request. Anonymous traffic has nothing else to key on and
+    still uses the address, which is what the ceilings above are sized for.
+
+    This costs no extra query. before_request already reads current_user on every
+    request to build g.auth_user, and Flask-Login caches the loaded user on the
+    application context.
+    """
+    try:
+        if current_user.is_authenticated:
+            return f'u{current_user.get_id()}'
+    except Exception:
+        # No request context, or the login manager is not ready. Falling back to
+        # the address errs in the safe direction: it limits more, not less.
+        pass
+    return get_remote_address()
+
+
+def rate_limit_exempt():
+    """True when the default ceilings should not count this request."""
+    return (request.endpoint or '') in RATE_LIMIT_EXEMPT_ENDPOINTS
+
+
 limiter = Limiter(
     app=app,
-    key_func=get_remote_address,
+    key_func=rate_limit_key,
     storage_uri=app.config.get('RATELIMIT_STORAGE_URL'),
     strategy=app.config.get('RATELIMIT_STRATEGY'),
-    default_limits=["200 per hour", "50 per minute"]
+    default_limits=[RATE_LIMIT_PER_HOUR, RATE_LIMIT_PER_MINUTE],
+    # Skips only the defaults above, never an explicit @limiter.limit.
+    default_limits_exempt_when=rate_limit_exempt,
 )
 
 # Security Headers with Flask-Talisman
@@ -2721,6 +2840,51 @@ def product_brand_label(product):
 
 
 app.jinja_env.globals['product_brand_label'] = product_brand_label
+
+
+# Trusted is a computed badge, not a column: it is a TrustScore of 80 or more, the
+# same bar admin_phase_two already uses to stamp status='verified'. Reading one row
+# per product card would be an N+1 on the busiest page on the site, so the whole id
+# set is held for TRUSTED_SELLER_TTL and the macro does a set membership test.
+TRUSTED_SELLER_TTL = float_env('TRUSTED_SELLER_TTL', 300)
+TRUSTED_SELLER_SCORE = float_env('TRUSTED_SELLER_MIN_SCORE', 80)
+_trusted_seller_cache = TTLCache(ttl_seconds=TRUSTED_SELLER_TTL, max_entries=2,
+                                 name='trusted-sellers')
+
+
+def trusted_seller_ids():
+    """Ids of sellers scoring 80+ on trust, cached, as a frozenset.
+
+    Capped at 5000 rather than unbounded: this is rendered on every shop page, and
+    a set that grows without limit is a slow memory leak per worker. Past the cap a
+    seller simply does not get the badge, which is the harmless direction to fail.
+    """
+    cached = _trusted_seller_cache.lookup('ids')
+    if cached is not CACHE_MISS:
+        return cached
+    try:
+        rows = db.session.query(TrustScore.entity_id).filter(
+            TrustScore.entity_type == 'seller',
+            TrustScore.score >= TRUSTED_SELLER_SCORE,
+        ).limit(5000).all()
+        ids = frozenset(row[0] for row in rows if row[0])
+    except Exception as exc:
+        # No badge is strictly better than a 500 on the home page.
+        logger.warning(f'trusted seller lookup failed: {exc}')
+        db.session.rollback()
+        ids = frozenset()
+    _trusted_seller_cache.set('ids', ids)
+    return ids
+
+
+def seller_is_trusted(seller):
+    """Whether to print the 🛡️ Trusted badge for this seller."""
+    seller_id = getattr(seller, 'id', None)
+    return bool(seller_id) and seller_id in trusted_seller_ids()
+
+
+app.jinja_env.globals['trusted_seller_ids'] = trusted_seller_ids
+app.jinja_env.globals['seller_is_trusted'] = seller_is_trusted
 
 
 def buyer_delivery_location(user=None):
@@ -5364,10 +5528,15 @@ def ensure_customer_notifications(user, limit=8):
 def homepage_featured_products(limit=12):
     rows = []
     seen = set()
+    # The two outerjoins below are for ORDER BY only - joining users does not
+    # populate Product.seller, which is lazy - so the badge macro would still fire
+    # one query per card. joinedload is many-to-one here, a LEFT JOIN that cannot
+    # multiply rows, so the limit above stays exact.
+    eager = (joinedload(Product.seller),)
     queries = [
-        Product.query.filter_by(is_active=True, is_hot_sale=True).order_by(Product.hot_sale_started_at.desc(), Product.updated_at.desc()),
-        Product.query.filter_by(is_active=True, is_featured=True).outerjoin(User, Product.seller_id == User.id).order_by(Product.admin_priority.desc(), User.seller_rating.desc(), Product.created_at.desc()),
-        Product.query.filter_by(is_active=True).outerjoin(User, Product.seller_id == User.id).order_by(Product.admin_priority.desc(), User.seller_rating.desc(), Product.created_at.desc()),
+        Product.query.options(*eager).filter_by(is_active=True, is_hot_sale=True).order_by(Product.hot_sale_started_at.desc(), Product.updated_at.desc()),
+        Product.query.options(*eager).filter_by(is_active=True, is_featured=True).outerjoin(User, Product.seller_id == User.id).order_by(Product.admin_priority.desc(), User.seller_rating.desc(), Product.created_at.desc()),
+        Product.query.options(*eager).filter_by(is_active=True).outerjoin(User, Product.seller_id == User.id).order_by(Product.admin_priority.desc(), User.seller_rating.desc(), Product.created_at.desc()),
     ]
     for query in queries:
         for product in query.limit(limit).all():
@@ -5394,7 +5563,15 @@ def product_search_cache_key(search='', category_slug='', product_type='', sort=
     return f'product_search_ids:{clean}'
 
 
-def build_product_search_query(search='', category_slug='', product_type='', sort='newest'):
+def build_product_search_query(search='', category_slug='', product_type='', sort='newest',
+                               extra_terms=None):
+    """Build the product search query.
+
+    ``extra_terms`` widens the text match with related keywords and is only ever
+    passed by the semantic-search path. It defaults to None, in which case the
+    generated SQL is identical to what this function produced before that path
+    existed - every other caller is unaffected.
+    """
     query = Product.query.filter_by(is_active=True)
     current_category = None
     if category_slug:
@@ -5406,11 +5583,15 @@ def build_product_search_query(search='', category_slug='', product_type='', sor
     elif product_type == 'physical':
         query = query.filter_by(is_digital=False)
     if search:
-        query = query.filter(or_(
-            Product.name.ilike(f'%{search}%'),
-            Product.description.ilike(f'%{search}%'),
-            Product.short_description.ilike(f'%{search}%')
-        ))
+        clauses = []
+        for term in [search] + [t for t in (extra_terms or []) if t]:
+            like = f'%{term}%'
+            clauses.extend([
+                Product.name.ilike(like),
+                Product.description.ilike(like),
+                Product.short_description.ilike(like),
+            ])
+        query = query.filter(or_(*clauses))
     if sort == 'price_low':
         query = query.outerjoin(User, Product.seller_id == User.id).order_by(Product.is_hot_sale.desc(), Product.admin_priority.desc(), User.seller_rating.desc(), Product.selling_price.asc())
     elif sort == 'price_high':
@@ -5530,50 +5711,370 @@ def invalidate_nav_categories():
     _nav_category_cache.clear()
 
 
+# ---------- Semantic search ----------
+# A search for "bluetooth jammer" should find the ESP32 board somebody listed,
+# because that is what the person actually wants. Nothing here is surfaced as a
+# feature: there is no "AI results" heading, no badge, no second results block.
+# Expanded matches are appended to the ordinary result list and the page renders
+# exactly as it always did, which is the whole requirement.
+#
+# It only runs when the plain search found almost nothing. That is both where it
+# helps and what keeps it affordable: a query that already works is never
+# touched, so the expensive path is reached by the queries that currently return
+# an empty page, not by the traffic.
+
+# Expansion is attempted when the ordinary search returns this many results or
+# fewer. Above it, the searcher already has something to look at.
+SEMANTIC_SEARCH_MIN_RESULTS = int_env('SEMANTIC_SEARCH_MIN_RESULTS', 3)
+
+# Seed concepts, overridable by the `search_concept_map` Setting (a JSON object)
+# so an admin can teach it a term without a deploy. Keys are matched against the
+# whole normalised query and as substrings of it, so "cheap bluetooth jammer"
+# hits the same entry as "bluetooth jammer".
+DEFAULT_SEARCH_CONCEPTS = {
+    'bluetooth jammer': ['esp32', 'nrf24', 'deauther'],
+    'wifi jammer': ['esp32', 'deauther', 'nodemcu'],
+    'signal blocker': ['esp32', 'nrf24'],
+    'gps tracker': ['sim800', 'neo-6m', 'gps module'],
+    'microcontroller': ['esp32', 'arduino', 'nodemcu', 'raspberry pi'],
+    'power bank': ['powerbank', 'battery pack'],
+    'flash disk': ['flash drive', 'usb drive', 'thumb drive'],
+    'laptop charger': ['power adapter', 'ac adapter'],
+    'phone case': ['back cover', 'phone cover'],
+    'earphones': ['earbuds', 'headphones', 'airpods'],
+    'nursing notes': ['nursing exam', 'nursing revision', 'kmtc'],
+    'past papers': ['revision papers', 'exam papers', 'past exams'],
+    'assignment help': ['assignment', 'coursework', 'essay'],
+}
+
+# Terms already expanded, and the ones that came back empty. Caching the misses
+# matters more than caching the hits: without it every repeat of an unanswerable
+# query pays the full cost again.
+_search_expansion_cache = TTLCache(
+    ttl_seconds=float_env('SEMANTIC_SEARCH_TTL', 900), max_entries=512,
+    name='search-expansion')
+
+# The AI layer is off by default, deliberately. It is a network call on the
+# search path, and the standing instruction for this platform is that a million
+# users must not be able to make it slow - so it does not get switched on until
+# its latency has actually been watched. With it off, the concept map above still
+# answers the cases it knows, instantly and for free.
+SEMANTIC_SEARCH_AI = bool_env('SEMANTIC_SEARCH_AI', False)
+SEMANTIC_SEARCH_AI_TIMEOUT = float_env('SEMANTIC_SEARCH_AI_TIMEOUT', 2.5)
+SEMANTIC_SEARCH_AI_PER_MINUTE = int_env('SEMANTIC_SEARCH_AI_PER_MINUTE', 30)
+
+# Per-worker spend guard and failure breaker. A crawler walking thousands of
+# nonsense queries would otherwise be thousands of API calls and thousands of
+# occupied worker-seconds, and each one of those is a request some real customer
+# is queued behind.
+_search_ai_window = {'minute': -1, 'count': 0, 'blocked_until': None}
+
+
+def normalise_search_text(text):
+    """Lowercased, whitespace-collapsed query text used as a concept-map key."""
+    return ' '.join((text or '').lower().split())
+
+
+def search_concept_map():
+    """The concept map, with any admin override merged over the seeds."""
+    merged = dict(DEFAULT_SEARCH_CONCEPTS)
+    raw = Setting.get('search_concept_map', '') or ''
+    if raw.strip():
+        try:
+            override = json.loads(raw)
+            if isinstance(override, dict):
+                for key, values in override.items():
+                    if isinstance(values, str):
+                        values = [values]
+                    if isinstance(values, (list, tuple)):
+                        cleaned = [str(v).strip() for v in values if str(v).strip()]
+                        if cleaned:
+                            merged[normalise_search_text(key)] = cleaned
+        except (ValueError, TypeError):
+            # A malformed override must not take search down with it; the seeds
+            # are still a working map.
+            app.logger.warning('search_concept_map is not valid JSON; using seeds')
+    return merged
+
+
+def concept_expansion(text):
+    """Related terms from the concept map, longest key first."""
+    normalised = normalise_search_text(text)
+    if not normalised:
+        return []
+    found = []
+    # Longest key first so "wifi jammer" wins over a shorter key that also
+    # happens to appear inside the same query.
+    for key in sorted(search_concept_map(), key=len, reverse=True):
+        if key and (key == normalised or key in normalised):
+            for term in search_concept_map()[key]:
+                if term.lower() not in normalised and term not in found:
+                    found.append(term)
+            if found:
+                break
+    return found[:6]
+
+
+def ai_search_budget_available():
+    """Whether this worker may spend another AI call this minute."""
+    now = datetime.utcnow()
+    blocked = _search_ai_window.get('blocked_until')
+    if blocked and now < blocked:
+        return False
+    minute = now.hour * 60 + now.minute
+    if _search_ai_window['minute'] != minute:
+        _search_ai_window['minute'] = minute
+        _search_ai_window['count'] = 0
+    if _search_ai_window['count'] >= max(0, SEMANTIC_SEARCH_AI_PER_MINUTE):
+        return False
+    _search_ai_window['count'] += 1
+    return True
+
+
+def ai_expansion(text):
+    """Related search keywords from the model, or [] for any reason at all.
+
+    Reuses the existing OPENAI_API_KEY / openai_api_key lookup - this adds no new
+    credential. Every failure path returns [], because the caller's fallback is
+    the search results the site would have shown anyway.
+    """
+    if not SEMANTIC_SEARCH_AI:
+        return []
+    api_key = os.environ.get('OPENAI_API_KEY') or Setting.get('openai_api_key', '')
+    if not api_key or not ai_search_budget_available():
+        return []
+    try:
+        response = requests.post(
+            'https://api.openai.com/v1/responses',
+            headers={'Authorization': f'Bearer {api_key}',
+                     'Content-Type': 'application/json'},
+            json={
+                'model': Setting.get('openai_search_model', 'gpt-4.1-mini'),
+                'input': (
+                    'A shopper searched an online marketplace for '
+                    f'"{text}" and nothing matched. Reply with a JSON array of up '
+                    'to 5 short product keywords that listings for what they want '
+                    'would realistically be titled - component names, model '
+                    'numbers or common alternative names. JSON array only.'
+                ),
+                'max_output_tokens': 120,
+            },
+            timeout=SEMANTIC_SEARCH_AI_TIMEOUT)
+        if not response.ok:
+            return []
+        payload = response.json()
+        raw = payload.get('output_text', '')
+        if not raw:
+            chunks = []
+            for item in payload.get('output', []):
+                for content in item.get('content', []):
+                    if content.get('text'):
+                        chunks.append(content['text'])
+            raw = '\n'.join(chunks)
+        start, end = raw.find('['), raw.rfind(']')
+        if start == -1 or end <= start:
+            return []
+        terms = json.loads(raw[start:end + 1])
+        cleaned = []
+        for term in terms if isinstance(terms, list) else []:
+            term = str(term).strip()[:40]
+            if term and term.lower() not in normalise_search_text(text):
+                cleaned.append(term)
+        return cleaned[:5]
+    except Exception:
+        # Includes the timeout. Back off for a minute rather than letting every
+        # thin search queue behind the same unhealthy endpoint.
+        _search_ai_window['blocked_until'] = datetime.utcnow() + timedelta(seconds=60)
+        return []
+
+
+def expanded_search_terms(text):
+    """Extra terms to widen a search that found nothing useful, or []."""
+    normalised = normalise_search_text(text)
+    # Single characters and pasted essays are both noise, and the second would be
+    # a wasteful prompt.
+    if len(normalised) < 3 or len(normalised) > 80:
+        return []
+    cached = _search_expansion_cache.lookup(normalised)
+    if cached is not CACHE_MISS:
+        return cached
+    terms = concept_expansion(normalised) or ai_expansion(normalised)
+    _search_expansion_cache.set(normalised, terms)
+    return terms
+
+
+_product_ids_cache = TTLCache(
+    ttl_seconds=int_env('PRODUCT_SEARCH_IDS_TTL', 300),
+    max_entries=int_env('PRODUCT_SEARCH_IDS_MAX', 2048),
+    name='product-search-ids')
+
+
+def search_ids_cache_target():
+    """Where per-search id lists belong: 'shared', 'local' or 'off'.
+
+    This is the one key space in this file that grows with traffic - one entry per
+    distinct search, filter and sort combination - so it is the one that must never
+    sit on FileSystemCache, which is the default backend whenever REDIS_URL is unset
+    and no Redis stays a supported configuration. cachelib prunes that backend by
+    listing the directory and opening every entry once the count passes
+    CACHE_THRESHOLD, and because the prune only trims back down to the threshold
+    rather than below it, every later set pays the scan again: measured on this
+    machine at 896ms per set against 15ms below the threshold, a 59x cliff that
+    never heals. One such write is one gunicorn worker thread blocked on disk, so
+    under concurrent search traffic the instance stalls on its own cache.
+
+    Raising CACHE_THRESHOLD is not the fix and is deliberately not done here: it
+    delays the cliff by making each scan bigger. Keeping the growing key space off
+    that backend is. The bounded in-process TTLCache used instead is the same choice
+    already made for the services twin of this function, ``_service_ids_cache``.
+
+    'off' is preserved exactly as it was, so a NullCache configured to keep query
+    counts honest in the smoke checks is not quietly handed a cache instead. An
+    unrecognised backend is treated as shared, which is the behaviour that was here
+    before - only the filesystem backend has the cliff worth routing around.
+    """
+    if not cache:
+        return 'off'
+    backend = type(getattr(cache, 'cache', None)).__name__
+    if backend == 'NullCache':
+        return 'off'
+    return 'local' if backend == 'FileSystemCache' else 'shared'
+
+
 def cached_product_search_ids(search='', category_slug='', product_type='', sort='newest'):
     key = product_search_cache_key(search, category_slug, product_type, sort)
-    if cache:
+    target = search_ids_cache_target()
+    if target == 'local':
+        cached_ids = _product_ids_cache.get(key)
+        if cached_ids is not None:
+            return cached_ids
+    elif target == 'shared':
         cached_ids = cache.get(key)
         if cached_ids is not None:
             return cached_ids
     query, _ = build_product_search_query(search, category_slug, product_type, sort)
     ids = [row[0] for row in query.with_entities(Product.id).limit(1000).all()]
-    if cache:
+    # A search that found almost nothing gets widened. The extra ids are appended,
+    # never interleaved, so genuine matches still lead the page - and the widened
+    # list is what gets cached, so the expansion is computed once per query rather
+    # than once per search.
+    if search and len(ids) <= SEMANTIC_SEARCH_MIN_RESULTS:
+        try:
+            extra = expanded_search_terms(search)
+            if extra:
+                wider, _ = build_product_search_query(
+                    search, category_slug, product_type, sort, extra_terms=extra)
+                seen = set(ids)
+                for row in wider.with_entities(Product.id).limit(1000).all():
+                    if row[0] not in seen:
+                        seen.add(row[0])
+                        ids.append(row[0])
+        except Exception:
+            # Widening is a bonus. If it breaks, the searcher still gets exactly
+            # the results this function returned before it existed.
+            app.logger.warning('search expansion failed for %r', search[:60])
+    if target == 'local':
+        # Per worker rather than shared, so each warms its own copy and the database
+        # sees at most one miss per worker per distinct search per TTL - bounded, and
+        # far cheaper than the alternative on this backend. Global invalidation still
+        # works untouched: ``key`` contains product_search_cache_version, which stays
+        # on the shared cache, so bumping it changes the key every worker computes.
+        # The one thing it does not follow is the product_search_cache_seconds
+        # Setting, since a TTLCache fixes its TTL at construction; PRODUCT_SEARCH_IDS_TTL
+        # carries the same 300s default.
+        _product_ids_cache.set(key, ids)
+    elif target == 'shared':
         cache.set(key, ids, timeout=int(Setting.get('product_search_cache_seconds', '300') or 300))
     return ids
 
 
-def paginate_cached_product_ids(ids, page=1, per_page=12):
-    page = max(1, int(page or 1))
-    per_page = max(1, min(60, int(per_page or 12)))
+def paginate_cached_ids(model, ids, page=1, per_page=12, options=None):
+    """Page through an already-cached list of primary keys.
+
+    One IN query for the page instead of a COUNT plus an OFFSET scan, and the
+    ordering of ``ids`` is preserved rather than re-derived - the cached list is
+    what decided the order, so re-sorting here would quietly disagree with it.
+
+    Generic in ``model`` because services need exactly this and a second copy of
+    the same class would drift from the product one on the first edit to either.
+    ``options`` is that genericity's price: what a card reads off each row differs
+    per model, so the caller passes the eager loads instead of this knowing them.
+
+    ``page`` arrives straight off the query string on both the shop and the services
+    page, so it is parsed defensively: a scanner appending ?page=2' or a stale link
+    carrying ?page=abc gets the first page rather than a 500 on a public URL.
+    """
+    try:
+        page = max(1, int(page or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = max(1, min(60, int(per_page or 12)))
+    except (TypeError, ValueError):
+        per_page = 12
     total = len(ids)
     start = (page - 1) * per_page
     page_ids = ids[start:start + per_page]
-    products = []
+    items = []
     if page_ids:
-        product_map = {product.id: product for product in Product.query.filter(Product.id.in_(page_ids)).all()}
-        products = [product_map[pid] for pid in page_ids if pid in product_map]
+        query = model.query
+        if options:
+            query = query.options(*options)
+        row_map = {row.id: row for row in query.filter(model.id.in_(page_ids)).all()}
+        items = [row_map[pid] for pid in page_ids if pid in row_map]
 
     class CachedPagination:
         def __init__(self):
             self.page = page
             self.per_page = per_page
             self.total = total
-            self.items = products
+            self.items = items
             self.pages = (total + per_page - 1) // per_page
             self.has_prev = page > 1
             self.has_next = page < self.pages
             self.prev_num = page - 1
             self.next_num = page + 1
 
-        def iter_pages(self):
-            for value in range(1, self.pages + 1):
-                if value <= 2 or value > self.pages - 2 or abs(value - self.page) <= 2:
-                    yield value
-                elif value == 3 or value == self.pages - 2:
-                    yield None
+        def iter_pages(self, left_edge=2, left_current=2, right_current=4,
+                       right_edge=2):
+            """Page numbers to render, with ``None`` marking each gap.
+
+            Signature and semantics are taken from flask_sqlalchemy's Pagination,
+            because being a drop-in for that is this class's whole purpose. The
+            first version accepted no arguments at all, which meant any template
+            written against the real object - services.html passes all four -
+            raised TypeError inside the render as soon as a second page existed.
+            A pagination shim that only works on page one is worse than none.
+            """
+            pages_end = self.pages + 1
+            if pages_end == 1:
+                return
+            left_end = min(1 + left_edge, pages_end)
+            yield from range(1, left_end)
+            if left_end == pages_end:
+                return
+            mid_start = max(left_end, self.page - left_current)
+            mid_end = min(self.page + right_current + 1, pages_end)
+            if mid_start - left_end > 0:
+                yield None
+            yield from range(mid_start, mid_end)
+            if mid_end == pages_end:
+                return
+            right_start = max(mid_end, pages_end - right_edge)
+            if right_start - mid_end > 0:
+                yield None
+            yield from range(right_start, pages_end)
 
     return CachedPagination()
+
+
+def paginate_cached_product_ids(ids, page=1, per_page=12):
+    # seller is eager-loaded because the badge macro reads product.seller on every
+    # card and Product.seller is lazy, so the one IN query the paginator runs would
+    # otherwise be followed by one query per card - on /shop and on every category
+    # page, for anonymous visitors, which is the traffic there is most of.
+    return paginate_cached_ids(Product, ids, page=page, per_page=per_page,
+                               options=(joinedload(Product.seller),))
 
 
 def seller_identity_match_query(model, legal_name, country, phone, bank_card_last4):
@@ -6811,6 +7312,10 @@ NON_PUBLIC_PREFIXES = (
     '/bnpl/', '/shopping-card', '/my-rewards-card', '/support/',
     '/feedback', '/raffle/', '/compare', '/smart-shopping',
     '/shop/image-search', '/storefront/apply', '/services/create',
+    # A billing document addressed by a bearer token, and one client's linking
+    # thread. Neither is secret-by-obscurity alone, but neither belongs in an
+    # index either: a crawler that reaches one publishes somebody's invoice.
+    '/invoice/', '/services/requests/',
 )
 
 
@@ -6884,6 +7389,7 @@ def inject_globals():
             'is_admin': False,
             'admin_level': '',
             'username': '',
+            'service_duty_on': False,
         })
         return dict(
             settings=s,
@@ -6900,7 +7406,7 @@ def inject_globals():
             country_phone_codes=COUNTRY_PHONE_CODES
         )
     except Exception:
-        return dict(settings={}, auth_user={'is_authenticated': False, 'is_admin': False, 'admin_level': '', 'username': ''}, now=datetime.utcnow(), platform_ad=None, platform_ads=[],
+        return dict(settings={}, auth_user={'is_authenticated': False, 'is_admin': False, 'admin_level': '', 'username': '', 'service_duty_on': False}, now=datetime.utcnow(), platform_ad=None, platform_ads=[],
                     hot_sale_pop=None, seller_signup_enabled=False, unread_notifications=0,
                     seller_nav={'can_sell': False, 'has_storefront': False, 'storefront_pending': False},
                     canonical=canonical_url(),
@@ -8732,6 +9238,12 @@ def mpesa_callback():
                     db.session.delete(ad_setting)
                     db.session.commit()
 
+        # Invoices. One indexed lookup on InvoicePayment.checkout_request_id rather
+        # than a Setting row per push like the two blocks above, so this stays the
+        # same cost whether the platform has issued ten invoices or ten million.
+        if settle_invoice_stk(checkout_id, result_code, receipt, amount, result_desc):
+            db.session.commit()
+
         return jsonify({'ResultCode': 0, 'ResultDesc': 'Success'})
     except Exception as e:
         print(f"M-Pesa callback error: {e}")
@@ -9242,8 +9754,10 @@ def support():
         })
 
         if channel == 'whatsapp':
-            whatsapp_url = f'https://wa.me/254708615309?text={requests.utils.quote(f"Urgent SMARKAFRICA support ticket #{ticket.id}: {subject}")}'
-            flash(f'Urgent ticket created. WhatsApp support is ready at 0708615309', 'warning')
+            whatsapp_url = support_whatsapp_url(
+                f'Urgent SMARKAFRICA support ticket #{ticket.id}: {subject}')
+            flash(f'Urgent ticket created. WhatsApp support is ready at {support_whatsapp_number()}',
+                  'warning')
             return redirect(whatsapp_url)
 
         flash('Support ticket created. The team will track it against the response SLA.', 'success')
@@ -9265,17 +9779,30 @@ def support():
 
 def support_ai_reply(message):
     text_value = (message or '').lower()
+    # Services first: the keyword fallback runs when the chatbot import fails, and
+    # a services question answered with "I can help with orders and payments" is
+    # the one failure a client would read as the feature not existing.
+    try:
+        services = service_chatbot_reply(message)
+    except Exception as exc:
+        logger.warning(f'service chatbot fallback failed: {exc}')
+        services = None
+    if services:
+        reply = services.get('reply', '')
+        if services.get('follow_up'):
+            reply = f"{reply}\n\n{services['follow_up']}"
+        return reply
     if any(word in text_value for word in ['refund', 'wrong item', 'return', 'reversal']):
-        return 'For refunds, keep your order number and M-Pesa receipt ready. I can help create an urgent ticket and route it to WhatsApp support at 0708615309.'
+        return f'For refunds, keep your order number and M-Pesa receipt ready. I can help create an urgent ticket and route it to WhatsApp support at {support_whatsapp_number()}.'
     if any(word in text_value for word in ['security', 'hack', 'account', 'password', 'fraud', 'suspicious']):
-        return 'For platform security, change your password, avoid sharing OTPs, and escalate immediately through WhatsApp support at 0708615309. I can also create a tracked ticket.'
+        return f'For platform security, change your password, avoid sharing OTPs, and escalate immediately through WhatsApp support at {support_whatsapp_number()}. I can also create a tracked ticket.'
     if any(word in text_value for word in ['payment', 'stk', 'mpesa', 'm-pesa']):
         return 'For M-Pesa/STK issues, confirm the number is Safaricom, use 07XXXXXXXX or 2547XXXXXXXX, and retry once. If money was deducted, share the receipt through support.'
     if any(word in text_value for word in ['delivery', 'shipping', 'track', 'carrier']):
         return 'For delivery, open My Orders or Track Order to see the latest timeline. If the parcel is late, create a high-priority support ticket with your order number.'
     if any(word in text_value for word in ['bnpl', 'pay later', 'installment', 'instalment', 'lock']):
         return 'For BNPL, check your deposit, due date, and installment status. Overdue financed devices may enter calls/SMS-only mode until payment clears.'
-    return 'I can help with orders, payments, refunds, delivery, BNPL, account security, and seller/storefront questions. For urgent refunds or security, use WhatsApp support at 0708615309.'
+    return f'I can help with orders, payments, refunds, delivery, BNPL, account security, services, and seller/storefront questions. For urgent refunds or security, use WhatsApp support at {support_whatsapp_number()}.'
 
 
 @app.route('/api/support/chatbot', methods=['POST'])
@@ -9291,15 +9818,31 @@ def support_chatbot():
             'urgent': False
         })
 
-    # Use enhanced chatbot
+    # Services are answered here rather than inside ChatbotAI because the answer
+    # needs the duty cache, the catalogue and Setting - and because a services
+    # question must never fall through to product search, which "I need laundry"
+    # otherwise matches on the word "need".
+    payload = {}
     try:
-        from chatbot_ai import create_chatbot_instance
-        chatbot = create_chatbot_instance(app)
-        user = current_user if current_user.is_authenticated else None
-        reply = chatbot.get_response(message, user)
-    except Exception as e:
-        logger.error(f"Chatbot error: {e}")
-        reply = support_ai_reply(message)  # Fallback to old method
+        services = service_chatbot_reply(message,
+                                         current_user if current_user.is_authenticated else None)
+    except Exception as exc:
+        logger.warning(f'service chatbot turn failed: {exc}')
+        services = None
+
+    if services:
+        reply = services.get('reply', '')
+        payload = {key: value for key, value in services.items() if key != 'reply'}
+    else:
+        # Use enhanced chatbot
+        try:
+            from chatbot_ai import create_chatbot_instance
+            chatbot = create_chatbot_instance(app)
+            user = current_user if current_user.is_authenticated else None
+            reply = chatbot.get_response(message, user)
+        except Exception as e:
+            logger.error(f"Chatbot error: {e}")
+            reply = support_ai_reply(message)  # Fallback to old method
 
     # Check if message is urgent
     urgent = any(word in message.lower() for word in [
@@ -9307,12 +9850,17 @@ def support_chatbot():
         'stolen', 'emergency', 'help', 'scam'
     ])
 
-    return jsonify({
+    # reply / urgent / whatsapp_url keep their existing names and meaning. The
+    # services keys (options, providers, action, follow_up) are additive, so a
+    # cached copy of the old support page keeps working through the deploy.
+    response = {
         'reply': reply,
         'urgent': urgent,
-        'whatsapp_url': 'https://wa.me/254708615309',
+        'whatsapp_url': support_whatsapp_url(),
         'timestamp': datetime.utcnow().isoformat()
-    })
+    }
+    response.update(payload)
+    return jsonify(response)
 
 
 STOREFRONT_REVIEW_STATUSES = ['pending_review', 'more_details', 'approved', 'suspended', 'rejected']
@@ -16998,7 +17546,11 @@ def admin_messages():
             db.session.commit()
             flash('Message sent.', 'success')
         return redirect(url_for('admin_messages'))
-    messages = AdminMessage.query.order_by(AdminMessage.created_at.desc()).limit(100).all()
+    # The template prints msg.sender.username on every row, and sender is lazy, so
+    # a hundred messages was a hundred and one queries. recipient is not eager-loaded
+    # because nothing on this page reads it.
+    messages = (AdminMessage.query.options(joinedload(AdminMessage.sender))
+                .order_by(AdminMessage.created_at.desc()).limit(100).all())
     return render_template('admin/messages.html', messages=messages, admins=admins)
 
 
@@ -17179,6 +17731,20 @@ def admin_settings():
             'whatsapp_phone_number_id': os.environ.get('WHATSAPP_PHONE_NUMBER_ID', ''),
             'whatsapp_template_name': '',
             'whatsapp_template_language': 'en',
+            # Services. support_whatsapp_number is the fallback the client is sent
+            # to when nobody is on the linking desk, so it is editable here rather
+            # than needing a deploy to correct.
+            'support_whatsapp_number': '0708615309',
+            'service_direct_contact_enabled': '0',
+            'service_listing_fee_kes': '0',
+            'service_requests_enabled': '1',
+            # Invoices.
+            'invoice_payment_instructions': '',
+            'invoice_bank_details': '',
+            'invoice_default_terms': 'Payment due within 7 days of the invoice date.',
+            'invoice_default_due_days': '7',
+            'invoice_tax_percent': '0',
+            'invoice_footer_note': 'Thank you for your business.',
         }
 
         mvp_content_keys = {'about_content', 'terms_content', 'user_agreement_content'}
@@ -17188,7 +17754,11 @@ def admin_settings():
             'platform_commission_receiving_method', 'platform_commission_receiving_account',
             'platform_commission_receiving_name',
             'seller_ad_daily_price', 'seller_ad_weekly_price', 'seller_ad_monthly_price',
-            'kyc_provider', 'didit_workflow_id', 'kyc_system_only_enabled'
+            'kyc_provider', 'didit_workflow_id', 'kyc_system_only_enabled',
+            # Turning direct contact on changes the business model - clients reach
+            # providers themselves and listing becomes paid - so it is the MVP's
+            # decision, not an ordinary admin's.
+            'service_direct_contact_enabled', 'service_listing_fee_kes',
         }
         for key, default in settings_map.items():
             if key in mvp_only_keys and not current_user_is_mvp():
@@ -18004,38 +18574,912 @@ def placement_bid():
 
 
 # --- 7. Service Marketplace ---
+# A service is not sold like a product here. The client never receives the
+# provider's number: they press "Contact admin", an on-duty admin sees the request
+# together with the provider's phone, and the admin makes the introduction. When no
+# admin is on duty the client gets one exact sentence and a WhatsApp button.
+#
+# The whole design rests on one invariant - provider_phone reaches admins and
+# nobody else - so it is asserted in tools/services_smoke.py rather than trusted to
+# review.
+
+# Exact wording, specified by the MVP. A module constant and not an inline string
+# because it is returned by the route, the chatbot and the keyword fallback, and
+# three copies of a sentence are three chances for one of them to drift.
+SERVICE_BUSY_MESSAGE = ('All our agents are currently busy, please reach out via '
+                        'whatsapp for immediate action.')
+
+SERVICE_REQUEST_RATE_LIMIT = os.environ.get('SERVICE_REQUEST_RATE_LIMIT', '20 per hour')
+SERVICE_THREAD_RATE_LIMIT = os.environ.get('SERVICE_THREAD_RATE_LIMIT', '120 per hour')
+# Duty state is read on every service page and every chatbot turn, so an uncached
+# read is a query per pageview for a row that changes a few times a day. Short
+# enough that an admin going off duty is honoured within seconds.
+SERVICE_DUTY_TTL = float_env('SERVICE_DUTY_TTL', 15)
+SERVICE_CATALOGUE_TTL = float_env('SERVICE_CATALOGUE_TTL', 300)
+SERVICE_LIST_TTL = float_env('SERVICE_LIST_TTL', 60)
+
+_service_duty_cache = TTLCache(ttl_seconds=SERVICE_DUTY_TTL, max_entries=4,
+                               name='service-duty')
+_service_catalogue_cache = TTLCache(ttl_seconds=SERVICE_CATALOGUE_TTL, max_entries=4,
+                                    name='service-catalogue')
+_service_ids_cache = TTLCache(ttl_seconds=SERVICE_LIST_TTL, max_entries=256,
+                              name='service-ids')
+_service_live_keys_cache = TTLCache(ttl_seconds=SERVICE_LIST_TTL, max_entries=4,
+                                    name='service-live-keys')
+
+# The eighteen the MVP named. Seeded once; after that the table is the truth and
+# the admin owns it, so an admin who renames or deactivates one is not overwritten
+# on the next boot.
+DEFAULT_SERVICE_CATALOGUE = [
+    ('printing', 'Printing & Photocopying', '🖨️'),
+    ('laundry', 'Laundry', '🧺'),
+    ('food_delivery', 'Food Delivery', '🍔'),
+    ('accommodation', 'Hostel & Accommodation', '🏠'),
+    ('device_repair', 'Phone & Laptop Repair', '🔧'),
+    ('campus_errands', 'Campus Delivery & Errands', '🚚'),
+    ('books_stationery', 'Books & Stationery', '📚'),
+    ('cyber_services', 'Cyber Services', '💻'),
+    ('cleaning', 'Cleaning Services', '🧹'),
+    ('barber_beauty', 'Barber & Beauty Services', '💇'),
+    ('grocery', 'Grocery & Essentials Delivery', '🛒'),
+    ('parcel_courier', 'Parcel & Courier Services', '📦'),
+    ('events_tickets', 'Event Tickets & Campus Events', '🎟️'),
+    ('student_gigs', 'Student Gigs & Freelancing', '💼'),
+    ('tutoring', 'Tutoring Services', '👨‍🏫'),
+    ('fitness', 'Fitness & Sports Services', '🏋️'),
+    ('health_wellness', 'Health & Wellness Services', '🩺'),
+    ('career', 'Career Services', '🎓'),
+]
+
+
+def support_whatsapp_number():
+    """The support WhatsApp number, admin-editable, defaulting to the old constant.
+
+    Was hardcoded in six places. Same value by default, so nothing changes until an
+    admin edits it - and when they do, it changes everywhere at once instead of in
+    whichever of the six copies someone remembered.
+    """
+    return (Setting.get('support_whatsapp_number', '0708615309') or '0708615309').strip()
+
+
+def support_whatsapp_url(message=''):
+    """wa.me link for the support number, with an optional prefilled message.
+
+    Normalised here rather than stored international, because the number an admin
+    types is the local one they know. Not routed through valid_mpesa_msisdn: the
+    support line does not have to be Safaricom.
+    """
+    digits = re.sub(r'\D', '', support_whatsapp_number())
+    if digits.startswith('0'):
+        digits = '254' + digits[1:]
+    elif digits.startswith('7') or digits.startswith('1'):
+        digits = '254' + digits
+    url = f'https://wa.me/{digits}'
+    if message:
+        from urllib.parse import quote
+        url += '?text=' + quote(message)
+    return url
+
+
+# Registered as globals so templates stop hardcoding the number too - support.html
+# and support_enhanced.html each had their own copy of the wa.me link, which is how
+# a number gets changed in five places and missed in the sixth.
+app.jinja_env.globals['support_whatsapp_number'] = support_whatsapp_number
+app.jinja_env.globals['support_whatsapp_url'] = support_whatsapp_url
+
+
+# What the catalogue cache holds: a plain record, never the ORM row.
+#
+# A ServiceCatalogueItem sitting in a module-level cache outlives the session that
+# loaded it. Detached-but-loaded is harmless, but the next db.session.commit() in
+# whichever request happened to populate the cache expires every instance that
+# session held - the cached ones included - and reading .label off one afterwards
+# raises DetachedInstanceError. That would be a 500 on the public services page,
+# the chatbot and the create form for the rest of the TTL, on that worker, with
+# nothing in the failing request to point at the request that caused it. This
+# platform has already paid for that lesson once: see _get_cached_platform_ads.
+#
+# A namedtuple cannot be expired, cannot lazy-load and cannot be mutated by one of
+# the four threads sharing a worker's cache.
+ServiceOption = namedtuple('ServiceOption', 'key label emoji seller_listable')
+
+
+def service_catalogue(seller_only=False):
+    """Active catalogue rows, ordered, cached.
+
+    Read on every services page and every chatbot turn that lists services. The
+    full list is cached once and the seller view filtered in Python, so the switch
+    between the two does not cost a second query.
+    """
+    cached = _service_catalogue_cache.lookup('rows')
+    if cached is CACHE_MISS:
+        rows = ServiceCatalogueItem.query.filter_by(is_active=True).order_by(
+            ServiceCatalogueItem.sort_order.asc(),
+            ServiceCatalogueItem.label.asc()).limit(200).all()
+        cached = tuple(ServiceOption(row.key, row.label, row.emoji or '',
+                                     bool(row.seller_listable)) for row in rows)
+        _service_catalogue_cache.set('rows', cached)
+    if seller_only:
+        return [row for row in cached if row.seller_listable]
+    return list(cached)
+
+
+def invalidate_service_caches():
+    """Called after any admin edit to the catalogue or to a listing."""
+    _service_catalogue_cache.clear()
+    _service_ids_cache.clear()
+    _service_live_keys_cache.clear()
+
+
+def service_keys_with_providers():
+    """The catalogue keys somebody is actually listed under.
+
+    One grouped query rather than a per-key existence check: the chatbot offers the
+    menu on every turn that mentions services, and eighteen keys would otherwise be
+    eighteen lookups a message. Cached on the same TTL as the id lists, and cleared
+    by invalidate_service_caches, so a new listing appears within a minute at worst
+    and immediately after an admin edit.
+    """
+    cached = _service_live_keys_cache.lookup('keys')
+    if cached is CACHE_MISS:
+        rows = (db.session.query(ServiceListing.service_key)
+                .filter(ServiceListing.is_active.is_(True),
+                        ServiceListing.service_key.isnot(None))
+                .group_by(ServiceListing.service_key).limit(400).all())
+        cached = {row[0] for row in rows if row[0]}
+        _service_live_keys_cache.set('keys', cached)
+    return cached
+
+
+def service_catalogue_map():
+    return {row.key: row for row in service_catalogue()}
+
+
+def service_duty_state():
+    """Who is on the linking desk right now: (agent_ids, all_on_duty_ids).
+
+    Two lists because a nominated agent is preferred but not required: requests are
+    routed to an agent when one is on duty, and to any on-duty admin otherwise. A
+    nomination that nobody honours must never be the reason a client is turned away.
+    """
+    cached = _service_duty_cache.lookup('duty')
+    if cached is not CACHE_MISS:
+        return cached
+    try:
+        rows = db.session.query(User.id, User.service_linking_agent).filter(
+            User.is_admin.is_(True),
+            User.is_active.is_(True),
+            User.service_duty_on.is_(True),
+        ).limit(200).all()
+    except Exception as exc:
+        # Before the migration adds the column this would 500 the services page for
+        # everyone. A read that fails means nobody is provably on duty, which is
+        # exactly the WhatsApp fallback - degrade, do not break.
+        logger.warning(f'service duty lookup failed: {exc}')
+        db.session.rollback()
+        return ([], [])
+    state = ([row[0] for row in rows if row[1]], [row[0] for row in rows])
+    _service_duty_cache.set('duty', state)
+    return state
+
+
+def service_duty_active():
+    """True when at least one admin is on the linking desk."""
+    return bool(service_duty_state()[1])
+
+
+def pick_service_admin():
+    """Who a new request is routed to first, or None when nobody is on duty.
+
+    Lowest id among nominated agents, else among any on-duty admin. Deterministic
+    rather than random so the same desk sees the queue build up instead of requests
+    scattering across admins who each see one.
+    """
+    agents, on_duty = service_duty_state()
+    pool = agents or on_duty
+    return min(pool) if pool else None
+
+
+def service_requests_enabled():
+    return (Setting.get('service_requests_enabled', '1') or '1').strip() == '1'
+
+
+def service_direct_contact_enabled():
+    """The later feature: clients contact providers themselves and listing is paid."""
+    return (Setting.get('service_direct_contact_enabled', '0') or '0').strip() == '1'
+
+
+def service_listing_fee():
+    try:
+        return max(0.0, float(Setting.get('service_listing_fee_kes', '0') or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def cached_service_ids(service_key='', search=''):
+    """Ordered ids of active listings for a catalogue key, cached.
+
+    The old page ran a full-table DISTINCT on category plus an unbounded ordered
+    scan on every anonymous hit. Ids only, capped, and cached for a minute: a
+    thousand people opening the laundry tile is one query, not a thousand.
+    """
+    key = f'{service_key}|{search.lower()}'
+    cached = _service_ids_cache.lookup(key)
+    if cached is not CACHE_MISS:
+        return cached
+    query = ServiceListing.query.filter_by(is_active=True)
+    if service_key:
+        query = query.filter(ServiceListing.service_key == service_key)
+    if search:
+        like = f'%{search}%'
+        query = query.filter(or_(ServiceListing.title.ilike(like),
+                                 ServiceListing.description.ilike(like)))
+    rows = query.order_by(ServiceListing.orders_completed.desc(),
+                          ServiceListing.created_at.desc()
+                          ).with_entities(ServiceListing.id).limit(1000).all()
+    ids = [row[0] for row in rows]
+    _service_ids_cache.set(key, ids)
+    return ids
+
+
+def service_provider_line(service):
+    """One provider as the chatbot and the cards state them.
+
+    "Name — KES 450 — No pickup offered, take to the location as directed" is the
+    MVP's format, so it lives in one function and every surface reads it from here.
+    """
+    label = service.title or 'Service provider'
+    price = f'KES {service.price:,.0f}' if service.price else 'price on request'
+    return f'{label} — {price} — {service.pickup_display}'
+
+
+# --- The chatbot's half of the services flow ---------------------------------
+# ask what they want -> list the services -> they pick one -> list the providers
+# with price, location and pickup. Written here rather than in chatbot_ai.py
+# because it needs Setting, the duty cache and the catalogue cache, and
+# create_chatbot_instance is wrapped in try/except - a chatbot import failure must
+# not take the services flow down with it.
+
+SERVICE_CHAT_TRIGGERS = (
+    'service', 'services', 'provider', 'laundry', 'printing', 'photocopy',
+    'print', 'repair', 'barber', 'salon', 'cleaning', 'tutor', 'tuition',
+    'errand', 'courier', 'parcel', 'hostel', 'accommodation', 'gig',
+    'freelance', 'fitness', 'gym', 'wellness', 'clinic', 'cyber',
+    # The remaining catalogue entries. Each is a phrase rather than the obvious
+    # single word, because the single word belongs to something else on this site:
+    # bare 'books' and 'tickets' would swallow product searches for books and for
+    # EventTicket listings, bare 'food' would swallow a grocery product search,
+    # and bare 'cv' matches inside ordinary words.
+    'food delivery', 'grocery', 'groceries', 'stationery', 'event ticket',
+    'career service', 'resume',
+)
+# Said after a service is on the table. Kept apart from the triggers because
+# "connect me" alone is not a services question, but "connect me to a laundry" is.
+SERVICE_CONNECT_WORDS = ('connect', 'link me', 'contact', 'book', 'hire',
+                         'arrange', 'order this', 'talk to')
+# Words that would otherwise pull a service question into the product search
+# intent. Stripped before matching so "I need laundry" matches laundry.
+SERVICE_STOP_WORDS = {
+    'i', 'a', 'an', 'the', 'need', 'want', 'looking', 'for', 'find', 'get',
+    'me', 'some', 'any', 'please', 'help', 'with', 'my', 'is', 'there',
+    'show', 'available', 'near', 'around', 'to', 'do', 'you', 'have',
+    'service', 'services', 'provider', 'providers', 'and', 'of', 'in', 'on',
+}
+# Phrases that mean "an order I have already placed", which is the busiest support
+# question on the site and answered by the order_status intent.
+#
+# This exists because services are matched first, before the chatbot sees the
+# message at all, and several catalogue labels contain ordinary delivery words -
+# "Food Delivery", "Parcel & Courier Services". Without this guard "where is my
+# parcel" scores a match on the courier catalogue row and a client chasing a late
+# order is handed a list of couriers to hire. Each phrase carries its own
+# possessive or tracking word, so "I need food delivery" is untouched.
+SERVICE_ORDER_TRACKING_PHRASES = (
+    'my order', 'my delivery', 'my parcel', 'my package', 'my item',
+    'my refund', 'my payment', 'my money', 'order number', 'order id',
+    'order status', 'tracking number', 'track my', 'where is my',
+    'has not arrived', "hasn't arrived", 'not arrived', 'not delivered',
+    'still waiting', 'delayed', 'late delivery',
+)
+# The counterweight: someone deliberately hiring, who happens to use one of the
+# phrases above. "I need someone to deliver my package" is a courier hire, not a
+# tracking question. Written out here rather than reusing SERVICE_CONNECT_WORDS
+# because that list contains 'book', and "my order of books has not arrived" would
+# then read as hiring a bookshop.
+SERVICE_HIRE_PHRASES = ('hire', 'book a', 'book an', 'arrange', 'connect me',
+                        'link me', 'provider', 'someone to', 'looking to hire')
+# Phrases that mean goods, not labour. "I want to buy a phone" scores a weak match
+# on Phone & Laptop Repair, and answering the commonest product search on the site
+# with a list of repair shops loses the sale.
+#
+# Only verbs that unambiguously mean buying a thing. 'how much is' and 'price of'
+# were tried here and removed: "how much is printing" is a service price question,
+# and gating on those made the answer depend on whether a catalogue label happened
+# to be one word or two.
+SERVICE_PURCHASE_PHRASES = ('buy', 'purchase', 'for sale', 'brand new',
+                            'second hand', 'in stock')
+# The score at which a catalogue match means the client named a service rather
+# than used one of its words in passing. Matches the two-word tier in
+# match_service_key_scored.
+SERVICE_STRONG_MATCH_SCORE = 50
+
+
+def service_chat_county():
+    """The client's county if we hold one, else ''.
+
+    Read from the delivery location the client already gave us. It is the only
+    thing we honestly know about where they are on a chatbot turn - the support
+    page is not geolocation-permitted, so there is no coordinate fix to use, and
+    claiming "near you" from nothing is the one thing that makes this feel fake.
+    """
+    if not has_request_context():
+        return ''
+    picked = session.get('delivery_location') or {}
+    return (picked.get('county') or '').strip()
+
+
+def service_label_tokens(label):
+    """The distinctive words in a catalogue label, normalised.
+
+    Shared by the matcher and its ambiguity pass so the two cannot drift: a word
+    counted as ambiguous is by construction the same string the matcher scores.
+    """
+    cleaned = re.sub(r'[^a-z0-9\s]+', ' ', (label or '').lower())
+    return [token for token in cleaned.split()
+            if token not in SERVICE_STOP_WORDS and len(token) > 2]
+
+
+def match_service_key_scored(message):
+    """The catalogue key a message is asking about and how strong the match is.
+
+    Matched against the catalogue rather than a keyword table, so a service an
+    admin adds is findable by the chatbot the moment they add it - no deploy, no
+    second list to keep in step.
+
+    The score is returned because the caller has to tell a named service from a
+    passing mention. Three tiers, and the gaps between them are what carry the
+    meaning: 100+ the whole label was typed, 50+ two of its words were, below that
+    a single word matched and that is thin evidence on its own.
+    """
+    text = re.sub(r'[^a-z0-9\s]+', ' ', (message or '').lower())
+    words = [word for word in text.split() if word not in SERVICE_STOP_WORDS]
+    if not words:
+        return '', 0
+    haystack = ' '.join(words)
+    rows = service_catalogue()
+
+    # A word in several labels identifies none of them. 'delivery' is in Food
+    # Delivery, Campus Delivery & Errands and Grocery & Essentials Delivery, so on
+    # its own it is not evidence for any of the three - and it is also how a client
+    # asks after an order. Such a word still counts in the two-word tier, where
+    # "campus delivery" is specific again.
+    #
+    # Recomputed per call rather than cached: a few dozen string operations over
+    # the already-cached catalogue, against a second cache to invalidate every
+    # time an admin adds a service.
+    counts = {}
+    for row in rows:
+        for token in set(service_label_tokens(row.label)):
+            counts[token] = counts.get(token, 0) + 1
+    ambiguous = {token for token, count in counts.items() if count > 1}
+
+    best = ('', 0)
+    for row in rows:
+        # Whitespace collapsed to match the haystack, which was rebuilt from a
+        # word list. Without this every label containing "&" fails the whole-label
+        # tier on the double space the ampersand leaves behind.
+        label = ' '.join(re.sub(r'[^a-z0-9\s]+', ' ',
+                                (row.label or '').lower()).split())
+        tokens = service_label_tokens(row.label)
+        hits = [token for token in tokens if token in haystack]
+        score = 0
+        if label and label in haystack:
+            score = 100 + len(label)
+        elif len(hits) > 1:
+            score = 50 + sum(len(token) for token in hits)
+        else:
+            # Longest first so "accommodation" outranks "hostel" in
+            # "hostel & accommodation".
+            for token in sorted(hits, key=len, reverse=True):
+                if token not in ambiguous:
+                    score = len(token)
+                    break
+        if not score and row.key and row.key.replace('_', ' ') in haystack:
+            score = len(row.key)
+        if score > best[1]:
+            best = (row.key, score)
+    return best
+
+
+def match_service_key(message):
+    """The catalogue key a message is asking about, or ''."""
+    return match_service_key_scored(message)[0]
+
+
+def service_chat_providers(service_key, county='', limit=6):
+    """Providers for one service, the ones in the client's county first.
+
+    Reads the cached id list the services page already built, so a chatbot turn
+    costs the same as a page view rather than its own query per message.
+    """
+    ids = cached_service_ids(service_key, '')
+    if not ids:
+        return []
+    rows = ServiceListing.query.filter(ServiceListing.id.in_(ids[:200])).all()
+    order = {value: index for index, value in enumerate(ids)}
+    if county:
+        wanted = county.lower()
+
+        def sort_key(row):
+            local = 0 if (row.location_county or '').strip().lower() == wanted else 1
+            return (local, order.get(row.id, 9999))
+    else:
+        def sort_key(row):
+            return (0, order.get(row.id, 9999))
+
+    rows.sort(key=sort_key)
+    return rows[:limit]
+
+
+def service_chat_options(listed_only=True):
+    """The catalogue as chat buttons, limited to services someone is listed under.
+
+    Offering a service nobody has listed sends the client round a loop: they press
+    it, get "nobody is listed under that yet" and the same menu back. The MVP asked
+    for the listed services, so that is what this returns.
+
+    Two fallbacks to the whole catalogue, both deliberate. Nothing listed at all is a
+    new platform, where the catalogue is the honest answer to "what do you offer".
+    Live keys that match no catalogue row means the listings are on the old free-text
+    category and the filter would blank the menu for no good reason.
+    """
+    rows = service_catalogue()
+    if listed_only:
+        live = service_keys_with_providers()
+        if live:
+            rows = [row for row in rows if row.key in live] or rows
+    return [{'key': row.key, 'label': row.label, 'emoji': row.emoji or '',
+             'url': url_for('services_marketplace', service=row.key)
+             if has_request_context() else f'/services?service={row.key}'}
+            for row in rows]
+
+
+def service_chatbot_reply(message, user=None):
+    """The services answer, or None when the message is not about services.
+
+    Returns the extra keys /api/support/chatbot merges into its response. reply,
+    urgent and whatsapp_url keep their existing meaning there - this only ever
+    adds keys, so a browser running the old support page keeps working.
+    """
+    text = (message or '').strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    # Hand a question about an existing order straight back, before any matching
+    # runs. Services are answered ahead of every other intent, so this is the only
+    # place that can keep "where is my parcel" out of the courier catalogue.
+    if (any(phrase in lowered for phrase in SERVICE_ORDER_TRACKING_PHRASES)
+            and not any(phrase in lowered for phrase in SERVICE_HIRE_PHRASES)):
+        return None
+    service_key, match_score = match_service_key_scored(text)
+    # A single catalogue word inside an obvious purchase is a product search, not a
+    # hire. A service the client actually named clears the two-word tier and is
+    # unaffected, and so is anything with a hire word in it.
+    if (service_key and match_score < SERVICE_STRONG_MATCH_SCORE
+            and any(phrase in lowered for phrase in SERVICE_PURCHASE_PHRASES)
+            and not any(phrase in lowered for phrase in SERVICE_HIRE_PHRASES)):
+        service_key = ''
+    mentions_services = any(word in lowered for word in SERVICE_CHAT_TRIGGERS)
+    if not service_key and not mentions_services:
+        return None
+
+    duty = service_duty_active() and service_requests_enabled()
+    whatsapp = support_whatsapp_url('Hi, I need help with a service.')
+
+    # They asked to be put in touch but have not named a service yet.
+    if not service_key:
+        wants_contact = any(word in lowered for word in SERVICE_CONNECT_WORDS)
+        if wants_contact and not duty:
+            return {'reply': SERVICE_BUSY_MESSAGE, 'action': 'whatsapp',
+                    'whatsapp_url': whatsapp, 'options': service_chat_options()}
+        options = service_chat_options()
+        if not options:
+            return None
+        return {
+            'reply': 'What service do you need? Here is everything listed right now.',
+            'options': options,
+            'action': 'pick_service',
+        }
+
+    item = service_catalogue_map().get(service_key)
+    label = (item.label if item else service_key.replace('_', ' ')).lower()
+    county = service_chat_county()
+    providers = service_chat_providers(service_key, county)
+
+    if not providers:
+        payload = {
+            'reply': f'Nobody is listed under {label} yet. '
+                     f'These are the services with providers right now.',
+            'options': service_chat_options(),
+            'action': 'pick_service',
+        }
+        if not duty:
+            payload['follow_up'] = SERVICE_BUSY_MESSAGE
+            payload['action'] = 'whatsapp'
+            payload['whatsapp_url'] = whatsapp
+        return payload
+
+    # The MVP's exact shape: a count line, then one line per provider carrying
+    # price and pickup. "near you" only when we actually hold their county.
+    count = len(providers)
+    noun = 'provider' if count == 1 else 'providers'
+    where = ' near you' if county else ''
+    lines = [f'I found {count} {label} {noun}{where}.']
+    lines.extend(service_provider_line(row) for row in providers)
+
+    payload = {
+        'reply': '\n'.join(lines),
+        'service_key': service_key,
+        'providers': [{
+            'id': row.id,
+            'title': row.title,
+            'price': float(row.price or 0),
+            'price_display': (f'KES {row.price:,.0f}' if row.price else 'price on request'),
+            'location': row.location_display or '',
+            'pickup': row.pickup_display,
+            'line': service_provider_line(row),
+            'url': url_for('service_detail', service_id=row.id)
+            if has_request_context() else f'/services/{row.id}',
+        } for row in providers],
+        'action': 'contact_admin' if duty else 'whatsapp',
+    }
+    if duty:
+        payload['follow_up'] = ('Open the one you want and press Contact admin — '
+                                'we will connect you with the provider.')
+    else:
+        # Exact wording, as specified. Its own bubble with the WhatsApp button
+        # beneath it, so the provider list is still useful to them.
+        payload['follow_up'] = SERVICE_BUSY_MESSAGE
+        payload['whatsapp_url'] = whatsapp
+    return payload
+
+
+
 @app.route('/services')
 def services_marketplace():
-    category = request.args.get('category', '')
-    query = ServiceListing.query.filter_by(is_active=True)
-    if category:
-        query = query.filter_by(category=category)
-    services = query.order_by(ServiceListing.orders_completed.desc(), ServiceListing.created_at.desc()).limit(60).all()
-    categories = db.session.query(ServiceListing.category).distinct().all()
-    return render_template('services.html', services=services, categories=[c[0] for c in categories], current_category=category)
+    """The one services category: catalogue tiles, then paginated providers."""
+    service_key = (request.args.get('service') or request.args.get('category') or '').strip()
+    search = (request.args.get('q') or '').strip()[:80]
+    catalogue = service_catalogue()
+    catalogue_map = {row.key: row for row in catalogue}
+    # An unknown key would otherwise silently show every service, which reads as a
+    # broken filter rather than a bad link.
+    if service_key and service_key not in catalogue_map:
+        service_key = ''
+    ids = cached_service_ids(service_key, search)
+    pagination = paginate_cached_ids(ServiceListing, ids,
+                                     page=request.args.get('page', 1), per_page=12)
+    return render_template(
+        'services.html',
+        services=pagination.items,
+        pagination=pagination,
+        catalogue=catalogue,
+        current_service=service_key,
+        current_item=catalogue_map.get(service_key),
+        search=search,
+        duty_active=service_duty_active(),
+        direct_contact=service_direct_contact_enabled(),
+        requests_enabled=service_requests_enabled(),
+        whatsapp_url=support_whatsapp_url(),
+        # Kept so an existing template or bookmark referring to categories still
+        # renders rather than raising Undefined mid-deploy.
+        categories=[row.label for row in catalogue],
+        current_category=service_key,
+    )
+
+
+@app.route('/services/<int:service_id>')
+def service_detail(service_id):
+    """One service. The provider's phone is rendered for admins only.
+
+    That guard lives in the template as a single block over a single variable:
+    passing the phone only when the viewer is an admin means a template edit cannot
+    leak it, because for everyone else it is not in the context at all.
+    """
+    service = ServiceListing.query.get_or_404(service_id)
+    if not service.is_active and not (current_user.is_authenticated and current_user.is_admin):
+        abort(404)
+    is_admin_viewer = current_user.is_authenticated and current_user.is_admin
+    item = service_catalogue_map().get(service.service_key or '')
+    open_request = None
+    if current_user.is_authenticated:
+        open_request = ServiceLinkRequest.query.filter(
+            ServiceLinkRequest.service_id == service.id,
+            ServiceLinkRequest.client_id == current_user.id,
+            ServiceLinkRequest.status.in_(('open', 'claimed')),
+        ).order_by(ServiceLinkRequest.created_at.desc()).first()
+    # Two separate variables for the same column, because they answer two
+    # different questions and must never be confused for one another.
+    # provider_phone is the admin's working copy at the linking desk.
+    # direct_phone exists only while service_direct_contact_enabled is on - that
+    # setting IS the "clients may contact providers themselves" feature, and
+    # turning it on is the one thing that puts the number in front of a client.
+    # Signed in either way: a public listing page with a phone number on it is a
+    # scraper's shopping list.
+    direct = service_direct_contact_enabled()
+    return render_template(
+        'service_detail.html',
+        service=service,
+        item=item,
+        provider_phone=(service.provider_phone if is_admin_viewer else None),
+        direct_phone=(service.provider_phone
+                      if (direct and current_user.is_authenticated) else None),
+        is_owner=(current_user.is_authenticated and current_user.id == service.provider_id),
+        duty_active=service_duty_active(),
+        direct_contact=direct,
+        requests_enabled=service_requests_enabled(),
+        busy_message=SERVICE_BUSY_MESSAGE,
+        whatsapp_url=support_whatsapp_url(f'Hi, I need help with: {service.title}'),
+        open_request=open_request,
+        provider_line=service_provider_line(service),
+    )
+
+
+@app.route('/services/<int:service_id>/contact-admin', methods=['POST'])
+@login_required
+@limiter.limit(SERVICE_REQUEST_RATE_LIMIT)
+def service_contact_admin(service_id):
+    """Ask an admin to link this client to this provider.
+
+    Returns mode=platform with a thread when someone is on duty, and mode=whatsapp
+    with the exact busy sentence when nobody is. Never both, and never the
+    provider's number.
+    """
+    service = ServiceListing.query.get_or_404(service_id)
+    if not service.is_active:
+        return jsonify({'success': False, 'error': 'This service is no longer listed.'}), 404
+    if service.provider_id == current_user.id:
+        return jsonify({'success': False, 'error': 'This is your own listing.'}), 400
+
+    whatsapp_url = support_whatsapp_url(f'Hi, I need help with: {service.title}')
+    if not service_requests_enabled():
+        return jsonify({'success': True, 'mode': 'whatsapp', 'reply': SERVICE_BUSY_MESSAGE,
+                        'whatsapp_url': whatsapp_url})
+
+    note = (request.form.get('note') or (request.get_json(silent=True) or {}).get('note') or '').strip()[:1000]
+    phone = (request.form.get('phone') or (request.get_json(silent=True) or {}).get('phone')
+             or current_user.phone or '').strip()[:30]
+
+    admin_id = pick_service_admin()
+    if not admin_id:
+        # Recorded even though no admin will see it live: "how often was nobody at
+        # the desk" is a number the MVP needs, and it is unanswerable if the
+        # WhatsApp hand-off leaves no row.
+        db.session.add(ServiceLinkRequest(
+            service_id=service.id, client_id=current_user.id, status='whatsapp_redirected',
+            client_note=note, client_phone=phone, channel='whatsapp',
+            created_at=utcnow(), closed_at=utcnow()))
+        try:
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            logger.warning(f'whatsapp redirect not recorded: {exc}')
+        return jsonify({'success': True, 'mode': 'whatsapp', 'reply': SERVICE_BUSY_MESSAGE,
+                        'whatsapp_url': whatsapp_url})
+
+    existing = ServiceLinkRequest.query.filter(
+        ServiceLinkRequest.service_id == service.id,
+        ServiceLinkRequest.client_id == current_user.id,
+        ServiceLinkRequest.status.in_(('open', 'claimed')),
+    ).first()
+    if existing:
+        # Pressing the button twice must not queue the same client twice at the
+        # desk; they get the thread they already have.
+        return jsonify({'success': True, 'mode': 'platform', 'request_id': existing.id,
+                        'existing': True,
+                        'reply': 'You already have an open request. An admin will reply here.'})
+
+    link_request = ServiceLinkRequest(
+        service_id=service.id, client_id=current_user.id, assigned_admin_id=admin_id,
+        status='open', client_note=note, client_phone=phone, channel='platform',
+        created_at=utcnow())
+    db.session.add(link_request)
+    db.session.flush()
+    if note:
+        db.session.add(ServiceLinkMessage(request_id=link_request.id, sender_id=current_user.id,
+                                          from_admin=False, body=note, created_at=utcnow()))
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        logger.error(f'service link request failed: {exc}')
+        return jsonify({'success': True, 'mode': 'whatsapp', 'reply': SERVICE_BUSY_MESSAGE,
+                        'whatsapp_url': whatsapp_url})
+
+    _, on_duty = service_duty_state()
+    for target in on_duty:
+        create_customer_notification(
+            target,
+            'Service linking request',
+            f'{current_user.username} wants to be linked to "{service.title}". '
+            f'Open the linking desk to claim it.',
+            'service')
+    # create_customer_notification adds without committing, and the commit above has
+    # already gone out - so without this second one the rows are discarded at
+    # teardown and nobody at the desk ever hears about a request the client has just
+    # been promised a reply to. Failing to notify must not fail the request, though:
+    # the ServiceLinkRequest is committed and the desk lists open requests by query,
+    # so the admin still finds it either way.
+    request_id = link_request.id
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        logger.warning(f'service link notification not stored: {exc}')
+    return jsonify({'success': True, 'mode': 'platform', 'request_id': request_id,
+                    'reply': 'An admin is on duty and will reply here shortly.'})
+
+
+@app.route('/services/requests/<int:request_id>/thread', methods=['GET', 'POST'])
+@login_required
+@limiter.limit(SERVICE_THREAD_RATE_LIMIT)
+def service_request_thread(request_id):
+    """The client's half of the conversation. Owner or admin only."""
+    link_request = ServiceLinkRequest.query.get_or_404(request_id)
+    is_admin_viewer = current_user.is_admin
+    if link_request.client_id != current_user.id and not is_admin_viewer:
+        abort(403)
+    if request.method == 'POST':
+        body = (request.form.get('body') or (request.get_json(silent=True) or {}).get('body') or '').strip()[:2000]
+        if not body:
+            return jsonify({'success': False, 'error': 'Write a message first.'}), 400
+        if link_request.status == 'closed':
+            return jsonify({'success': False, 'error': 'This request is closed.'}), 400
+        db.session.add(ServiceLinkMessage(request_id=link_request.id, sender_id=current_user.id,
+                                          from_admin=is_admin_viewer, body=body,
+                                          created_at=utcnow()))
+        if is_admin_viewer and link_request.status == 'open':
+            link_request.status = 'claimed'
+            link_request.assigned_admin_id = current_user.id
+            link_request.claimed_at = utcnow()
+        db.session.commit()
+        if is_admin_viewer:
+            create_customer_notification(link_request.client_id, 'Reply from support',
+                                         'An admin replied about your service request.', 'service')
+            # Same reason as in service_contact_admin: the helper only adds, and the
+            # commit above has already gone out. Dropped here it is the client who
+            # never learns the desk answered them.
+            try:
+                db.session.commit()
+            except Exception as exc:
+                db.session.rollback()
+                logger.warning(f'service reply notification not stored: {exc}')
+    messages = ServiceLinkMessage.query.filter_by(request_id=link_request.id).order_by(
+        ServiceLinkMessage.created_at.asc()).limit(200).all()
+    return jsonify({
+        'success': True,
+        'status': link_request.status,
+        'service_title': link_request.service.title if link_request.service else '',
+        'messages': [{
+            'id': msg.id,
+            'from_admin': bool(msg.from_admin),
+            'body': msg.body,
+            'created_at': msg.created_at.isoformat() if msg.created_at else '',
+        } for msg in messages],
+    })
 
 
 @app.route('/services/create', methods=['GET', 'POST'])
 @login_required
 def create_service():
+    """List a service. Sellers need an approved storefront; admins do not.
+
+    Location follows the product listing rule the MVP asked for: a typed address
+    wins, and a blank address falls back to the coordinates the browser supplied,
+    so a provider who cannot describe where they are still gets a pin.
+    """
+    is_admin_lister = current_user.is_admin
+    storefront = None
+    if not is_admin_lister:
+        storefront, redirect_response = seller_listing_gate()
+        if redirect_response:
+            return redirect_response
+    options = service_catalogue() if is_admin_lister else service_catalogue(seller_only=True)
+    fee = service_listing_fee() if service_direct_contact_enabled() else 0.0
+
     if request.method == 'POST':
+        title = (request.form.get('title', '') or '').strip()[:200]
+        service_key = (request.form.get('service_key', '') or '').strip()[:60]
+        provider_phone = (request.form.get('provider_phone', '') or '').strip()[:30]
+        allowed = {row.key: row for row in options}
+        if not title:
+            flash('Give the service a title.', 'danger')
+            return render_template('create_service.html', options=options, fee=fee,
+                                   form=request.form)
+        if service_key not in allowed:
+            flash('Pick a service from the list.', 'danger')
+            return render_template('create_service.html', options=options, fee=fee,
+                                   form=request.form)
+        if not provider_phone:
+            flash('A contact phone is required. Only admins ever see it.', 'danger')
+            return render_template('create_service.html', options=options, fee=fee,
+                                   form=request.form)
+
         service = ServiceListing(
             provider_id=current_user.id,
-            title=request.form.get('title', '').strip(),
-            description=request.form.get('description', '').strip(),
-            category=request.form.get('category', '').strip(),
+            title=title,
+            description=(request.form.get('description', '') or '').strip(),
+            category=allowed[service_key].label,
+            service_key=service_key,
             price_type=request.form.get('price_type', 'fixed'),
-            price=float(request.form.get('price', 0)),
-            delivery_days=int(request.form.get('delivery_days', 3)),
+            price=form_float('price', 0, minimum=0),
+            delivery_days=max(0, int(form_float('delivery_days', 3, minimum=0))),
+            provider_phone=provider_phone,
             platform_commission=float(Setting.get('service_commission_percent', '15') or 15),
+            is_admin_listing=is_admin_lister,
         )
+        apply_service_location(service)
+        apply_service_pickup(service)
+        if service_direct_contact_enabled() and fee > 0 and not is_admin_lister:
+            service.listing_fee_amount = fee
+            service.listing_fee_paid = False
         if request.files.get('service_image'):
             service.image_url = save_uploaded_file(request.files['service_image'], 'services')
         db.session.add(service)
         db.session.commit()
-        flash('Service listed successfully!', 'success')
-        return redirect(url_for('services_marketplace'))
-    return render_template('create_service.html')
+        invalidate_service_caches()
+        if service.listing_fee_amount and not service.listing_fee_paid:
+            record_platform_revenue('service_listing_fee', service.listing_fee_amount,
+                                    f'Service listing: {service.title}', str(service.id),
+                                    'service', current_user.id)
+            db.session.commit()
+            flash(f'Service listed. A listing fee of KSh {service.listing_fee_amount:,.0f} '
+                  f'is due on this listing.', 'warning')
+        else:
+            flash('Service listed. Clients will reach you through an admin.', 'success')
+        return redirect(url_for('service_detail', service_id=service.id))
+    return render_template('create_service.html', options=options, fee=fee, form={})
+
+
+def apply_service_location(service):
+    """Typed address wins; a blank one falls back to the device's coordinates."""
+    label = (request.form.get('location_label', '') or '').strip()[:200]
+    county = (request.form.get('location_county', '') or '').strip()[:100]
+    lat = form_float('location_lat', 0) or None
+    lng = form_float('location_lng', 0) or None
+    service.location_lat = lat
+    service.location_lng = lng
+    service.location_county = county or None
+    if label:
+        service.location_label = label
+    elif lat is not None and lng is not None:
+        # Deliberately not reverse-geocoded: naming a place from a coordinate we
+        # cannot verify would print a wrong address with the confidence of a typed
+        # one. The pin is honest about being a pin.
+        service.location_label = None
+    else:
+        service.location_label = None
+
+
+def apply_service_pickup(service):
+    """Read the pickup half of the form.
+
+    pickup_via_platform bills the provider for the courier leg, so it can only be
+    set when pickup is actually offered - otherwise a provider could be charged for
+    a collection nobody asked for.
+    """
+    required = bool(request.form.get('pickup_required'))
+    service.pickup_required = required
+    if not required:
+        service.pickup_is_free = False
+        service.pickup_cost = 0.0
+        service.pickup_eta = None
+        service.pickup_via_platform = False
+        return
+    service.pickup_is_free = bool(request.form.get('pickup_is_free'))
+    service.pickup_cost = 0.0 if service.pickup_is_free else form_float('pickup_cost', 0, minimum=0)
+    service.pickup_eta = (request.form.get('pickup_eta', '') or '').strip()[:60] or None
+    service.pickup_via_platform = bool(request.form.get('pickup_via_platform'))
 
 
 @app.route('/services/<int:service_id>/order', methods=['POST'])
@@ -18062,8 +19506,1095 @@ def order_service(service_id):
     record_platform_revenue('service_commission', platform_fee, f'Service: {service.title}', str(service.id), 'service', current_user.id)
     service.orders_completed += 1
     db.session.commit()
+    invalidate_service_caches()
     flash(f'Service ordered! Provider will deliver within {service.delivery_days} days.', 'success')
-    return redirect(url_for('services_marketplace'))
+    return redirect(url_for('service_detail', service_id=service.id))
+
+
+# --- 7b. Service linking desk (admin) ---
+@app.route('/admin/services/duty', methods=['POST'])
+@login_required
+@admin_required
+def admin_service_duty():
+    """The admin's own on/off switch for the linking desk.
+
+    Their own, because the alternative is guessing from activity - and a wrong
+    guess means a client is told an admin is available who is not, which is worse
+    than the WhatsApp fallback it was trying to avoid.
+    """
+    turn_on = (request.form.get('duty') or '').strip() not in ('0', 'off', 'false', '')
+    current_user.service_duty_on = turn_on
+    current_user.service_duty_since = utcnow() if turn_on else None
+    db.session.commit()
+    _service_duty_cache.clear()
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.is_json:
+        return jsonify({'success': True, 'duty': turn_on})
+    flash('You are on the service linking desk.' if turn_on
+          else 'You are off the service linking desk.', 'success')
+    return redirect(request.referrer or url_for('admin_service_requests'))
+
+
+@app.route('/admin/services/requests')
+@login_required
+@admin_required
+def admin_service_requests():
+    """The linking desk. The one page where a provider's phone is shown."""
+    status = (request.args.get('status') or 'open').strip()
+    query = ServiceLinkRequest.query
+    if status == 'open':
+        query = query.filter(ServiceLinkRequest.status.in_(('open', 'claimed')))
+    elif status != 'all':
+        query = query.filter(ServiceLinkRequest.status == status)
+    # Every row on this page prints the service, the provider behind it, the client
+    # and the assigned admin. All four are lazy many-to-one relationships, so twenty
+    # five rows is a hundred queries without this - on the one page an admin sits
+    # refreshing while they are on duty. Many-to-one joins cannot multiply rows, so
+    # paginate() below still counts and slices correctly.
+    query = query.options(
+        joinedload(ServiceLinkRequest.service).joinedload(ServiceListing.provider),
+        joinedload(ServiceLinkRequest.client),
+        joinedload(ServiceLinkRequest.assigned_admin),
+    )
+    pagination = query.order_by(ServiceLinkRequest.created_at.desc()).paginate(
+        page=request.args.get('page', 1, type=int), per_page=25, error_out=False)
+    agents, on_duty = service_duty_state()
+    return render_template('admin/service_requests.html', pagination=pagination,
+                           requests=pagination.items, status=status,
+                           on_duty_count=len(on_duty), agent_count=len(agents),
+                           duty_on=bool(current_user.service_duty_on))
+
+
+@app.route('/admin/services/requests/<int:request_id>/<action>', methods=['POST'])
+@login_required
+@admin_required
+def admin_service_request_action(request_id, action):
+    """claim / link / close a request."""
+    link_request = ServiceLinkRequest.query.get_or_404(request_id)
+    now = utcnow()
+    if action == 'claim':
+        link_request.assigned_admin_id = current_user.id
+        link_request.status = 'claimed'
+        link_request.claimed_at = now
+        flash('Request claimed.', 'success')
+    elif action == 'link':
+        link_request.status = 'linked'
+        link_request.linked_at = now
+        create_customer_notification(link_request.client_id, 'You have been linked',
+                                     'An admin has connected you with the service provider.',
+                                     'service')
+        flash('Marked as linked and the client notified.', 'success')
+    elif action == 'close':
+        link_request.status = 'closed'
+        link_request.closed_at = now
+        flash('Request closed.', 'info')
+    else:
+        abort(404)
+    db.session.commit()
+    return redirect(request.referrer or url_for('admin_service_requests'))
+
+
+@app.route('/admin/services/catalogue', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def admin_service_catalogue():
+    """Which services exist, and which of them a seller may list."""
+    if request.method == 'POST':
+        action = (request.form.get('action') or 'save').strip()
+        if action == 'add':
+            label = (request.form.get('label', '') or '').strip()[:120]
+            if not label:
+                flash('Give the new service a name.', 'danger')
+                return redirect(url_for('admin_service_catalogue'))
+            key = (request.form.get('key', '') or '').strip().lower()
+            key = re.sub(r'[^a-z0-9_]+', '_', key or label.lower()).strip('_')[:60]
+            if not key:
+                flash('That name does not make a usable key. Add letters or numbers.', 'danger')
+                return redirect(url_for('admin_service_catalogue'))
+            if ServiceCatalogueItem.query.filter_by(key=key).first():
+                flash(f'A service with the key "{key}" already exists.', 'warning')
+                return redirect(url_for('admin_service_catalogue'))
+            db.session.add(ServiceCatalogueItem(
+                key=key, label=label,
+                emoji=(request.form.get('emoji', '') or '').strip()[:16] or None,
+                seller_listable=bool(request.form.get('seller_listable')),
+                is_active=True,
+                sort_order=int(form_float('sort_order', 100, minimum=0)),
+                created_by_id=current_user.id, created_at=utcnow()))
+            db.session.commit()
+            invalidate_service_caches()
+            flash(f'Added "{label}".', 'success')
+            return redirect(url_for('admin_service_catalogue'))
+
+        # Bulk save of the toggles. Only the rows this form actually carried are
+        # touched, so a row another admin adds mid-edit is not deactivated by being
+        # absent from a form that was rendered before it existed.
+        #
+        # The marker is the hidden present_<id> field, not the checkboxes: an
+        # unchecked checkbox is simply absent from the POST, so "seller_listable
+        # was switched off" and "this row was never on the form" look identical
+        # without it.
+        rows = ServiceCatalogueItem.query.all()
+        for row in rows:
+            if f'present_{row.id}' not in request.form:
+                continue
+            row.seller_listable = request.form.get(f'listable_{row.id}') is not None
+            row.is_active = request.form.get(f'active_{row.id}') is not None
+            row.sort_order = int(form_float(f'sort_{row.id}', row.sort_order or 100, minimum=0))
+            emoji = (request.form.get(f'emoji_{row.id}', '') or '').strip()[:16]
+            if emoji:
+                row.emoji = emoji
+        db.session.commit()
+        invalidate_service_caches()
+        flash('Service catalogue updated.', 'success')
+        return redirect(url_for('admin_service_catalogue'))
+
+    rows = ServiceCatalogueItem.query.order_by(ServiceCatalogueItem.sort_order.asc(),
+                                               ServiceCatalogueItem.label.asc()).all()
+    counts = dict(db.session.query(ServiceListing.service_key, func.count(ServiceListing.id))
+                  .filter(ServiceListing.is_active.is_(True))
+                  .group_by(ServiceListing.service_key).all())
+    return render_template('admin/service_catalogue.html', rows=rows, counts=counts,
+                           direct_contact=service_direct_contact_enabled(),
+                           listing_fee=service_listing_fee())
+
+
+@app.route('/admin/users/<int:user_id>/service-agent', methods=['POST'])
+@login_required
+@mvp_required
+def admin_toggle_service_agent(user_id):
+    """Nominate an admin to the linking desk. MVP only."""
+    user = User.query.get_or_404(user_id)
+    if not user.is_admin:
+        flash('Only admins can be service linking agents.', 'danger')
+        return redirect(request.referrer or url_for('admin_users'))
+    user.service_linking_agent = not bool(user.service_linking_agent)
+    db.session.commit()
+    _service_duty_cache.clear()
+    flash(f'{user.username} is {"now" if user.service_linking_agent else "no longer"} '
+          f'a service linking agent.', 'success')
+    return redirect(request.referrer or url_for('admin_users'))
+
+
+# =============================================================================
+# INVOICES - admin-issued payment requests, emailed to the client
+# =============================================================================
+# Four decisions shape everything below.
+#
+#   * The link is the credential. /invoice/<token> takes the 32-byte token from
+#     Invoice.public_token, never the row id, because a client billed for a
+#     one-off job may have no account at all and should not have to register to
+#     pay. A sequential id in that URL would let anyone walk the billing book.
+#   * Settlement is found through an indexed column. POS and ad payments
+#     correlate their STK pushes through a Setting row per attempt
+#     (pos_stk_{id}), which writes and then deletes a settings row for every
+#     payment and cannot be indexed usefully. InvoicePayment.checkout_request_id
+#     carries its own index instead, so the M-Pesa callback stays one indexed
+#     lookup no matter how many invoices exist.
+#   * amount_paid is summed from the payment log, never incremented. Safaricom
+#     retries its callback, and an increment would count the same shilling twice.
+#   * The document renders in exactly one place. invoice_document_html is what
+#     the hosted page, the print view and the admin preview all call, so a total
+#     or a term that is right in one of them cannot be wrong in another.
+
+# All defaulted, none renamed, none required in the environment.
+INVOICE_RATE_LIMIT = os.environ.get('INVOICE_RATE_LIMIT', '60 per hour')
+INVOICE_PAY_RATE_LIMIT = os.environ.get('INVOICE_PAY_RATE_LIMIT', '12 per hour')
+INVOICE_VIEW_RATE_LIMIT = os.environ.get('INVOICE_VIEW_RATE_LIMIT', '240 per hour')
+INVOICE_PAGE_SIZE = int_env('INVOICE_PAGE_SIZE', 25)
+INVOICE_MAX_LINES = int_env('INVOICE_MAX_LINES', 60)
+
+INVOICE_STATUSES = ('draft', 'sent', 'viewed', 'partially_paid', 'paid', 'cancelled')
+
+
+def invoice_can_issue(user=None):
+    """Who may raise, send or settle an invoice.
+
+    The MVP always can. Every other admin needs the explicit ``invoice_agent``
+    nomination, because billing a client in the platform's name is a different
+    trust from moderating a listing - so it is its own flag rather than a reuse
+    of ``is_admin`` or of the service linking assignment.
+
+    Total by construction: anything that is not a signed-in admin with the right
+    flag answers False, and nothing handed to it can make it raise. That matters
+    because outside a request context ``current_user`` resolves to ``None`` rather
+    than to an anonymous user - the queued-email drainer thread runs there - so
+    reading ``.is_authenticated`` off it unguarded is an AttributeError where the
+    honest answer is simply "no".
+    """
+    if user is None and has_request_context():
+        user = current_user
+    if not getattr(user, 'is_authenticated', False):
+        return False
+    if not getattr(user, 'is_admin', False):
+        return False
+    return (getattr(user, 'admin_level', '') == 'mvp'
+            or bool(getattr(user, 'invoice_agent', False)))
+
+
+def invoice_required(view):
+    @wraps(view)
+    def decorated(*args, **kwargs):
+        if not current_user.is_authenticated:
+            flash('Sign in to reach the invoicing desk.', 'warning')
+            return redirect(url_for('login'))
+        if not invoice_can_issue(current_user):
+            flash('You are not assigned to the invoicing desk.', 'danger')
+            return redirect(url_for('admin_dashboard') if current_user.is_admin
+                            else url_for('home'))
+        return view(*args, **kwargs)
+
+    return decorated
+
+
+def invoice_site_base():
+    """The public origin, resolvable with or without a request.
+
+    Emails are queued, so the drainer thread may be what renders the logo and the
+    pay link. Falling back to the configured base URL is what keeps those from
+    becoming a broken image and a dead button in the client's inbox.
+    """
+    base = (Setting.get('app_base_url', '') or os.environ.get('APP_BASE_URL', '')
+            or DEFAULT_PUBLIC_BASE_URL or '').strip().rstrip('/')
+    if base and not base.startswith('http'):
+        base = f'https://{base}'
+    return base
+
+
+def invoice_logo_url():
+    if has_request_context():
+        try:
+            return url_for('static', filename='images/smark-africa-logo.png', _external=True)
+        except Exception:
+            pass
+    base = invoice_site_base()
+    return f'{base}/static/images/smark-africa-logo.png' if base \
+        else '/static/images/smark-africa-logo.png'
+
+
+def invoice_public_url(invoice):
+    if has_request_context():
+        try:
+            return url_for('invoice_public', token=invoice.public_token, _external=True)
+        except Exception:
+            pass
+    base = invoice_site_base()
+    return f'{base}/invoice/{invoice.public_token}' if base \
+        else f'/invoice/{invoice.public_token}'
+
+
+def invoice_brand():
+    """The issuer's own details, read from Setting rows so no deploy is needed."""
+    return {
+        'name': Setting.get('business_name', 'SMARK-AFRICA') or 'SMARK-AFRICA',
+        'email': (Setting.get('contact_email', '') or Setting.get('from_email', '')
+                  or 'support@smark-africa.com'),
+        'phone': support_whatsapp_number(),
+        'logo': invoice_logo_url(),
+        'instructions': Setting.get('invoice_payment_instructions', '') or '',
+        'bank': Setting.get('invoice_bank_details', '') or '',
+        'footer': Setting.get('invoice_footer_note', '') or '',
+    }
+
+
+def invoice_money(amount, currency='KES'):
+    return f'{currency or "KES"} {float(amount or 0):,.2f}'
+
+
+def invoice_quantity(value):
+    """Print 3 rather than 3.00, but keep 1.5 hours honest."""
+    number = float(value or 0)
+    if abs(number - round(number)) < 0.005:
+        return f'{number:,.0f}'
+    return f'{number:,.2f}'
+
+
+def next_invoice_number():
+    """``SMK-INV-20260816-00007``. Deliberately not the POS ``INV-...`` shape.
+
+    Two documents on one client's desk both reading ``INV-20260816-00007`` is a
+    support call nobody can answer, and ``pos_document_html`` already owns that
+    prefix. The daily counter is read from the table and then re-checked, because
+    ``invoice_number`` is unique: two admins raising an invoice in the same second
+    would otherwise get an IntegrityError instead of a number.
+    """
+    prefix = f'SMK-INV-{utcnow().strftime("%Y%m%d")}-'
+    used = Invoice.query.filter(Invoice.invoice_number.like(f'{prefix}%')).count()
+    for bump in range(1, 500):
+        candidate = f'{prefix}{used + bump:05d}'
+        if not Invoice.query.filter_by(invoice_number=candidate).first():
+            return candidate
+    return f'{prefix}{uuid.uuid4().hex[:6].upper()}'
+
+
+def recalculate_invoice(invoice):
+    """Restate the stored totals from the current lines.
+
+    Called on every edit and never on read. The stored total is what the client
+    was asked for on the day the email went out; recomputing it at read time
+    would let next month's tax rate rewrite a document already in their inbox.
+    """
+    subtotal = 0.0
+    for index, item in enumerate(invoice.items):
+        item.line_total = round(float(item.quantity or 0) * float(item.unit_price or 0), 2)
+        item.sort_order = index
+        subtotal += item.line_total
+    discount = min(max(0.0, float(invoice.discount_amount or 0)), round(subtotal, 2))
+    taxable = max(0.0, round(subtotal, 2) - discount)
+    tax_percent = max(0.0, float(invoice.tax_percent or 0))
+    invoice.subtotal = round(subtotal, 2)
+    invoice.discount_amount = round(discount, 2)
+    invoice.tax_amount = round(taxable * tax_percent / 100.0, 2)
+    invoice.total_amount = round(taxable + invoice.tax_amount, 2)
+    return invoice
+
+
+def refresh_invoice_payment_state(invoice):
+    """Recompute ``amount_paid`` and status from the successful payment log.
+
+    Summing the log rather than incrementing a field is what makes a duplicated
+    M-Pesa callback harmless: Safaricom retries, and an increment would book the
+    same money twice. A cancelled invoice keeps its status - money arriving
+    against a cancelled request is a reconciliation problem for a human, not
+    something to quietly reopen.
+    """
+    paid = sum(float(row.amount or 0) for row in invoice.payments if row.status == 'success')
+    invoice.amount_paid = round(paid, 2)
+    if invoice.status == 'cancelled':
+        return invoice
+    if (invoice.total_amount or 0) > 0 and invoice.balance_due <= 0.009:
+        invoice.status = 'paid'
+        invoice.paid_at = invoice.paid_at or utcnow()
+    elif paid > 0:
+        invoice.status = 'partially_paid'
+        invoice.paid_at = None
+    elif invoice.status in ('paid', 'partially_paid'):
+        # A payment was reversed or corrected back out. Fall back to whether the
+        # client has been told about this invoice at all rather than to 'draft',
+        # which would hide it from them.
+        invoice.status = 'sent' if invoice.sent_at else 'draft'
+        invoice.paid_at = None
+    return invoice
+
+
+def settle_invoice_stk(checkout_id, result_code, receipt='', amount=None, result_desc=''):
+    """Apply an M-Pesa callback to the invoice attempt it belongs to.
+
+    Returns True when this callback was an invoice's, so the caller can stop
+    looking. One indexed lookup, and a cheap miss when the id belongs to an order
+    or a POS sale instead.
+    """
+    key = str(checkout_id or '').strip()
+    if not key:
+        return False
+    payment = InvoicePayment.query.filter_by(checkout_request_id=key).first()
+    if not payment or not payment.invoice:
+        return False
+    if payment.status == 'success':
+        return True  # A retried callback. Already booked; booking it again is the bug.
+    invoice = payment.invoice
+    if int(result_code or 0) == 0:
+        if amount:
+            try:
+                payment.amount = float(amount)
+            except (TypeError, ValueError):
+                pass
+        payment.status = 'success'
+        payment.mpesa_receipt = (receipt or '')[:50]
+        invoice.payment_method = 'mpesa'
+        invoice.mpesa_receipt = (receipt or '')[:50] or invoice.mpesa_receipt
+        refresh_invoice_payment_state(invoice)
+        if invoice.client_id:
+            create_customer_notification(
+                invoice.client_id,
+                f'Payment received for {invoice.invoice_number}',
+                f'We received {invoice_money(payment.amount, invoice.currency)}. '
+                f'Balance now {invoice_money(invoice.balance_due, invoice.currency)}.',
+                'payment')
+        if invoice.issued_by_id:
+            create_customer_notification(
+                invoice.issued_by_id,
+                f'{invoice.invoice_number} paid' if invoice.is_settled
+                else f'Part payment on {invoice.invoice_number}',
+                f'{invoice.client_name} paid {invoice_money(payment.amount, invoice.currency)}. '
+                f'Balance {invoice_money(invoice.balance_due, invoice.currency)}.',
+                'payment')
+    else:
+        payment.status = 'failed'
+        payment.note = (result_desc or 'M-Pesa payment failed')[:255]
+    return True
+
+
+INVOICE_DOCUMENT_CSS = """
+<style>
+.inv-doc{position:relative;overflow:hidden;background:#fff;color:#16202a;max-width:880px;
+ margin:0 auto;padding:34px 32px 26px;border:1px solid #dfe5ec;border-radius:12px;
+ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+ font-size:14px;line-height:1.5}
+.inv-sheet{position:relative;z-index:1}
+/* The watermark. A layer behind the sheet rather than a CSS background, so it
+   survives the browsers that drop background images when printing. */
+.inv-watermark{position:absolute;top:-12%;left:-12%;right:-12%;bottom:-12%;z-index:0;
+ display:flex;flex-wrap:wrap;align-content:center;justify-content:center;
+ gap:30px 40px;transform:rotate(-27deg);opacity:.06;pointer-events:none;
+ -webkit-user-select:none;user-select:none}
+.inv-watermark span{font-size:25px;font-weight:800;letter-spacing:3px;color:#0b6b3a;
+ white-space:nowrap}
+.inv-watermark img{width:132px;height:auto}
+.inv-head{display:flex;flex-wrap:wrap;gap:18px;justify-content:space-between;
+ align-items:flex-start;border-bottom:2px solid #0b6b3a;padding-bottom:16px}
+.inv-head img{max-width:132px;height:auto}
+.inv-brand small{display:block;color:#5b6672;font-size:12px}
+.inv-title{text-align:right}
+.inv-title h1{margin:0;font-size:26px;letter-spacing:4px;color:#0b6b3a}
+.inv-title .inv-no{font-weight:700;font-size:15px}
+.inv-pill{display:inline-block;margin-top:6px;padding:3px 11px;border-radius:999px;
+ font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;
+ background:#eef1f4;color:#48535f}
+.inv-pill.paid{background:#e2f5e9;color:#12703f}
+.inv-pill.overdue{background:#fdecec;color:#a51d1d}
+.inv-pill.cancelled{background:#efefef;color:#6b6b6b;text-decoration:line-through}
+.inv-pill.partially-paid,.inv-pill.sent,.inv-pill.viewed{background:#e8f0fd;color:#17458f}
+.inv-cols{display:flex;flex-wrap:wrap;gap:22px;margin:20px 0 8px}
+.inv-cols>div{flex:1 1 220px;min-width:210px}
+.inv-cols h3{margin:0 0 6px;font-size:11px;letter-spacing:1.4px;text-transform:uppercase;
+ color:#6b7683}
+.inv-cols p{margin:0;white-space:pre-line}
+.inv-items{width:100%;border-collapse:collapse;margin:18px 0 0}
+.inv-items th{background:#0b6b3a;color:#fff;text-align:left;padding:9px 10px;font-size:12px;
+ letter-spacing:.6px;text-transform:uppercase}
+.inv-items td{padding:9px 10px;border-bottom:1px solid #e8edf2;vertical-align:top}
+.inv-items .num{text-align:right;white-space:nowrap}
+.inv-totals{margin-left:auto;margin-top:14px;width:100%;max-width:330px;border-collapse:collapse}
+.inv-totals td{padding:5px 10px}
+.inv-totals td:last-child{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.inv-totals .inv-grand td{border-top:2px solid #0b6b3a;font-size:17px;font-weight:800;
+ padding-top:9px;color:#0b6b3a}
+.inv-totals .inv-balance td{background:#fff6e5;font-weight:800;border-radius:6px}
+.inv-note{margin-top:22px;padding:13px 15px;background:#f6f8fa;border-radius:8px;
+ white-space:pre-line;font-size:13px}
+.inv-note h3{margin:0 0 5px;font-size:11px;letter-spacing:1.4px;text-transform:uppercase;
+ color:#6b7683}
+.inv-foot{margin-top:22px;padding-top:12px;border-top:1px solid #e4e9ee;text-align:center;
+ color:#67727e;font-size:12px}
+.inv-muted{color:#7b8590}
+@media (max-width:600px){
+ .inv-doc{padding:20px 15px;border-radius:0;border-left:0;border-right:0}
+ .inv-head,.inv-title{text-align:left}
+ .inv-title{width:100%}
+ .inv-title h1{font-size:21px}
+ .inv-items th:nth-child(2),.inv-items td:nth-child(2),
+ .inv-items th:nth-child(3),.inv-items td:nth-child(3){display:none}
+ .inv-totals{max-width:100%}
+}
+@media print{
+ .inv-doc{border:0;max-width:100%;padding:0}
+ /* Without these the watermark and the header bar print as blank paper. */
+ body,.inv-doc{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+ .inv-noprint{display:none !important}
+}
+</style>
+"""
+
+
+def invoice_document_html(invoice, include_css=True):
+    """The invoice itself: watermark, logo, lines, totals, terms.
+
+    One renderer for the hosted page, the print view and the admin preview. The
+    only reason to pass ``include_css=False`` is embedding a second copy on a
+    page that already carries the stylesheet.
+    """
+    brand = invoice_brand()
+    currency = invoice.currency or 'KES'
+    esc = html.escape
+
+    marks = []
+    for index in range(16):
+        marks.append('<span>SMARK-AFRICA</span>')
+        if index == 7:
+            marks.append(f'<img src="{esc(brand["logo"], quote=True)}" alt="">')
+    watermark = f'<div class="inv-watermark" aria-hidden="true">{"".join(marks)}</div>'
+
+    if invoice.items:
+        rows = ''.join(
+            f'<tr><td>{esc(item.description or "")}</td>'
+            f'<td class="num">{invoice_quantity(item.quantity)}</td>'
+            f'<td class="num">{float(item.unit_price or 0):,.2f}</td>'
+            f'<td class="num">{float(item.line_total or 0):,.2f}</td></tr>'
+            for item in invoice.items)
+    else:
+        rows = '<tr><td colspan="4" class="inv-muted">No lines on this invoice yet.</td></tr>'
+
+    totals = [('Subtotal', invoice.subtotal or 0, '')]
+    if (invoice.discount_amount or 0) > 0:
+        totals.append(('Discount', -(invoice.discount_amount or 0), ''))
+    if (invoice.tax_amount or 0) > 0:
+        totals.append((f'Tax ({float(invoice.tax_percent or 0):g}%)', invoice.tax_amount or 0, ''))
+    totals.append(('Total', invoice.total_amount or 0, 'inv-grand'))
+    if (invoice.amount_paid or 0) > 0:
+        totals.append(('Paid', -(invoice.amount_paid or 0), ''))
+        totals.append(('Balance due', invoice.balance_due, 'inv-balance'))
+    elif invoice.is_payable:
+        totals.append(('Balance due', invoice.balance_due, 'inv-balance'))
+    totals_rows = ''.join(
+        f'<tr class="{cls}"><td>{esc(label)}</td>'
+        f'<td>{invoice_money(value, currency)}</td></tr>'
+        for label, value, cls in totals)
+
+    status = invoice.status_display
+    issued = invoice.issued_at or invoice.created_at
+    meta = [('Invoice date', issued.strftime('%d %b %Y') if issued else '-')]
+    if invoice.due_date:
+        overdue = ' (overdue)' if invoice.is_overdue else ''
+        meta.append(('Due date', invoice.due_date.strftime('%d %b %Y') + overdue))
+    if invoice.reference:
+        meta.append(('Reference', invoice.reference))
+    if invoice.mpesa_receipt:
+        meta.append(('M-Pesa receipt', invoice.mpesa_receipt))
+    meta_rows = ''.join(f'<p><strong>{esc(label)}:</strong> {esc(str(value))}</p>'
+                        for label, value in meta)
+
+    blocks = ''
+    pay_block = '\n\n'.join(part for part in (brand['instructions'], brand['bank']) if part)
+    if pay_block:
+        blocks += (f'<div class="inv-note"><h3>How to pay</h3>{esc(pay_block)}</div>')
+    if invoice.notes:
+        blocks += f'<div class="inv-note"><h3>Notes</h3>{esc(invoice.notes)}</div>'
+    if invoice.terms:
+        blocks += f'<div class="inv-note"><h3>Terms</h3>{esc(invoice.terms)}</div>'
+
+    css = INVOICE_DOCUMENT_CSS if include_css else ''
+    return f"""{css}
+<div class="inv-doc">
+  {watermark}
+  <div class="inv-sheet">
+    <div class="inv-head">
+      <div class="inv-brand">
+        <img src="{esc(brand['logo'], quote=True)}" alt="{esc(brand['name'], quote=True)}">
+        <strong>{esc(brand['name'])}</strong>
+        <small>{esc(brand['email'])}</small>
+        <small>{esc(brand['phone'])}</small>
+      </div>
+      <div class="inv-title">
+        <h1>INVOICE</h1>
+        <div class="inv-no">{esc(invoice.invoice_number or '')}</div>
+        <span class="inv-pill {esc(status.replace(' ', '-'), quote=True)}">{esc(status)}</span>
+      </div>
+    </div>
+    <div class="inv-cols">
+      <div>
+        <h3>Billed to</h3>
+        <p><strong>{esc(invoice.client_name or '')}</strong>
+{esc(invoice.client_email or '')}
+{esc(invoice.client_phone or '')}
+{esc(invoice.client_address or '')}</p>
+      </div>
+      <div>
+        <h3>Details</h3>
+        {meta_rows}
+      </div>
+    </div>
+    {f'<h2 style="font-size:16px;margin:14px 0 0">{esc(invoice.title)}</h2>' if invoice.title else ''}
+    <table class="inv-items">
+      <thead><tr><th>Description</th><th class="num">Qty</th>
+      <th class="num">Unit</th><th class="num">Amount</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    <table class="inv-totals">{totals_rows}</table>
+    {blocks}
+    <div class="inv-foot">{esc(brand['footer'])}<br>
+      {esc(brand['name'])} &middot; {esc(brand['email'])} &middot; {esc(brand['phone'])}
+    </div>
+  </div>
+</div>
+"""
+
+
+def invoice_email_html(invoice, reminder=False):
+    """The emailed payment request.
+
+    Table markup with inline styles, not the hosted document: mail clients strip
+    ``position`` and most of a stylesheet, so the layered watermark cannot
+    survive the trip. The logo does, and the Pay button opens the watermarked
+    document itself - which is the copy the client keeps or prints.
+    """
+    brand = invoice_brand()
+    currency = invoice.currency or 'KES'
+    esc = html.escape
+    link = invoice_public_url(invoice)
+    due = invoice.due_date.strftime('%d %b %Y') if invoice.due_date else 'on receipt'
+
+    rows = ''.join(
+        f'<tr><td style="padding:8px 10px;border-bottom:1px solid #e8edf2">'
+        f'{esc(item.description or "")}'
+        f'<br><span style="color:#7b8590;font-size:12px">'
+        f'{invoice_quantity(item.quantity)} &times; {float(item.unit_price or 0):,.2f}</span></td>'
+        f'<td style="padding:8px 10px;border-bottom:1px solid #e8edf2;text-align:right;'
+        f'white-space:nowrap">{invoice_money(item.line_total, currency)}</td></tr>'
+        for item in invoice.items) or (
+        '<tr><td colspan="2" style="padding:8px 10px;color:#7b8590">'
+        'See the invoice for details.</td></tr>')
+
+    lead = ('This is a reminder that the invoice below is still open.' if reminder
+            else f'{esc(brand["name"])} has issued you the invoice below.')
+    extras = ''
+    if (invoice.amount_paid or 0) > 0:
+        extras = (f'<tr><td style="padding:4px 10px;color:#12703f">Already paid</td>'
+                  f'<td style="padding:4px 10px;text-align:right;color:#12703f">'
+                  f'-{invoice_money(invoice.amount_paid, currency)}</td></tr>')
+    pay_note = '\n\n'.join(part for part in (brand['instructions'], brand['bank']) if part)
+
+    return f"""
+<div style="background:#f4f6f8;padding:22px 10px;font-family:-apple-system,'Segoe UI',
+Roboto,Helvetica,Arial,sans-serif;color:#16202a">
+ <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+  style="max-width:620px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden">
+  <tr><td style="background:#0b6b3a;padding:20px;text-align:center">
+    <img src="{esc(brand['logo'], quote=True)}" alt="{esc(brand['name'], quote=True)}"
+     width="130" style="max-width:130px;height:auto;display:inline-block">
+    <div style="color:#dff3e7;letter-spacing:4px;font-size:13px;margin-top:8px">INVOICE</div>
+  </td></tr>
+  <tr><td style="padding:22px">
+    <p style="margin:0 0 4px">Hello {esc(invoice.client_name or 'there')},</p>
+    <p style="margin:0 0 16px;color:#48535f">{lead}</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+     style="background:#f6f8fa;border-radius:8px;margin-bottom:16px">
+      <tr><td style="padding:12px 14px">
+        <strong>{esc(invoice.invoice_number or '')}</strong>
+        {f'<br>{esc(invoice.title)}' if invoice.title else ''}
+        <br><span style="color:#7b8590;font-size:13px">Due {esc(due)}</span>
+      </td>
+      <td style="padding:12px 14px;text-align:right">
+        <span style="font-size:22px;font-weight:800;color:#0b6b3a;white-space:nowrap">
+        {invoice_money(invoice.balance_due, currency)}</span>
+        <br><span style="color:#7b8590;font-size:12px">amount due</span>
+      </td></tr>
+    </table>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+     style="border-collapse:collapse;font-size:14px">{rows}
+      <tr><td style="padding:8px 10px">Total</td>
+        <td style="padding:8px 10px;text-align:right;white-space:nowrap">
+        {invoice_money(invoice.total_amount, currency)}</td></tr>
+      {extras}
+      <tr><td style="padding:9px 10px;border-top:2px solid #0b6b3a;font-weight:800">
+        Balance due</td>
+        <td style="padding:9px 10px;border-top:2px solid #0b6b3a;text-align:right;
+        font-weight:800;white-space:nowrap">{invoice_money(invoice.balance_due, currency)}</td></tr>
+    </table>
+    <p style="text-align:center;margin:24px 0 10px">
+      <a href="{esc(link, quote=True)}" style="background:#0b6b3a;color:#fff;
+       text-decoration:none;padding:13px 30px;border-radius:8px;font-weight:700;
+       display:inline-block">View &amp; pay this invoice</a>
+    </p>
+    <p style="text-align:center;margin:0 0 6px;font-size:12px;color:#7b8590">
+      Or open: <a href="{esc(link, quote=True)}" style="color:#0b6b3a">{esc(link)}</a>
+    </p>
+    {f'<div style="margin-top:18px;padding:12px 14px;background:#f6f8fa;border-radius:8px;white-space:pre-line;font-size:13px"><strong>How to pay</strong><br>{esc(pay_note)}</div>' if pay_note else ''}
+    {f'<p style="margin-top:16px;font-size:13px;color:#48535f;white-space:pre-line">{esc(invoice.terms)}</p>' if invoice.terms else ''}
+  </td></tr>
+  <tr><td style="padding:14px 20px;background:#f4f6f8;text-align:center;color:#67727e;
+   font-size:12px">
+    {esc(brand['footer'])}<br>{esc(brand['name'])} &middot; {esc(brand['email'])}
+    &middot; {esc(brand['phone'])}
+  </td></tr>
+ </table>
+</div>
+"""
+
+
+def send_invoice_email(invoice, reminder=False):
+    """Queue the payment request. Returns True when it was accepted for delivery.
+
+    Nothing here writes the send counters unless the queue took it, so a provider
+    outage shows as a send that did not happen rather than one that silently did.
+    """
+    if not invoice.client_email:
+        return False
+    label = 'Payment reminder' if reminder else 'Invoice'
+    subject = (f'{label} {invoice.invoice_number} - '
+               f'{invoice_money(invoice.balance_due, invoice.currency)} due')
+    if not send_email(invoice.client_email, subject, invoice_email_html(invoice, reminder=reminder)):
+        return False
+    invoice.email_sent_count = (invoice.email_sent_count or 0) + 1
+    invoice.last_email_at = utcnow()
+    invoice.sent_at = invoice.sent_at or utcnow()
+    return True
+
+
+def apply_invoice_form(invoice, creating=False):
+    """Read the shared invoice form into the row. Returns an error string or ''."""
+    invoice.client_name = (request.form.get('client_name', '') or '').strip()[:160]
+    invoice.client_email = normalize_email(request.form.get('client_email', ''))[:160]
+    invoice.client_phone = (request.form.get('client_phone', '') or '').strip()[:30]
+    invoice.client_address = (request.form.get('client_address', '') or '').strip()[:600]
+    invoice.title = (request.form.get('title', '') or '').strip()[:200]
+    invoice.reference = (request.form.get('reference', '') or '').strip()[:80]
+    invoice.notes = (request.form.get('notes', '') or '').strip()[:2000]
+    invoice.terms = (request.form.get('terms', '') or '').strip()[:2000]
+    invoice.discount_amount = form_float('discount_amount', 0, minimum=0)
+    invoice.tax_percent = form_float('tax_percent', float(Setting.get('invoice_tax_percent', '0') or 0),
+                                     minimum=0, maximum=100)
+    if not invoice.client_name:
+        return 'The client needs a name on the invoice.'
+    if not invoice.client_email or '@' not in invoice.client_email:
+        return 'A valid client email is required - the payment request is sent there.'
+
+    due_raw = (request.form.get('due_date', '') or '').strip()
+    if due_raw:
+        try:
+            invoice.due_date = datetime.strptime(due_raw, '%Y-%m-%d').date()
+        except ValueError:
+            return 'Enter the due date as YYYY-MM-DD.'
+    elif creating:
+        days = form_int('due_days', int(Setting.get('invoice_default_due_days', '7') or 7),
+                        minimum=0, maximum=365)
+        invoice.due_date = (utcnow() + timedelta(days=days)).date()
+
+    # Link the row to an account when one already uses this email, so the client
+    # sees the invoice in their notifications too. Never created here: an invoice
+    # must not be able to mint a user.
+    if not invoice.client_id:
+        existing = User.query.filter(func.lower(User.email) == invoice.client_email.lower()).first()
+        if existing:
+            invoice.client_id = existing.id
+
+    descriptions = request.form.getlist('line_description')
+    quantities = request.form.getlist('line_quantity')
+    prices = request.form.getlist('line_price')
+    if len(descriptions) > INVOICE_MAX_LINES:
+        return f'An invoice can carry at most {INVOICE_MAX_LINES} lines.'
+
+    def as_number(values, index, default):
+        try:
+            return float((values[index] if index < len(values) else '') or default)
+        except (TypeError, ValueError):
+            return default
+
+    kept = []
+    for index, description in enumerate(descriptions):
+        text_value = (description or '').strip()
+        if not text_value:
+            continue  # A blank row is the admin skipping a line, not an error.
+        kept.append(InvoiceItem(
+            description=text_value[:300],
+            quantity=max(0.0, as_number(quantities, index, 1.0)),
+            unit_price=max(0.0, as_number(prices, index, 0.0)),
+            sort_order=len(kept)))
+    if not kept:
+        return 'Add at least one line with a description.'
+
+    invoice.items = kept
+    recalculate_invoice(invoice)
+    if (invoice.total_amount or 0) <= 0:
+        return 'The invoice total is zero - there is nothing for the client to pay.'
+    return ''
+
+
+@app.route('/admin/invoices')
+@login_required
+@invoice_required
+def admin_invoices():
+    """The invoicing desk. Whole book, not per-issuer: an invoice chased by
+    whoever is at the desk is the point of having a desk."""
+    status = (request.args.get('status', '') or '').strip().lower()
+    search = (request.args.get('q', '') or '').strip()
+    page = max(1, request.args.get('page', 1, type=int) or 1)
+
+    query = Invoice.query
+    if status in INVOICE_STATUSES:
+        query = query.filter(Invoice.status == status)
+    elif status == 'overdue':
+        query = query.filter(Invoice.due_date < utcnow().date(),
+                             Invoice.status.notin_(('paid', 'cancelled', 'draft')))
+    if search:
+        like = f'%{search}%'
+        query = query.filter(or_(Invoice.invoice_number.ilike(like),
+                                 Invoice.client_name.ilike(like),
+                                 Invoice.client_email.ilike(like),
+                                 Invoice.reference.ilike(like)))
+    # Paginated, never .all(): this table only grows, and the desk is an admin
+    # page that would otherwise load every invoice ever raised on every visit.
+    invoices = query.order_by(Invoice.created_at.desc()).paginate(
+        page=page, per_page=INVOICE_PAGE_SIZE, error_out=False)
+
+    # Two aggregates in the database rather than a sum over the rows in Python,
+    # which would only ever total the page being shown.
+    billed, collected = db.session.query(
+        func.coalesce(func.sum(Invoice.total_amount), 0.0),
+        func.coalesce(func.sum(Invoice.amount_paid), 0.0)
+    ).filter(Invoice.status.notin_(('draft', 'cancelled'))).first()
+    overdue_count = Invoice.query.filter(
+        Invoice.due_date < utcnow().date(),
+        Invoice.status.notin_(('paid', 'cancelled', 'draft'))).count()
+
+    return render_template('admin/invoices.html', invoices=invoices, status=status,
+                           search=search, billed=float(billed or 0),
+                           collected=float(collected or 0),
+                           outstanding=float(billed or 0) - float(collected or 0),
+                           overdue_count=overdue_count, statuses=INVOICE_STATUSES)
+
+
+@app.route('/admin/invoices/new', methods=['GET', 'POST'])
+@login_required
+@invoice_required
+@limiter.limit(INVOICE_RATE_LIMIT, methods=['POST'])
+def admin_invoice_new():
+    if request.method == 'POST':
+        invoice = Invoice(issued_by_id=current_user.id,
+                         invoice_number=next_invoice_number(),
+                         public_token=generate_invoice_token(),
+                         currency='KES', status='draft')
+        error = apply_invoice_form(invoice, creating=True)
+        if error:
+            flash(error, 'danger')
+            return render_template('admin/invoice_form.html', invoice=None,
+                                   form=request.form,
+                                   default_terms=Setting.get('invoice_default_terms', ''),
+                                   default_due_days=Setting.get('invoice_default_due_days', '7'),
+                                   default_tax=Setting.get('invoice_tax_percent', '0'))
+        db.session.add(invoice)
+        send_now = request.form.get('send_now') == '1'
+        if send_now:
+            invoice.status = 'sent'
+            invoice.issued_at = utcnow()
+        try:
+            db.session.commit()
+        except IntegrityError:
+            # invoice_number and public_token are both unique. Losing that race is
+            # rare and entirely recoverable, so retry once with fresh values
+            # rather than showing the admin a 500 on a filled-in form.
+            db.session.rollback()
+            invoice.invoice_number = next_invoice_number()
+            invoice.public_token = generate_invoice_token()
+            db.session.add(invoice)
+            db.session.commit()
+        if send_now:
+            if send_invoice_email(invoice):
+                db.session.commit()
+                flash(f'{invoice.invoice_number} sent to {invoice.client_email}.', 'success')
+            else:
+                invoice.status = 'draft'
+                invoice.issued_at = None
+                db.session.commit()
+                flash('The invoice was saved but the email could not be queued. '
+                      'Check the mail settings and use Send again.', 'warning')
+        else:
+            flash(f'{invoice.invoice_number} saved as a draft.', 'success')
+        return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+
+    return render_template('admin/invoice_form.html', invoice=None, form={},
+                           default_terms=Setting.get('invoice_default_terms', ''),
+                           default_due_days=Setting.get('invoice_default_due_days', '7'),
+                           default_tax=Setting.get('invoice_tax_percent', '0'))
+
+
+@app.route('/admin/invoices/<int:invoice_id>', methods=['GET', 'POST'])
+@login_required
+@invoice_required
+def admin_invoice_detail(invoice_id):
+    invoice = Invoice.query.get_or_404(invoice_id)
+    if request.method == 'POST':
+        if invoice.status in ('paid', 'cancelled'):
+            flash('A settled or cancelled invoice cannot be edited. Raise a new one.', 'warning')
+            return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+        error = apply_invoice_form(invoice)
+        if error:
+            flash(error, 'danger')
+        else:
+            refresh_invoice_payment_state(invoice)
+            db.session.commit()
+            flash('Invoice updated. Send it again so the client sees the change.', 'success')
+        return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+
+    return render_template('admin/invoice_detail.html', invoice=invoice,
+                           document=invoice_document_html(invoice),
+                           public_url=invoice_public_url(invoice))
+
+
+@app.route('/admin/invoices/<int:invoice_id>/send', methods=['POST'])
+@login_required
+@invoice_required
+@limiter.limit(INVOICE_RATE_LIMIT)
+def admin_invoice_send(invoice_id):
+    invoice = Invoice.query.get_or_404(invoice_id)
+    if invoice.status == 'cancelled':
+        flash('That invoice is cancelled.', 'warning')
+        return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+    if invoice.is_settled:
+        flash('That invoice is already paid in full.', 'info')
+        return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+
+    reminder = invoice.status not in ('draft',) and (invoice.email_sent_count or 0) > 0
+    if invoice.status == 'draft':
+        invoice.status = 'sent'
+        invoice.issued_at = invoice.issued_at or utcnow()
+    if send_invoice_email(invoice, reminder=reminder):
+        db.session.commit()
+        flash(f'Payment request emailed to {invoice.client_email}.', 'success')
+    else:
+        db.session.rollback()
+        flash('The email could not be queued. Check the mail settings in admin settings.', 'danger')
+    return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+
+
+@app.route('/admin/invoices/<int:invoice_id>/cancel', methods=['POST'])
+@login_required
+@invoice_required
+def admin_invoice_cancel(invoice_id):
+    invoice = Invoice.query.get_or_404(invoice_id)
+    if (invoice.amount_paid or 0) > 0:
+        flash('Money has already been received against this invoice. '
+              'Refund and reconcile it instead of cancelling.', 'danger')
+        return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+    invoice.status = 'cancelled'
+    invoice.cancelled_at = utcnow()
+    db.session.commit()
+    flash(f'{invoice.invoice_number} cancelled. The pay link no longer works.', 'success')
+    return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+
+
+@app.route('/admin/invoices/<int:invoice_id>/record-payment', methods=['POST'])
+@login_required
+@invoice_required
+def admin_invoice_record_payment(invoice_id):
+    """Book a payment that arrived outside the platform - cash, bank, till."""
+    invoice = Invoice.query.get_or_404(invoice_id)
+    if invoice.status == 'cancelled':
+        flash('That invoice is cancelled.', 'warning')
+        return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+    amount = form_float('amount', 0, minimum=0)
+    if amount <= 0:
+        flash('Enter the amount received.', 'danger')
+        return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+    method = (request.form.get('method', 'cash') or 'cash').strip()[:30]
+    db.session.add(InvoicePayment(
+        invoice_id=invoice.id, amount=round(amount, 2), method=method, status='success',
+        mpesa_receipt=(request.form.get('receipt', '') or '').strip()[:50],
+        note=(request.form.get('note', '') or '').strip()[:255],
+        recorded_by_id=current_user.id))
+    db.session.flush()
+    invoice.payment_method = invoice.payment_method or method
+    refresh_invoice_payment_state(invoice)
+    db.session.commit()
+    flash(f'{invoice_money(amount, invoice.currency)} recorded. '
+          f'Balance {invoice_money(invoice.balance_due, invoice.currency)}.', 'success')
+    return redirect(url_for('admin_invoice_detail', invoice_id=invoice.id))
+
+
+@app.route('/admin/invoices/<int:invoice_id>/print')
+@login_required
+@invoice_required
+def admin_invoice_print(invoice_id):
+    invoice = Invoice.query.get_or_404(invoice_id)
+    return render_template('invoice_print.html', invoice=invoice,
+                           document=invoice_document_html(invoice))
+
+
+@app.route('/admin/users/<int:user_id>/invoice-agent', methods=['POST'])
+@login_required
+@mvp_required
+def admin_toggle_invoice_agent(user_id):
+    """Assign an admin to the invoicing desk. MVP only."""
+    user = User.query.get_or_404(user_id)
+    if not user.is_admin:
+        flash('Only admins can be invoice agents.', 'danger')
+        return redirect(request.referrer or url_for('admin_users'))
+    user.invoice_agent = not bool(user.invoice_agent)
+    db.session.commit()
+    flash(f'{user.username} is {"now" if user.invoice_agent else "no longer"} '
+          f'an invoice agent.', 'success')
+    return redirect(request.referrer or url_for('admin_users'))
+
+
+# ---- The client's side. Token-addressed, so it works without an account. ----
+
+def invoice_by_token(token):
+    """Look up by token, and never leak whether a token merely expired.
+
+    A 404 for cancelled as well as unknown, because distinguishing them tells an
+    address-guesser that they found a real invoice.
+    """
+    invoice = Invoice.query.filter_by(public_token=(token or '').strip()).first()
+    if not invoice or invoice.status in ('draft', 'cancelled'):
+        abort(404)
+    return invoice
+
+
+@app.route('/invoice/<token>')
+@limiter.limit(INVOICE_VIEW_RATE_LIMIT)
+def invoice_public(token):
+    invoice = invoice_by_token(token)
+    # First open is worth recording: an admin chasing a client should be able to
+    # tell "never opened it" from "opened it and did not pay". One write on the
+    # first view only, so a client refreshing the page is not a write per refresh.
+    if invoice.status == 'sent' and not invoice.viewed_at:
+        invoice.viewed_at = utcnow()
+        invoice.status = 'viewed'
+        db.session.commit()
+    return render_template('invoice_public.html', invoice=invoice,
+                           document=invoice_document_html(invoice),
+                           whatsapp_url=support_whatsapp_url(
+                               f'Hello, I have a question about invoice {invoice.invoice_number}.'))
+
+
+@app.route('/invoice/<token>/print')
+@limiter.limit(INVOICE_VIEW_RATE_LIMIT)
+def invoice_public_print(token):
+    invoice = invoice_by_token(token)
+    return render_template('invoice_print.html', invoice=invoice,
+                           document=invoice_document_html(invoice))
+
+
+@app.route('/invoice/<token>/pay', methods=['POST'])
+@limiter.limit(INVOICE_PAY_RATE_LIMIT)
+def invoice_pay(token):
+    """Send an M-Pesa STK push for the outstanding balance."""
+    invoice = invoice_by_token(token)
+    if not invoice.is_payable:
+        return jsonify({'success': False, 'error': 'This invoice is already settled.'}), 400
+    phone = valid_mpesa_msisdn(request.form.get('phone', '') or invoice.client_phone or '')
+    if not phone:
+        return jsonify({'success': False,
+                        'error': 'Enter a valid Safaricom number such as 07XXXXXXXX.'}), 400
+    amount = round(invoice.balance_due, 2)
+    if amount < 1:
+        return jsonify({'success': False, 'error': 'Nothing left to pay on this invoice.'}), 400
+
+    # AccountReference is what shows on the client's M-Pesa statement, and Daraja
+    # truncates it to 12 characters - so a short id rather than the full
+    # SMK-INV-YYYYMMDD-NNNNN, which would truncate to just the date.
+    result = stk_push(phone, amount, f'INV{invoice.id}')
+    if not result.get('success'):
+        return jsonify({'success': False,
+                        'error': result.get('error') or 'M-Pesa is not reachable right now.'}), 502
+
+    checkout_id = str(result.get('checkout_request_id') or '')
+    db.session.add(InvoicePayment(
+        invoice_id=invoice.id, amount=amount, method='mpesa', status='pending',
+        checkout_request_id=checkout_id, phone=phone))
+    invoice.checkout_request_id = checkout_id
+    invoice.client_phone = invoice.client_phone or phone
+    db.session.commit()
+    return jsonify({'success': True, 'checkout_request_id': checkout_id,
+                    'message': 'Check your phone and enter your M-Pesa PIN.'})
+
+
+@app.route('/invoice/<token>/status')
+@limiter.limit(INVOICE_VIEW_RATE_LIMIT)
+def invoice_status(token):
+    """Poll from the pay page. Reads the row the callback writes - it never asks
+    Safaricom, so a client refreshing costs one indexed read, not an API call."""
+    invoice = invoice_by_token(token)
+    latest = (InvoicePayment.query.filter_by(invoice_id=invoice.id)
+              .order_by(InvoicePayment.created_at.desc()).first())
+    return jsonify({
+        'status': invoice.status,
+        'settled': invoice.is_settled,
+        'balance_due': invoice.balance_due,
+        'amount_paid': invoice.amount_paid or 0,
+        'payment_status': latest.status if latest else '',
+        'receipt': (latest.mpesa_receipt or '') if latest else '',
+        'note': (latest.note or '') if latest else '',
+    })
 
 
 # --- 8. Vendor Onboarding Fee ---
@@ -18253,6 +20784,13 @@ def phase_two_schema_spec():
             ('seller_rating', 'seller_rating FLOAT DEFAULT 0'),
             ('seller_rating_notes', 'seller_rating_notes TEXT'),
             ('verified_seller_badge_enabled', 'verified_seller_badge_enabled BOOLEAN DEFAULT 1'),
+            # Service linking desk. duty is the admin's own switch; agent is the
+            # MVP's nomination. invoice_agent is a separate trust: billing a client
+            # is not the same permission as introducing one.
+            ('service_duty_on', 'service_duty_on BOOLEAN DEFAULT 0'),
+            ('service_duty_since', 'service_duty_since DATETIME'),
+            ('service_linking_agent', 'service_linking_agent BOOLEAN DEFAULT 0'),
+            ('invoice_agent', 'invoice_agent BOOLEAN DEFAULT 0'),
         ],
         'products': [
             ('seller_id', 'seller_id INTEGER'),
@@ -18427,6 +20965,25 @@ def phase_two_schema_spec():
             ('device_remote_payload', 'device_remote_payload TEXT'),
             ('device_status_note', 'device_status_note TEXT'),
         ],
+        # A service is hired through an admin, so the listing carries where the
+        # provider is, whether they collect, and a phone number only admins see.
+        # All nullable: rows written before the services rebuild stay valid.
+        'service_listings': [
+            ('service_key', 'service_key VARCHAR(60)'),
+            ('provider_phone', 'provider_phone VARCHAR(30)'),
+            ('location_label', 'location_label VARCHAR(200)'),
+            ('location_county', 'location_county VARCHAR(100)'),
+            ('location_lat', 'location_lat FLOAT'),
+            ('location_lng', 'location_lng FLOAT'),
+            ('pickup_required', 'pickup_required BOOLEAN DEFAULT 0'),
+            ('pickup_is_free', 'pickup_is_free BOOLEAN DEFAULT 0'),
+            ('pickup_cost', 'pickup_cost FLOAT DEFAULT 0'),
+            ('pickup_eta', 'pickup_eta VARCHAR(60)'),
+            ('pickup_via_platform', 'pickup_via_platform BOOLEAN DEFAULT 0'),
+            ('listing_fee_amount', 'listing_fee_amount FLOAT DEFAULT 0'),
+            ('listing_fee_paid', 'listing_fee_paid BOOLEAN DEFAULT 0'),
+            ('is_admin_listing', 'is_admin_listing BOOLEAN DEFAULT 0'),
+        ],
     }
     index_specs = [
         ('ix_users_email_active', 'users', 'email, is_active', False),
@@ -18478,6 +21035,24 @@ def phase_two_schema_spec():
         ('ix_outbound_status_next_attempt', 'outbound_messages', 'status, next_attempt_at', False),
         ('ix_outbound_channel_status', 'outbound_messages', 'channel, status', False),
         ('ix_outbound_created', 'outbound_messages', 'created_at', False),
+        # Services. The category tile is the entry point to the whole services
+        # page, so filtering on it must not scan a table that grows with every
+        # provider who signs up.
+        ('ix_service_listings_active_key', 'service_listings', 'is_active, service_key', False),
+        ('ix_service_listings_key_orders', 'service_listings', 'service_key, orders_completed', False),
+        ('ix_service_catalogue_active_order', 'service_catalogue_items', 'is_active, sort_order', False),
+        ('ix_service_requests_status_created', 'service_link_requests', 'status, created_at', False),
+        ('ix_service_requests_client_created', 'service_link_requests', 'client_id, created_at', False),
+        ('ix_service_requests_service_created', 'service_link_requests', 'service_id, created_at', False),
+        ('ix_service_messages_request_created', 'service_link_messages', 'request_id, created_at', False),
+        # Invoices. The client's pay page is reached by token and the admin list is
+        # filtered by status and due date, so both are indexed rather than scanned.
+        ('ix_invoices_status_due', 'invoices', 'status, due_date', False),
+        ('ix_invoices_client_created', 'invoices', 'client_id, created_at', False),
+        ('ix_invoices_issuer_created', 'invoices', 'issued_by_id, created_at', False),
+        ('ix_invoices_email_created', 'invoices', 'client_email, created_at', False),
+        ('ix_invoice_items_invoice_order', 'invoice_items', 'invoice_id, sort_order', False),
+        ('ix_invoice_payments_invoice_created', 'invoice_payments', 'invoice_id, created_at', False),
     ]
     return columns, index_specs
 
@@ -19062,6 +21637,22 @@ def init_database():
         'premium_support_fee': '200',
         'vendor_onboarding_standard_fee': '1000',
         'vendor_onboarding_premium_fee': '3000',
+        # Services. The WhatsApp number was hardcoded in six places; the default is
+        # that same number, so nothing changes until an admin edits it here.
+        'support_whatsapp_number': '0708615309',
+        # Off: clients reach providers through an admin and listing is free. Turning
+        # it on is what makes listing paid at service_listing_fee_kes.
+        'service_direct_contact_enabled': '0',
+        'service_listing_fee_kes': '0',
+        'service_requests_enabled': '1',
+        # Invoices. Bank details are blank by default rather than invented - an
+        # invoice showing a wrong account is worse than one showing none.
+        'invoice_payment_instructions': '',
+        'invoice_bank_details': '',
+        'invoice_default_terms': 'Payment due within 7 days of the invoice date.',
+        'invoice_default_due_days': '7',
+        'invoice_tax_percent': '0',
+        'invoice_footer_note': 'Thank you for your business.',
     }
 
     for key, value in defaults.items():
@@ -19103,6 +21694,23 @@ def init_database():
     for name, slug in default_categories:
         if not Category.query.filter_by(slug=slug).first():
             db.session.add(Category(name=name, slug=slug))
+
+    # The service catalogue, seeded once and then owned by the admin. Only missing
+    # keys are inserted, so an admin who renames "Laundry", changes its emoji or
+    # takes it off the seller list is not overwritten on the next boot.
+    #
+    # Seeded seller_listable=True. The column defaults to False - opt-in is right
+    # for a service an admin adds later - but shipping all eighteen switched off
+    # would mean no seller could list anything until someone found this page, which
+    # reads as a broken feature rather than a deliberate gate. The admin narrows the
+    # list from here.
+    for order, (key, label, emoji) in enumerate(DEFAULT_SERVICE_CATALOGUE, start=1):
+        if not ServiceCatalogueItem.query.filter_by(key=key).first():
+            db.session.add(ServiceCatalogueItem(
+                key=key, label=label, emoji=emoji, seller_listable=True,
+                is_active=True, sort_order=order * 10))
+    db.session.commit()
+    invalidate_service_caches()
 
     default_manufacturers = [
         {
@@ -19418,6 +22026,10 @@ def before_request():
             'is_admin': bool(getattr(current_user, 'is_admin', False)),
             'admin_level': getattr(current_user, 'admin_level', '') or '',
             'username': getattr(current_user, 'username', '') or '',
+            # Read into the nav dict rather than touched on current_user in the
+            # template: base.html renders on every page, and a plain dict lookup
+            # cannot emit a query no matter what an admin menu does with it.
+            'service_duty_on': bool(getattr(current_user, 'service_duty_on', False)),
         }
     except Exception:
         g.auth_user = {
@@ -19425,6 +22037,7 @@ def before_request():
             'is_admin': False,
             'admin_level': '',
             'username': '',
+            'service_duty_on': False,
         }
     if request.is_secure or request.headers.get('X-Forwarded-Proto', 'http') == 'https':
         pass
@@ -19432,8 +22045,10 @@ def before_request():
 
 # The pages that legitimately read the device's position. Marked on the view
 # itself rather than sniffed from the path, so a route rename cannot quietly
-# re-block the driver's GPS.
-for _view in (driver_console, admin_dispatch, track_order):
+# re-block the driver's GPS. create_service is here because a provider who leaves
+# the address blank is relying on the browser to say where they are, and Talisman's
+# site-wide geolocation=() would otherwise refuse the prompt with no visible reason.
+for _view in (driver_console, admin_dispatch, track_order, create_service):
     allows_geolocation(_view)
 
 

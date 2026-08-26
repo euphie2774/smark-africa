@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+{#
+  The client's copy. Deliberately standalone rather than extending base.html: the
+  person opening this arrived from an email, may have no account, and is here to
+  read one document and pay it. A full site nav on that page is noise, and the
+  page has to render fast on a phone on mobile data.
+#}
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow,noarchive">
+    <title>{{ invoice.invoice_number }} — {{ invoice.client_name }}</title>
+    <link rel="icon" href="{{ url_for('static', filename='images/smark-africa-logo.png') }}">
+    <style>
+        *{box-sizing:border-box}
+        body{margin:0;padding:22px 12px 40px;background:#eef1f4;color:#16202a;
+             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+             font-size:15px;line-height:1.5}
+        .wrap{max-width:880px;margin:0 auto}
+        .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;
+             margin-bottom:14px}
+        .bar .who{font-size:13px;color:#5b6672}
+        .btn{display:inline-block;border:0;border-radius:8px;padding:11px 20px;font-weight:700;
+             font-size:14px;cursor:pointer;text-decoration:none;text-align:center}
+        .btn-primary{background:#0b6b3a;color:#fff}
+        .btn-primary:disabled{background:#8fb8a1;cursor:not-allowed}
+        .btn-ghost{background:#fff;color:#0b6b3a;border:1px solid #cdd8d2}
+        .panel{background:#fff;border-radius:12px;padding:20px;margin-bottom:16px;
+               border:1px solid #dfe5ec}
+        .panel h2{margin:0 0 4px;font-size:17px}
+        .panel p.sub{margin:0 0 14px;color:#5b6672;font-size:13.5px}
+        .due{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:baseline;margin-bottom:14px}
+        .due .amt{font-size:30px;font-weight:800;color:#0b6b3a}
+        .due .lbl{font-size:12px;text-transform:uppercase;letter-spacing:1.2px;color:#7b8590}
+        .row{display:flex;flex-wrap:wrap;gap:10px}
+        .row input{flex:1 1 200px;min-width:0;padding:11px 13px;border:1px solid #cdd5dd;
+                   border-radius:8px;font-size:15px;font-family:inherit}
+        .msg{margin-top:12px;padding:11px 13px;border-radius:8px;font-size:14px;display:none}
+        .msg.show{display:block}
+        .msg.info{background:#e8f0fd;color:#17458f}
+        .msg.good{background:#e2f5e9;color:#12703f}
+        .msg.bad{background:#fdecec;color:#a51d1d}
+        .paid{background:#e2f5e9;border-color:#b6e0c6;color:#12703f}
+        .paid h2{color:#12703f}
+        .fine{font-size:12px;color:#7b8590;margin:10px 0 0}
+        .help{text-align:center;font-size:13px;color:#5b6672;margin-top:18px}
+        .help a{color:#0b6b3a}
+        @media (max-width:600px){
+            body{padding:12px 0 34px;background:#fff}
+            .wrap{max-width:100%}
+            .bar,.help{padding:0 14px}
+            .panel{border-radius:0;border-left:0;border-right:0;margin-bottom:12px}
+            .due .amt{font-size:26px}
+            .row input,.row .btn{flex:1 1 100%}
+        }
+        @media print{
+            body{background:#fff;padding:0}
+            .bar,.panel:not(.doc),.help{display:none !important}
+        }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <div class="bar">
+        <span class="who">Invoice for <strong>{{ invoice.client_name }}</strong></span>
+        <a class="btn btn-ghost" href="{{ url_for('invoice_public_print', token=invoice.public_token) }}"
+           target="_blank" rel="noopener">Print / save as PDF</a>
+    </div>
+
+    {% if invoice.is_settled %}
+    <div class="panel paid">
+        <h2>Paid in full — thank you</h2>
+        <p class="sub" style="color:#12703f">
+            {{ invoice.invoice_number }} was settled
+            {% if invoice.paid_at %}on {{ invoice.paid_at.strftime('%d %b %Y') }}{% endif %}.
+            {% if invoice.mpesa_receipt %}M-Pesa receipt <strong>{{ invoice.mpesa_receipt }}</strong>.{% endif %}
+            Keep this page or print it as your record.
+        </p>
+    </div>
+    {% elif invoice.is_payable %}
+    <div class="panel" id="payPanel">
+        <h2>Pay this invoice</h2>
+        <p class="sub">
+            Enter your M-Pesa number and we will send a payment prompt to your phone.
+            {% if invoice.is_overdue %}
+            <strong style="color:#a51d1d">This invoice is past its due date.</strong>
+            {% endif %}
+        </p>
+        <div class="due">
+            <span class="amt" id="dueAmount">{{ invoice.currency or 'KES' }} {{ '{:,.2f}'.format(invoice.balance_due) }}</span>
+            <span class="lbl">amount due</span>
+        </div>
+        <form id="payForm" class="row" autocomplete="on">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+            <input name="phone" type="tel" inputmode="numeric" placeholder="07XXXXXXXX"
+                   value="{{ invoice.client_phone or '' }}" required aria-label="M-Pesa phone number">
+            <button class="btn btn-primary" type="submit" id="payBtn">Pay with M-Pesa</button>
+        </form>
+        <div class="msg" id="payMsg" role="status" aria-live="polite"></div>
+        <p class="fine">
+            You will be asked for your M-Pesa PIN on your own phone. Nobody from
+            {{ invoice.issued_by.username if invoice.issued_by else 'this platform' }}
+            will ever ask you for that PIN.
+        </p>
+    </div>
+    {% endif %}
+
+    <div class="panel doc" style="padding:0;border:0;background:transparent">
+        {{ document|safe }}
+    </div>
+
+    <p class="help">
+        Something not right on this invoice?
+        <a href="{{ whatsapp_url }}" target="_blank" rel="noopener">Message us on WhatsApp</a>
+        and quote {{ invoice.invoice_number }}.
+    </p>
+</div>
+
+<script>
+(function () {
+    var form = document.getElementById('payForm');
+    if (!form) { return; }
+    var button = document.getElementById('payBtn');
+    var message = document.getElementById('payMsg');
+    var polls = 0;
+    var timer = null;
+
+    function say(text, kind) {
+        message.className = 'msg show ' + kind;
+        message.textContent = text;
+    }
+
+    function stop() {
+        if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    // Polls the row the M-Pesa callback writes, never Safaricom - so a client
+    // staring at this page costs one indexed read every four seconds, and gives
+    // up after two minutes rather than polling forever on a closed tab.
+    function watch() {
+        polls = 0;
+        stop();
+        timer = setInterval(function () {
+            polls += 1;
+            if (polls > 30) {
+                stop();
+                say('We have not seen the payment yet. If you completed it, refresh this page ' +
+                    'in a minute — M-Pesa can take a moment to confirm.', 'info');
+                button.disabled = false;
+                return;
+            }
+            fetch('{{ url_for("invoice_status", token=invoice.public_token) }}',
+                  {headers: {'Accept': 'application/json'}})
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    if (data.settled) {
+                        stop();
+                        say('Payment received. Thank you — reloading your receipt.', 'good');
+                        setTimeout(function () { window.location.reload(); }, 1200);
+                    } else if (data.payment_status === 'failed') {
+                        stop();
+                        say(data.note || 'The payment was not completed. You can try again.', 'bad');
+                        button.disabled = false;
+                    } else if (data.amount_paid > 0) {
+                        document.getElementById('dueAmount').textContent =
+                            '{{ invoice.currency or "KES" }} ' + Number(data.balance_due).toFixed(2);
+                    }
+                })
+                .catch(function () { /* a dropped poll is not worth an error to the client */ });
+        }, 4000);
+    }
+
+    form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        button.disabled = true;
+        say('Sending the prompt to your phone…', 'info');
+        fetch('{{ url_for("invoice_pay", token=invoice.public_token) }}',
+              {method: 'POST', body: new FormData(form)})
+            .then(function (response) {
+                return response.json().then(function (data) { return {ok: response.ok, data: data}; });
+            })
+            .then(function (result) {
+                if (result.ok && result.data.success) {
+                    say(result.data.message || 'Check your phone and enter your M-Pesa PIN.', 'info');
+                    watch();
+                } else {
+                    say(result.data.error || 'That did not go through. Please try again.', 'bad');
+                    button.disabled = false;
+                }
+            })
+            .catch(function () {
+                say('We could not reach the payment service. Check your connection and try again.', 'bad');
+                button.disabled = false;
+            });
+    });
+
+    window.addEventListener('beforeunload', stop);
+})();
+</script>
+</body>
+</html>

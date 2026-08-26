@@ -678,6 +678,37 @@ footer a:hover {
     bottom: 25px;
 }
 
+/* Trusted is the third pill that can land in the bottom-left corner. These
+   sibling rules are deterministic because _badges.html always emits the seals in
+   one order - Original, Verified, Trusted - so "how many seals precede me" is the
+   same question as "how high do I sit". The two-predecessor rule is more specific,
+   so it wins over the one-predecessor rule when both match. */
+.trusted-seller-seal {
+    background: #6b3fa0;
+}
+
+.authenticity-seal ~ .trusted-seller-seal {
+    bottom: 25px;
+}
+
+.authenticity-seal ~ .authenticity-seal ~ .trusted-seller-seal {
+    bottom: 44px;
+}
+
+/* The inline pill form of the Trusted badge, used beside the product title.
+   Bootstrap has no purple contextual class, so the colour is set here to match the
+   seal that sits on the photo. */
+.trusted-pill {
+    background: #6b3fa0;
+    color: #fff;
+}
+
+/* The hot-deal thumbnail is ~108px square. A third pill there would cover the
+   product, so Trusted is dropped on that strip only. */
+.hot-deal-media .trusted-seller-seal {
+    display: none;
+}
+
 /* The hot-deal strip thumbnail is only ~108px square, so trim the seals further
    and drop the stack to a single visible pill. */
 .hot-deal-media .authenticity-seal {
@@ -1643,16 +1674,100 @@ h6 {
     -webkit-overflow-scrolling: touch;
 }
 
+/* ---------- Nav drawer ----------
+   #navbarNav is a Bootstrap responsive offcanvas (offcanvas-lg). Two jobs here:
+
+   At >=992px Bootstrap stops treating it as a drawer, but .offcanvas-body stays a
+   block element - so the two nav groups would stack vertically and me-auto would
+   have nothing to push against. These rules restore the row layout that
+   .navbar-collapse used to supply.
+
+   Below 992px it is a real side sheet: fixed width, its own scroll, and the long
+   admin menu forced inline so it scrolls with the drawer instead of opening a
+   floating menu taller than the phone. */
+@media (min-width: 992px) {
+    .navbar .offcanvas-body {
+        display: flex;
+        align-items: center;
+        flex-grow: 1;
+        padding: 0;
+        overflow: visible;
+    }
+}
+
 @media (max-width: 991.98px) {
-    .navbar-collapse {
-        max-height: 80vh;
+    #navbarNav.offcanvas-lg {
+        width: 300px;
+        max-width: 85vw;
+    }
+    #navbarNav .offcanvas-body {
         overflow-y: auto;
-        -webkit-overflow-scrolling: touch;
         overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+    }
+    /* Static, not absolute: an absolutely positioned 30-item admin menu escapes
+       the drawer and covers the page. Inline, it becomes a scrollable section. */
+    #navbarNav .dropdown-menu {
+        position: static !important;
+        float: none;
+        width: 100%;
+        margin-top: 0.25rem;
+        border: 0;
+        background-color: rgba(255, 255, 255, 0.06);
+    }
+    #navbarNav .navbar-nav {
+        width: 100%;
+        align-items: stretch !important;
+    }
+    #navbarNav .nav-link {
+        padding-top: 0.6rem;
+        padding-bottom: 0.6rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     }
     .admin-scroll-dropdown {
-        max-height: none;
-        overflow-y: visible;
+        max-height: 55vh;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+}
+
+/* ---------- Service catalogue chips ----------
+   Nineteen categories. Wrapped, they are five rows of buttons that push every
+   listing below the fold on a phone; so they scroll sideways instead, and only
+   below the tablet breakpoint - on a wide screen there is room to wrap and a
+   horizontal scroller you cannot see the end of is worse. */
+.service-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+@media (max-width: 767.98px) {
+    .service-chips {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        -webkit-overflow-scrolling: touch;
+        scroll-snap-type: x proximity;
+        padding-bottom: 0.5rem;
+        /* Bleed to the edges so the row visibly continues past the screen rather
+           than looking like it simply ends at the container padding. */
+        margin-left: -0.75rem;
+        margin-right: -0.75rem;
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+    }
+    .service-chips > .btn {
+        flex: 0 0 auto;
+        scroll-snap-align: start;
+        white-space: nowrap;
+    }
+    .service-chips::-webkit-scrollbar {
+        height: 4px;
+    }
+    .service-chips::-webkit-scrollbar-thumb {
+        background: rgba(201, 154, 43, 0.65);
+        border-radius: 999px;
     }
 }
 
@@ -1876,6 +1991,63 @@ h6 {
     }
 }
 
+/* Tablets, 768px to 991.98px.
+
+   This band had no rules of its own: the phone block stops at 640px and the
+   desktop layout starts at 992px, so an iPad in portrait inherited the ~992px
+   rules and then let the auto-fill grids decide the column count on their own.
+   That is where the inconsistency showed - .shop-grid (minmax 210px) fitted two
+   columns at 768px and three by ~830px, while .market-product-grid (minmax 190px)
+   fitted three the whole way, so the same card was a different size on the home
+   page than in the shop. Pinned to three across for both, which is what the
+   available width actually supports once the rail is subtracted.
+
+   Placed after the max-width: 992px block on purpose: both match in this band and
+   equal specificity means the later rule wins, which is how the rail widths below
+   override the narrower ones set there. */
+@media (min-width: 768px) and (max-width: 991.98px) {
+    .market-product-grid,
+    .shop-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+    }
+
+    /* A 190px-tall photo on a card roughly 195px wide reads as a square block.
+       Shorter keeps the card proportioned and lifts the price into view. */
+    .product-media {
+        height: 165px;
+    }
+
+    /* The 992px block squeezes both rails to a phone width. A tablet has room for
+       the full label, so the category names stop wrapping mid-word. */
+    .shop-layout {
+        grid-template-columns: 150px minmax(0, 1fr);
+    }
+
+    .marketplace-shell {
+        grid-template-columns: minmax(0, 1fr) 140px;
+    }
+
+    .market-category-rail,
+    .shop-filter-panel {
+        max-height: 320px;
+    }
+
+    .market-category-link,
+    .filter-link {
+        font-size: 0.78rem;
+        padding: 8px 8px;
+    }
+
+    /* product.html stacks into one column below 992px, so the main photo spans the
+       full container: 4/3 of ~720px is 540px tall, and the existing 450px cap still
+       leaves nothing but image on screen. Capped lower so the price, stock line and
+       Add to Cart sit above the fold on a portrait tablet. */
+    .product-main-image {
+        max-height: 340px;
+    }
+}
+
 @media (max-width: 640px) {
     .market-topbar,
     .results-toolbar {
@@ -2060,5 +2232,66 @@ h6 {
     .site-logo {
         height: 30px;
         max-width: 112px;
+    }
+}
+
+/* ─── Button feedback ────────────────────────────────────
+   Restrained on purpose: a 1px press, a 1px hover lift, and nothing that
+   bounces, scales or springs. Only `transform` is animated - it is composited
+   off the main thread, so unlike animating width, height, top or margin it
+   cannot force a layout pass on every frame on a mid-range phone.
+
+   The shorthand below re-lists background, border-color, box-shadow and color
+   because this rule sits after the individual .btn-gold / .btn-primary rules
+   and `transition` is a shorthand: it replaces theirs wholesale rather than
+   adding to it, so naming them here is what preserves the hover fades those
+   rules were written for. */
+.btn {
+    transition: background 0.18s ease, border-color 0.18s ease,
+                box-shadow 0.18s ease, color 0.18s ease,
+                transform 0.12s ease;
+}
+
+/* Guarded to devices that can actually hover. A phone has no hover state to
+   leave: the lift gets applied on tap and then stays applied, so the button sits
+   raised until something else is touched - which reads as a stuck button rather
+   than as feedback. The colour and shadow transitions above are left unguarded
+   because they are driven by :active and :focus, which phones do have. */
+@media (hover: hover) and (pointer: fine) {
+    .btn:hover {
+        transform: translateY(-1px);
+    }
+}
+
+.btn:active {
+    /* Settles just below the resting position, and faster than the hover, so a
+       tap reads as a press instead of as the hover state flickering. */
+    transform: translateY(1px);
+    transition-duration: 0.06s;
+}
+
+/* A disabled button must not move under the finger - appearing to respond is
+   exactly the wrong feedback when the press does nothing. */
+.btn:disabled,
+.btn.disabled,
+.btn[aria-disabled="true"] {
+    transform: none;
+}
+
+/* Honour a stated preference for less motion.
+   Scoped to buttons rather than the global `*, *::before, *::after` reset that
+   is usually recommended here. The broader version is the fuller fix, but it
+   would also flatten the transitions Bootstrap's offcanvas, collapse and
+   carousel drive off transitionend, and that includes the navigation drawer -
+   so it is not something to ship without having run it. */
+@media (prefers-reduced-motion: reduce) {
+    .btn {
+        transition: background 0.18s ease, border-color 0.18s ease,
+                    box-shadow 0.18s ease, color 0.18s ease;
+    }
+
+    .btn:hover,
+    .btn:active {
+        transform: none;
     }
 }

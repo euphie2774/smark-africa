@@ -210,8 +210,8 @@
             <h2 class="mb-2"><i class="fas fa-headset me-2"></i>Support Center</h2>
             <p class="text-muted">Get help with orders, payments, delivery, or account issues</p>
 
-            <a href="https://wa.me/254708615309" target="_blank" rel="noopener" class="btn btn-success w-100 mb-3">
-                <i class="fab fa-whatsapp me-1"></i> Urgent WhatsApp: 0708615309
+            <a href="{{ support_whatsapp_url() }}" target="_blank" rel="noopener" class="btn btn-success w-100 mb-3">
+                <i class="fab fa-whatsapp me-1"></i> Urgent WhatsApp: {{ support_whatsapp_number() }}
             </a>
 
             <form method="POST" class="card border-0 shadow-sm">
@@ -327,6 +327,9 @@
                     <div class="quick-actions">
                         <button type="button" class="quick-action-btn" data-message="Track my order">
                             📦 Track Order
+                        </button>
+                        <button type="button" class="quick-action-btn" data-message="I need a service">
+                            🧰 Book a Service
                         </button>
                         <button type="button" class="quick-action-btn" data-message="Show me popular products">
                             🔥 Popular Items
@@ -550,19 +553,31 @@
         synthesis.speak(utterance);
     }
 
+    // Escape before anything is written as HTML. Bot replies now quote service
+    // titles a seller typed, so this is not decoration: without it a listing named
+    // "<img src=x onerror=...>" runs in every client's chat window.
+    function escapeHtml(text) {
+        const holder = document.createElement('div');
+        holder.textContent = text == null ? '' : String(text);
+        return holder.innerHTML;
+    }
+
     // Add Chat Bubble
     function addBubble(text, who) {
         const bubble = document.createElement('div');
         bubble.className = `support-bubble ${who}`;
 
-        // Convert markdown to HTML for bot messages
+        const safe = escapeHtml(text);
         if (who === 'bot') {
-            text = text
+            // Markdown is applied to the escaped copy, so **bold** still works but
+            // any tag in the payload stays inert text.
+            bubble.innerHTML = safe
                 .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
                 .replace(/\n/g, '<br>');
+        } else {
+            bubble.textContent = text == null ? '' : String(text);
         }
 
-        bubble.innerHTML = text;
         log.appendChild(bubble);
         log.scrollTop = log.scrollHeight;
 
@@ -570,6 +585,53 @@
         if (who === 'bot') {
             speak(text);
         }
+    }
+
+    // A row of buttons under the last bubble. Used for the service catalogue and
+    // for the providers the bot just listed, so the client taps instead of typing a
+    // name back at us and hoping it matches.
+    function addChoices(items, kind) {
+        if (!items || !items.length) { return; }
+        const wrap = document.createElement('div');
+        wrap.className = 'd-flex flex-wrap gap-2 mb-2';
+
+        items.forEach((item) => {
+            if (kind === 'service') {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'btn btn-sm btn-outline-primary';
+                button.textContent = ((item.emoji ? item.emoji + ' ' : '') + (item.label || ''));
+                // Sending the label back is what makes the next turn list providers.
+                button.addEventListener('click', () => sendMessage(item.label));
+                wrap.appendChild(button);
+            } else {
+                const link = document.createElement('a');
+                link.href = item.url || '#';
+                link.className = 'btn btn-sm btn-outline-success text-start';
+                link.textContent = item.title || 'View';
+                if (item.price_display) {
+                    const price = document.createElement('span');
+                    price.className = 'ms-1 fw-semibold';
+                    price.textContent = item.price_display;
+                    link.appendChild(price);
+                }
+                wrap.appendChild(link);
+            }
+        });
+
+        log.appendChild(wrap);
+        log.scrollTop = log.scrollHeight;
+    }
+
+    function addWhatsappButton(url, label) {
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.className = 'btn btn-sm btn-success mt-2';
+        link.innerHTML = '<i class="fab fa-whatsapp me-1"></i>' + escapeHtml(label);
+        log.appendChild(link);
+        log.scrollTop = log.scrollHeight;
     }
 
     // Send Message Function
@@ -595,15 +657,20 @@
 
             addBubble(data.reply, 'bot');
 
-            if (data.urgent) {
-                const link = document.createElement('a');
-                link.href = data.whatsapp_url;
-                link.target = '_blank';
-                link.rel = 'noopener';
-                link.className = 'btn btn-sm btn-success mt-2';
-                link.innerHTML = '<i class="fab fa-whatsapp me-1"></i>Urgent? Chat on WhatsApp';
-                log.appendChild(link);
-                log.scrollTop = log.scrollHeight;
+            // Services keys are additive - an older cached copy of this page simply
+            // ignores them and still shows the reply text, which already contains
+            // the same information in prose.
+            addChoices(data.providers, 'provider');
+            addChoices(data.options, 'service');
+
+            if (data.follow_up) {
+                addBubble(data.follow_up, 'bot');
+            }
+
+            if (data.action === 'whatsapp' && data.whatsapp_url) {
+                addWhatsappButton(data.whatsapp_url, 'Continue on WhatsApp');
+            } else if (data.urgent) {
+                addWhatsappButton(data.whatsapp_url, 'Urgent? Chat on WhatsApp');
             }
         } catch (error) {
             console.error('Chat error:', error);

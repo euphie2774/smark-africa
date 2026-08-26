@@ -1,61 +1,268 @@
 {% extends "base.html" %}
+{#
+  List a service.
+
+  Two rules from the MVP are enforced here rather than explained here: the phone is
+  required and is described as admin-only at the field itself, and the location may
+  be left blank because the browser's own position is used as the fallback (the
+  view is marked allows_geolocation for exactly that).
+
+  `options` is already filtered by the view - sellers receive only the catalogue
+  rows an admin marked seller_listable, admins receive everything. This template
+  does no filtering of its own, so there is one place that decides.
+#}
 {% block title %}Offer a Service - {{ super() }}{% endblock %}
+
 {% block content %}
-<div class="container py-5">
+<div class="container py-4">
     <div class="row justify-content-center">
-        <div class="col-md-8">
-            <h3><i class="fas fa-plus-circle me-2"></i>Offer a Service</h3>
-            <p class="text-muted">List your skills and earn money from clients on SMARKAFRICA.</p>
+        <div class="col-12 col-lg-8">
+            <h3 class="mb-1"><i class="fas fa-plus-circle me-2"></i>Offer a service</h3>
+            <p class="text-muted">
+                Clients find you in the services category and reach you through an admin.
+                {% if fee %}
+                Listing costs <strong>KSh {{ "{:,.0f}".format(fee) }}</strong>.
+                {% else %}
+                Listing is free.
+                {% endif %}
+            </p>
+
+            {% if not options %}
+            <div class="alert alert-warning">
+                <i class="fas fa-triangle-exclamation me-1"></i>
+                No services are open for listing yet. An admin has to enable a service in the
+                catalogue before it can be offered.
+            </div>
+            {% else %}
+
             <form method="POST" enctype="multipart/form-data">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                <div class="mb-3">
-                    <label class="form-label">Service Title</label>
-                    <input type="text" class="form-control" name="title" placeholder="e.g. Professional Logo Design" required>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label">Description</label>
-                    <textarea class="form-control" name="description" rows="4" placeholder="Describe what you offer, your experience, and what the client gets..." required></textarea>
-                </div>
-                <div class="row g-3 mb-3">
-                    <div class="col-md-4">
-                        <label class="form-label">Category</label>
-                        <select class="form-select" name="category" required>
-                            <option value="graphic-design">Graphic Design</option>
-                            <option value="web-development">Web Development</option>
-                            <option value="writing">Writing & Content</option>
-                            <option value="video-editing">Video Editing</option>
-                            <option value="marketing">Marketing</option>
-                            <option value="tutoring">Tutoring</option>
-                            <option value="photography">Photography</option>
-                            <option value="music">Music & Audio</option>
-                            <option value="translation">Translation</option>
-                            <option value="other">Other</option>
-                        </select>
+
+                <div class="card border-0 shadow-sm mb-3">
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label class="form-label" for="service_key">Which service is this?</label>
+                            <select class="form-select" id="service_key" name="service_key" required>
+                                <option value="">Choose a service…</option>
+                                {% for row in options %}
+                                <option value="{{ row.key }}"
+                                        {{ 'selected' if form.get('service_key') == row.key }}>
+                                    {% if row.emoji %}{{ row.emoji }} {% endif %}{{ row.label }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text">
+                                Not on the list? Ask an admin to add it — they can, without a deploy.
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label" for="title">Title</label>
+                            <input class="form-control" id="title" name="title" maxlength="200" required
+                                   value="{{ form.get('title', '') }}"
+                                   placeholder="e.g. CleanWash — same-day laundry">
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label" for="description">What do you offer?</label>
+                            <textarea class="form-control" id="description" name="description" rows="4"
+                                      placeholder="What the client gets, how long it takes, anything they should bring.">{{ form.get('description', '') }}</textarea>
+                        </div>
+
+                        <div class="row g-3">
+                            <div class="col-12 col-sm-4">
+                                <label class="form-label" for="price">Price (KSh)</label>
+                                <input type="number" class="form-control" id="price" name="price"
+                                       min="0" step="10" value="{{ form.get('price', '') }}">
+                                <div class="form-text">0 shows as “price on request”.</div>
+                            </div>
+                            <div class="col-12 col-sm-4">
+                                <label class="form-label" for="price_type">Pricing</label>
+                                <select class="form-select" id="price_type" name="price_type">
+                                    {% for value, label in [('fixed', 'Fixed price'), ('hourly', 'Hourly rate'),
+                                                            ('per_item', 'Per item'), ('negotiable', 'Negotiable')] %}
+                                    <option value="{{ value }}"
+                                            {{ 'selected' if form.get('price_type') == value }}>{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-12 col-sm-4">
+                                <label class="form-label" for="delivery_days">Turnaround (days)</label>
+                                <input type="number" class="form-control" id="delivery_days"
+                                       name="delivery_days" min="0" max="60"
+                                       value="{{ form.get('delivery_days', 1) }}">
+                                <div class="form-text">0 for same day.</div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="col-md-4">
-                        <label class="form-label">Price (KSh)</label>
-                        <input type="number" class="form-control" name="price" min="100" step="50" required>
+                </div>
+
+                <div class="card border-0 shadow-sm mb-3">
+                    <div class="card-body">
+                        <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                            <i class="fas fa-phone me-1"></i>Your contact number
+                        </h6>
+                        <input class="form-control" name="provider_phone" maxlength="30" required
+                               type="tel" inputmode="numeric" value="{{ form.get('provider_phone', '') }}"
+                               placeholder="07XXXXXXXX" aria-label="Your contact number">
+                        <div class="form-text">
+                            <i class="fas fa-lock me-1"></i>
+                            <strong>Admins only.</strong> Clients never see this. An admin calls you when
+                            somebody wants the job and introduces you to them.
+                        </div>
                     </div>
-                    <div class="col-md-4">
-                        <label class="form-label">Delivery (days)</label>
-                        <input type="number" class="form-control" name="delivery_days" value="3" min="1" max="30">
+                </div>
+
+                <div class="card border-0 shadow-sm mb-3">
+                    <div class="card-body">
+                        <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                            <i class="fas fa-location-dot me-1"></i>Where are you?
+                        </h6>
+                        <input class="form-control mb-2" name="location_label" maxlength="200"
+                               value="{{ form.get('location_label', '') }}"
+                               placeholder="Shop or pickup address" aria-label="Address">
+                        <div class="row g-2 mb-2">
+                            <div class="col-6">
+                                <input type="number" step="any" class="form-control" name="location_lat"
+                                       placeholder="Latitude" value="{{ form.get('location_lat', '') }}"
+                                       aria-label="Latitude">
+                            </div>
+                            <div class="col-6">
+                                <input type="number" step="any" class="form-control" name="location_lng"
+                                       placeholder="Longitude" value="{{ form.get('location_lng', '') }}"
+                                       aria-label="Longitude">
+                            </div>
+                        </div>
+                        <input class="form-control mb-2" name="location_county" maxlength="100"
+                               value="{{ form.get('location_county', '') }}"
+                               placeholder="County (optional)" aria-label="County">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="useMyLocation">
+                            <i class="fas fa-crosshairs me-1"></i>Use my current location
+                        </button>
+                        <div class="form-text">
+                            Leave the address blank and we use the position your device reports, so
+                            clients still see a pin.
+                        </div>
                     </div>
                 </div>
-                <div class="mb-3">
-                    <label class="form-label">Service Image (optional)</label>
-                    <input type="file" class="form-control" name="service_image" accept="image/*">
+
+                <div class="card border-0 shadow-sm mb-3">
+                    <div class="card-body">
+                        <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                            <i class="fas fa-truck-pickup me-1"></i>Pickup
+                        </h6>
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" role="switch" value="1"
+                                   name="pickup_required" id="pickup_required"
+                                   {{ 'checked' if form.get('pickup_required') }}>
+                            <label class="form-check-label" for="pickup_required">
+                                I collect from the client
+                            </label>
+                        </div>
+                        <div class="form-text mb-3">
+                            Leave this off and clients are told: “No pickup offered, take to the
+                            location as directed.”
+                        </div>
+
+                        <div id="pickupFields" class="{{ '' if form.get('pickup_required') else 'd-none' }}">
+                            <div class="form-check mb-2">
+                                <input class="form-check-input" type="checkbox" value="1"
+                                       name="pickup_is_free" id="pickup_is_free"
+                                       {{ 'checked' if form.get('pickup_is_free') }}>
+                                <label class="form-check-label" for="pickup_is_free">
+                                    Pickup is free
+                                </label>
+                            </div>
+                            <div class="row g-2 mb-2">
+                                <div class="col-12 col-sm-6">
+                                    <label class="form-label small mb-1" for="pickup_cost">Pickup cost (KSh)</label>
+                                    <input type="number" class="form-control" id="pickup_cost"
+                                           name="pickup_cost" min="0" step="10"
+                                           value="{{ form.get('pickup_cost', '') }}">
+                                </div>
+                                <div class="col-12 col-sm-6">
+                                    <label class="form-label small mb-1" for="pickup_eta">When?</label>
+                                    <input class="form-control" id="pickup_eta" name="pickup_eta"
+                                           maxlength="60" value="{{ form.get('pickup_eta', '') }}"
+                                           placeholder="today / tomorrow / within 2 hours">
+                                </div>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" value="1"
+                                       name="pickup_via_platform" id="pickup_via_platform"
+                                       {{ 'checked' if form.get('pickup_via_platform') }}>
+                                <label class="form-check-label" for="pickup_via_platform">
+                                    Use the platform courier for collection
+                                </label>
+                            </div>
+                            <div class="form-text">
+                                <strong>You pay that leg</strong>, priced on distance and weight. The client
+                                is never charged for a collection on a service they bought from you.
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div class="mb-3">
-                    <label class="form-label">Pricing Type</label>
-                    <select class="form-select" name="price_type">
-                        <option value="fixed">Fixed Price</option>
-                        <option value="hourly">Hourly Rate</option>
-                        <option value="negotiable">Negotiable</option>
-                    </select>
+
+                <div class="card border-0 shadow-sm mb-3">
+                    <div class="card-body">
+                        <label class="form-label" for="service_image">Photo (optional)</label>
+                        <input type="file" class="form-control" id="service_image" name="service_image"
+                               accept="image/png,image/jpeg,image/gif,image/webp">
+                        <div class="form-text">One clear photo of your shop or your work.</div>
+                    </div>
                 </div>
-                <button type="submit" class="btn btn-success btn-lg"><i class="fas fa-check me-2"></i>List Service</button>
+
+                {% if fee %}
+                <div class="alert alert-warning small">
+                    <i class="fas fa-receipt me-1"></i>
+                    A listing fee of <strong>KSh {{ "{:,.0f}".format(fee) }}</strong> is recorded against
+                    this listing when you submit.
+                </div>
+                {% endif %}
+
+                <button type="submit" class="btn btn-success btn-lg w-100">
+                    <i class="fas fa-check me-2"></i>List this service
+                </button>
             </form>
+            {% endif %}
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('pickup_required')?.addEventListener('change', function () {
+    document.getElementById('pickupFields')?.classList.toggle('d-none', !this.checked);
+});
+
+document.getElementById('pickup_is_free')?.addEventListener('change', function () {
+    var cost = document.getElementById('pickup_cost');
+    if (!cost) { return; }
+    cost.disabled = this.checked;
+    if (this.checked) { cost.value = ''; }
+});
+
+document.getElementById('useMyLocation')?.addEventListener('click', function () {
+    if (!navigator.geolocation) {
+        alert('This browser cannot share a location. Type the address instead.');
+        return;
+    }
+    var button = this;
+    button.disabled = true;
+    navigator.geolocation.getCurrentPosition(
+        function (pos) {
+            document.querySelector('[name="location_lat"]').value = pos.coords.latitude.toFixed(6);
+            document.querySelector('[name="location_lng"]').value = pos.coords.longitude.toFixed(6);
+            button.disabled = false;
+            button.innerHTML = '<i class="fas fa-check me-1"></i>Location captured';
+        },
+        function () {
+            alert('Could not read your location. Type the address instead.');
+            button.disabled = false;
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+    );
+});
+</script>
 {% endblock %}

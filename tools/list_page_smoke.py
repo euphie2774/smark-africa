@@ -17,7 +17,9 @@ would just encode whatever today's number happens to be.
 
 import contextlib
 import os
+import re
 import sys
+import threading
 from datetime import datetime, timedelta
 
 os.environ.setdefault('DISABLE_BACKGROUND_JOBS', '1')
@@ -43,26 +45,56 @@ def check(label, condition, detail=''):
     print(f'  [{status}] {label}{(" - " + str(detail)) if detail else ""}')
 
 
+def statement_shape(statement):
+    """A statement with its parameters and layout flattened.
+
+    Two lookups of the same table by different id are the same shape, so an N+1
+    shows up as one shape with a high count rather than as many distinct lines.
+    """
+    text = ' '.join((statement or '').split())
+    return re.sub(r'\b\d+\b', '?', text)[:150]
+
+
 class StatementCounter:
     """Counts statements actually sent to the database, optionally filtered.
 
     Hooks the cursor rather than the ORM, so lazy loads triggered from inside a
     Jinja template are counted too - which is where most N+1s in this codebase
     live, and where they are invisible to anything that only inspects the view.
+
+    Counts only statements issued on the thread that opened the window. The hook
+    has to go on the engine, which every thread in the process shares, so without
+    that filter the count includes SQL this page never issued: the outbound-drain
+    thread (main.py:21894) polls the queue on a timer and flushes buffered view
+    counts as one UPDATE per pending product. Landing inside the window, that made
+    an unchanged page measure 20 queries against 13 - which read as a review N+1
+    that does not exist, and only in a full-suite run, because that is what makes
+    the run slow enough for the timer to fire. Statements from other threads are
+    tallied in ``other_threads`` rather than dropped silently, so an unexpectedly
+    busy background thread is still visible to whoever is reading the output.
     """
 
     def __init__(self, match=None):
         self.count = 0
+        self.other_threads = 0
+        self.shapes = {}
         self.match = (match or '').lower()
+        self._thread = None
 
     def __enter__(self):
+        self._thread = threading.get_ident()
         self._hook = lambda conn, cursor, statement, *a: self._bump(statement)
         event.listen(db.engine, 'before_cursor_execute', self._hook)
         return self
 
     def _bump(self, statement):
+        if threading.get_ident() != self._thread:
+            self.other_threads += 1
+            return
         if not self.match or self.match in (statement or '').lower():
             self.count += 1
+            key = statement_shape(statement)
+            self.shapes[key] = self.shapes.get(key, 0) + 1
 
     def __exit__(self, *exc):
         event.remove(db.engine, 'before_cursor_execute', self._hook)
@@ -185,10 +217,81 @@ def add_reviews(product_id, count, start=0):
     db.session.commit()
 
 
+@contextlib.contextmanager
+def steady_view_buffer():
+    """Keep the product-view buffer from flushing inside a measured window.
+
+    Every product page render buffers a view (main.py:5660), and the buffer
+    flushes on a wall-clock timer - VIEW_COUNT_FLUSH_SECONDS, 30s by default -
+    writing one UPDATE per pending product. A flush that lands inside a
+    StatementCounter window is counted as though the page had issued those
+    queries, so the same unchanged page measures differently depending only on
+    how long the run took to get here. That is what made this file report the
+    review page growing from 13 queries to 22 during a full-suite run while
+    passing standalone: not an N+1, a timer.
+
+    The buffer's own cost is not being swept under the rug - it has its own
+    dedicated check below, which counts UPDATEs specifically and is the right
+    place to assert that views coalesce.
+    """
+    flush_product_views()  # write what is pending, deliberately outside the window
+    buffer = app_module._product_view_buffer
+    previous = buffer.flush_seconds
+    # 0 disables the timer branch in _due_locked outright, so a timer that came
+    # due before the window opened cannot fire inside it either. The count-based
+    # threshold is left alone: _counted is 0 after the drain above, and a single
+    # page render cannot reach it.
+    buffer.flush_seconds = 0
+    try:
+        yield
+    finally:
+        buffer.flush_seconds = previous
+
+
+_MEASUREMENTS = {}
+
+
 def count_page(client, path, match=None):
-    with StatementCounter(match=match) as counter:
+    with steady_view_buffer(), StatementCounter(match=match) as counter:
         response = client.get(path)
+    if counter.other_threads:
+        # Printed rather than swallowed: the whole reason these numbers were once
+        # untrustworthy is that this traffic was being counted as the page's.
+        print(f'         (ignored {counter.other_threads} background-thread '
+              f'statement(s) while measuring {path})')
+    _MEASUREMENTS.setdefault(path, []).append(counter.shapes)
     return response, counter.count
+
+
+def explain_growth(path):
+    """Print what the later measurement of ``path`` ran that the earlier did not.
+
+    These comparative checks used to fail intermittently with nothing but two
+    numbers to go on, which cost several sessions of guessing at an N+1 that was
+    not there. A count that grows now says which statement grew, so the next
+    occurrence is diagnosable from the output alone rather than by reproduction.
+    """
+    runs = _MEASUREMENTS.get(path) or []
+    if len(runs) < 2:
+        return
+    earlier, later = runs[-2], runs[-1]
+    grew = {shape: later[shape] - earlier.get(shape, 0)
+            for shape in later if later[shape] > earlier.get(shape, 0)}
+    if not grew:
+        print(f'         (no statement shape grew for {path}; the extra queries '
+              f'were not issued on the measured thread)')
+        return
+    print(f'         statements that grew while measuring {path}:')
+    for shape, delta in sorted(grew.items(), key=lambda item: -item[1])[:8]:
+        print(f'         +{delta}  {shape}')
+
+
+def check_no_growth(label, before, after, path):
+    """Assert a page did not get more expensive, and say why if it did."""
+    ok = after <= before
+    check(label, ok, f'{before} -> {after}')
+    if not ok:
+        explain_growth(path)
 
 
 def squash(response):
@@ -241,8 +344,8 @@ def run():
         second, after = count_page(client, '/orders')
         check('still renders with many more orders', second.status_code == 200,
               second.status_code)
-        check('the query count did not grow with the order count',
-              after <= before, f'{before} -> {after}')
+        check_no_growth('the query count did not grow with the order count',
+                        before, after, '/orders')
         check(f'at most {ORDERS_PER_PAGE} orders on the page',
               second.data.count(b'View Details') <= ORDERS_PER_PAGE,
               second.data.count(b'View Details'))
@@ -270,8 +373,8 @@ def run():
             second, after = count_page(anon, f'/product/{subject_slug}')
             check('still renders with many more reviews', second.status_code == 200,
                   second.status_code)
-            check('the query count did not grow with the review count',
-                  after <= before, f'{before} -> {after}')
+            check_no_growth('the query count did not grow with the review count',
+                            before, after, f'/product/{subject_slug}')
             check(f'at most {REVIEWS_PER_PAGE} reviews rendered',
                   second.data.count(b'Review number') <= REVIEWS_PER_PAGE,
                   second.data.count(b'Review number'))
@@ -299,8 +402,8 @@ def run():
             second, after = count_page(anon, f'/categories/{category_slug}')
             check('still renders with 40 more products', second.status_code == 200,
                   second.status_code)
-            check('the query count did not grow with the product count',
-                  after <= before, f'{before} -> {after}')
+            check_no_growth('the query count did not grow with the product count',
+                            before, after, f'/categories/{category_slug}')
             check('at most 12 products on the page',
                   second.data.count(b'class="btn btn-sm btn-outline-primary">View') <= 12,
                   second.data.count(b'class="btn btn-sm btn-outline-primary">View'))

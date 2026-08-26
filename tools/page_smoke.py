@@ -1,4 +1,4 @@
-"""Smoke check for the cached category nav and the hot list pages.
+"""Smoke check for the cached category nav, the hot list pages and /services.
 
 Run with: python tools/page_smoke.py
 
@@ -8,6 +8,13 @@ it. What this checks is that the repeat costs nothing, that an admin edit is sti
 picked up, and - the part that is easy to get wrong when caching anything loaded
 through the ORM - that a cached row survives being used in a later request with a
 different session behind it.
+
+Three more pages are held to the same standard further down, all comparatively
+rather than against an absolute number: the create-product price advisory, which
+once loaded eighty full rows per keystroke; the services listing, which once ran
+a full-table DISTINCT plus an unbounded scan on every anonymous hit; and the shop
+grid, where the badge macro reads a lazy relationship on every card. In each case
+the assertion is that more rows cost no more queries than fewer.
 
 Uses the real test client so the templates render for real; a cached object that
 would raise DetachedInstanceError in Jinja fails here rather than in production.
@@ -23,8 +30,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import event
 
 import main as app_module
-from main import app, db, nav_categories
-from models import Category, Product, User
+from main import app, db, invalidate_service_caches, nav_categories
+from models import (Category, Product, ServiceCatalogueItem, ServiceListing,
+                    User)
 
 FAILURES = []
 TAG = 'pagesmoke'
@@ -57,6 +65,14 @@ class StatementCounter:
 def teardown():
     db.session.rollback()
     try:
+        # Service listings before users: the listing carries the provider's id as a
+        # foreign key, so deleting the provider first leaves an orphan row on
+        # Postgres and fails the whole cleanup.
+        ServiceListing.query.filter(ServiceListing.title.like(f'{TAG}%')).delete(
+            synchronize_session=False)
+        ServiceCatalogueItem.query.filter(
+            ServiceCatalogueItem.key.like(f'{TAG}%')).delete(
+            synchronize_session=False)
         Product.query.filter(Product.slug.like(f'{TAG}%')).delete(
             synchronize_session=False)
         User.query.filter(User.username.like(f'{TAG}%')).delete(
@@ -68,6 +84,7 @@ def teardown():
         db.session.rollback()
         print(f'  cleanup failed: {exc}')
     app_module.invalidate_nav_categories()
+    invalidate_service_caches()
 
 
 def run():
@@ -145,6 +162,187 @@ def run():
               counter.count < 25, counter.count)
 
     check_price_check()
+    check_shop_cards()
+    check_services_page()
+
+
+def check_shop_cards():
+    """The shop grid, as the number of cards on the page grows.
+
+    /shop and every category page are anonymous-reachable and are most of the
+    traffic here, and the badge macro reads product.seller on every card while
+    Product.seller is lazy - so this is the page an N+1 costs the most on.
+
+    Two things about the fixture are load-bearing, and the check is worthless
+    without either. Each product gets its own seller, because twelve cards sharing
+    one would be a single query plus eleven identity-map hits and the regression
+    would not show. And the session is emptied right before each measurement,
+    because the test client reuses this script's outer app context, so the session
+    - and every relationship already loaded onto it by the warm-up request - would
+    otherwise survive into the counted one and hide the lazy load completely.
+    """
+    print('the shop grid does not query once per card')
+    category = Category(name=f'{TAG} grid', slug=f'{TAG}-grid', is_active=True)
+    db.session.add(category)
+    db.session.commit()
+    category_id = category.id
+    app_module.invalidate_nav_categories()
+
+    def seed(count, offset=0):
+        for index in range(count):
+            number = offset + index
+            seller = User(username=f'{TAG}_gridseller{number:02d}',
+                          email=f'{TAG}_gridseller{number:02d}@example.invalid')
+            seller.set_password('x')
+            db.session.add(seller)
+            db.session.flush()  # for seller.id, without a commit per product
+            db.session.add(Product(
+                name=f'{TAG} grid item {number:02d}',
+                slug=f'{TAG}-grid-{number:02d}',
+                selling_price=1000.0 + number, buying_price=800.0,
+                description='A thing.', short_description='A thing',
+                stock=5, is_active=True, category_id=category_id,
+                seller_id=seller.id, commission_percent=15.0,
+                review_status='approved'))
+        db.session.commit()
+
+    limiter = getattr(app_module, 'limiter', None)
+    was_enabled = getattr(limiter, 'enabled', None)
+    if limiter is not None:
+        limiter.enabled = False
+    try:
+        path = f'/shop?category={TAG}-grid'
+        with app.test_client() as client:
+            seed(3)
+            first = client.get(path)
+            check('GET /shop?category=<slug> renders', first.status_code == 200,
+                  first.status_code)
+            check('and a card is on it',
+                  f'{TAG} grid item 00' in first.get_data(as_text=True))
+
+            client.get(path)  # warm the module-level caches the page also reads
+            db.session.remove()
+            with StatementCounter() as small:
+                client.get(path)
+
+            seed(9, offset=3)
+            client.get(path)
+            db.session.remove()
+            with StatementCounter() as large:
+                response = client.get(path)
+
+            body = response.get_data(as_text=True)
+            check('all twelve cards are on the page, so the counts are comparable',
+                  f'{TAG} grid item 11' in body and f'{TAG} grid item 00' in body)
+            check('four times the cards cost no extra queries',
+                  large.count <= small.count, (small.count, large.count))
+    finally:
+        if limiter is not None and was_enabled is not None:
+            limiter.enabled = was_enabled
+
+
+def check_services_page():
+    """The services listing, under a growing set of providers.
+
+    The page this replaced ran a full-table DISTINCT on category plus an unbounded
+    ordered scan on every anonymous hit, so it is the shape that falls over first
+    when the services category actually fills up. The property worth asserting is
+    comparative, as with the price advisory above: forty more providers must not
+    mean forty more anything per page view, and the page must still be rendering a
+    slice rather than quietly loading the lot and letting Jinja print twelve of them.
+    """
+    print('the services page does not grow with the number of providers')
+    provider = User(username=f'{TAG}_provider',
+                    email=f'{TAG}_provider@example.invalid')
+    provider.set_password('x')
+    db.session.add(provider)
+    db.session.add(ServiceCatalogueItem(
+        key=f'{TAG}_wash', label=f'{TAG} Washing', seller_listable=True,
+        is_active=True, sort_order=900))
+    db.session.commit()
+    provider_id = provider.id
+    invalidate_service_caches()
+
+    def seed(count, offset=0):
+        for index in range(count):
+            number = offset + index
+            db.session.add(ServiceListing(
+                provider_id=provider_id,
+                title=f'{TAG} washer {number:02d}',
+                description='Washes things.', category=f'{TAG} Washing',
+                service_key=f'{TAG}_wash', price=450.0 + number,
+                # Descending, so which rows land on the first page is decided here
+                # rather than by whatever order the inserts happened to commit in.
+                orders_completed=1000 - number,
+                is_active=True, provider_phone='0790001234',
+                location_county='Nairobi', location_label='Ngara'))
+        db.session.commit()
+        invalidate_service_caches()
+
+    # The limiter has global default_limits and its storage may be Redis on the
+    # operator's own machine, where a second run inside the hour would start
+    # returning 429 and read as a query-count failure. Same guard as the price
+    # advisory above, restored either way.
+    limiter = getattr(app_module, 'limiter', None)
+    was_enabled = getattr(limiter, 'enabled', None)
+    if limiter is not None:
+        limiter.enabled = False
+    try:
+        with app.test_client() as client:
+            seed(6)
+            first = client.get(f'/services?service={TAG}_wash')
+            check('GET /services?service=<key> renders', first.status_code == 200,
+                  first.status_code)
+
+            invalidate_service_caches()
+            with StatementCounter() as small:
+                client.get(f'/services?service={TAG}_wash')
+            small_count = small.count
+
+            seed(40, offset=6)
+            invalidate_service_caches()
+            with StatementCounter() as large:
+                response = client.get(f'/services?service={TAG}_wash')
+
+            check('forty more providers cost no extra queries',
+                  large.count <= small_count, (small_count, large.count))
+            check('and the query count is small in absolute terms too',
+                  large.count <= 12, large.count)
+
+            body = response.get_data(as_text=True)
+            # 46 rows, 12 to a page. If the page were loading them all and printing
+            # a slice, the last one would be in the HTML - this is the assertion
+            # that the pagination is real and not decoration.
+            check('the first page holds the busiest provider',
+                  f'{TAG} washer 00' in body)
+            check('and not the forty-sixth, so the page is a slice not a full load',
+                  f'{TAG} washer 45' not in body)
+
+            # The page number comes straight off the query string into a hand-rolled
+            # paginator, so it is worth one pass of the things a scanner sends: a bare
+            # int() on any of these is a 500 on a public URL, and crawlers find them.
+            for bad in ('abc', "2'", '-5', '0', '99999', ''):
+                probe = client.get(f'/services?service={TAG}_wash&page={bad}')
+                check(f'?page={bad!r} is answered rather than raising',
+                      probe.status_code == 200, probe.status_code)
+
+            # A warm cache is what turns a thousand people opening the same tile
+            # into one query rather than a thousand.
+            with StatementCounter() as warm:
+                client.get(f'/services?service={TAG}_wash')
+            check('a repeat view off the warm cache costs less than the first',
+                  warm.count < small_count, (small_count, warm.count))
+    finally:
+        if limiter is not None and was_enabled is not None:
+            limiter.enabled = was_enabled
+
+    print('the services page is not open to unlimited polling')
+    duty_ttl = app_module._service_duty_cache.stats().get('ttl_seconds')
+    check('the duty lookup is cached rather than read per request',
+          bool(duty_ttl and duty_ttl >= 1), duty_ttl)
+    check('a rate limit is configured on the link request',
+          bool(app_module.SERVICE_REQUEST_RATE_LIMIT),
+          app_module.SERVICE_REQUEST_RATE_LIMIT)
 
 
 def check_price_check():

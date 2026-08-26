@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+{% block title %}{{ invoice.invoice_number }} - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+        <div>
+            <h2 class="mb-1">
+                <i class="fas fa-file-invoice-dollar me-2"></i>{{ invoice.invoice_number }}
+                {% set state = invoice.status_display %}
+                <span class="badge align-middle bg-{{ 'success' if state == 'paid'
+                    else ('danger' if state == 'overdue'
+                    else ('secondary' if state in ['draft', 'cancelled'] else 'info')) }}">{{ state }}</span>
+            </h2>
+            <p class="text-muted mb-0 small">
+                Raised by {{ invoice.issued_by.username if invoice.issued_by else 'an admin' }}
+                {% if invoice.created_at %}on {{ invoice.created_at.strftime('%d %b %Y %H:%M') }}{% endif %}
+                {% if invoice.email_sent_count %}
+                &middot; emailed {{ invoice.email_sent_count }}&times;
+                {% if invoice.last_email_at %}(last {{ invoice.last_email_at.strftime('%d %b %H:%M') }}){% endif %}
+                {% else %}
+                &middot; <span class="text-warning">never emailed</span>
+                {% endif %}
+                {% if invoice.viewed_at %}
+                &middot; client opened it {{ invoice.viewed_at.strftime('%d %b %H:%M') }}
+                {% endif %}
+            </p>
+        </div>
+        <a href="{{ url_for('admin_invoices') }}" class="btn btn-outline-secondary">
+            <i class="fas fa-arrow-left me-1"></i> All invoices
+        </a>
+    </div>
+
+    <div class="row g-3">
+        <div class="col-12 col-lg-4">
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body">
+                    <div class="text-muted text-uppercase small">Balance due</div>
+                    <div class="h3 mb-2 {{ 'text-success' if invoice.is_settled else '' }}">
+                        {{ invoice.currency or 'KES' }} {{ '{:,.2f}'.format(invoice.balance_due) }}
+                    </div>
+                    <div class="small text-muted">
+                        Total {{ '{:,.2f}'.format(invoice.total_amount or 0) }}
+                        {% if (invoice.amount_paid or 0) > 0 %}
+                        &middot; paid {{ '{:,.2f}'.format(invoice.amount_paid) }}
+                        {% endif %}
+                    </div>
+
+                    <hr>
+
+                    <form method="POST" action="{{ url_for('admin_invoice_send', invoice_id=invoice.id) }}"
+                          class="d-grid mb-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <button class="btn btn-success"
+                                {{ 'disabled' if invoice.status == 'cancelled' or invoice.is_settled }}>
+                            <i class="fas fa-paper-plane me-1"></i>
+                            {% if invoice.email_sent_count %}Email a reminder{% else %}Email the client{% endif %}
+                        </button>
+                    </form>
+
+                    <a href="{{ url_for('admin_invoice_print', invoice_id=invoice.id) }}" target="_blank"
+                       rel="noopener" class="btn btn-outline-primary w-100 mb-2">
+                        <i class="fas fa-print me-1"></i> Print / save as PDF
+                    </a>
+
+                    {% if invoice.status != 'draft' and invoice.status != 'cancelled' %}
+                    <label class="form-label small mb-1">Client link</label>
+                    <div class="input-group input-group-sm mb-2">
+                        <input class="form-control" id="invPublicUrl" readonly value="{{ public_url }}">
+                        <button class="btn btn-outline-secondary" type="button" id="invCopyUrl"
+                                title="Copy"><i class="fas fa-copy"></i></button>
+                    </div>
+                    <div class="form-text mb-2">
+                        Anyone with this link can open and pay the invoice. That is deliberate —
+                        the client may not have an account.
+                    </div>
+                    {% endif %}
+
+                    {% if (invoice.amount_paid or 0) == 0 and invoice.status != 'cancelled' %}
+                    <form method="POST" action="{{ url_for('admin_invoice_cancel', invoice_id=invoice.id) }}"
+                          class="d-grid"
+                          onsubmit="return confirm('Cancel {{ invoice.invoice_number }}? The client\'s pay link stops working.');">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <button class="btn btn-outline-danger btn-sm">
+                            <i class="fas fa-ban me-1"></i> Cancel this invoice
+                        </button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body">
+                    <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                        <i class="fas fa-hand-holding-dollar me-1"></i> Record a payment
+                    </h6>
+                    <p class="small text-muted">
+                        For money that arrived outside the platform — cash, bank transfer, or a till
+                        number. M-Pesa paid through the client's link books itself.
+                    </p>
+                    <form method="POST"
+                          action="{{ url_for('admin_invoice_record_payment', invoice_id=invoice.id) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <div class="row g-2">
+                            <div class="col-7">
+                                <input name="amount" type="number" step="0.01" min="0"
+                                       class="form-control form-control-sm" placeholder="Amount"
+                                       value="{{ '%.2f'|format(invoice.balance_due) }}" required>
+                            </div>
+                            <div class="col-5">
+                                <select name="method" class="form-select form-select-sm">
+                                    <option value="cash">Cash</option>
+                                    <option value="bank">Bank</option>
+                                    <option value="mpesa">M-Pesa</option>
+                                    <option value="other">Other</option>
+                                </select>
+                            </div>
+                            <div class="col-12">
+                                <input name="receipt" class="form-control form-control-sm"
+                                       maxlength="50" placeholder="Receipt / reference (optional)">
+                            </div>
+                            <div class="col-12">
+                                <input name="note" class="form-control form-control-sm"
+                                       maxlength="255" placeholder="Note (optional)">
+                            </div>
+                            <div class="col-12 d-grid">
+                                <button class="btn btn-sm btn-primary"
+                                        {{ 'disabled' if invoice.status == 'cancelled' }}>
+                                    Book it
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            {% if invoice.payments %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                        <i class="fas fa-receipt me-1"></i> Payment log
+                    </h6>
+                    <ul class="list-unstyled mb-0 small">
+                        {% for payment in invoice.payments|reverse %}
+                        <li class="d-flex justify-content-between border-bottom py-2">
+                            <div>
+                                <span class="badge bg-{{ 'success' if payment.status == 'success'
+                                    else ('warning text-dark' if payment.status == 'pending' else 'danger') }}">
+                                    {{ payment.status }}
+                                </span>
+                                {{ payment.method }}
+                                {% if payment.mpesa_receipt %}
+                                <div class="text-muted"><code>{{ payment.mpesa_receipt }}</code></div>
+                                {% endif %}
+                                {% if payment.note %}<div class="text-muted">{{ payment.note }}</div>{% endif %}
+                                <div class="text-muted" style="font-size:11px">
+                                    {{ payment.created_at.strftime('%d %b %Y %H:%M') if payment.created_at }}
+                                    {% if payment.phone %}&middot; {{ payment.phone }}{% endif %}
+                                </div>
+                            </div>
+                            <div class="text-end text-nowrap">
+                                {{ '{:,.2f}'.format(payment.amount or 0) }}
+                            </div>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="col-12 col-lg-8">
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-header bg-white border-0 pb-0">
+                    <h6 class="text-uppercase text-muted small fw-bold mb-0">
+                        <i class="fas fa-eye me-1"></i> What the client sees
+                    </h6>
+                </div>
+                <div class="card-body">
+                    {{ document|safe }}
+                </div>
+            </div>
+
+            {% if invoice.status not in ['paid', 'cancelled'] %}
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-white">
+                    <h6 class="text-uppercase text-muted small fw-bold mb-0">
+                        <i class="fas fa-pen me-1"></i> Edit this invoice
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('admin_invoice_detail', invoice_id=invoice.id) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        {% set form = {} %}
+                        {% include 'admin/_invoice_fields.html' %}
+                        <div class="d-flex justify-content-end gap-2 mt-3">
+                            <button class="btn btn-primary">
+                                <i class="fas fa-floppy-disk me-1"></i> Save changes
+                            </button>
+                        </div>
+                        <div class="form-text text-end">
+                            Saving does not re-send anything. Use Email the client afterwards.
+                        </div>
+                    </form>
+                </div>
+            </div>
+            {% else %}
+            <div class="alert alert-light border small mb-0">
+                <i class="fas fa-lock me-1"></i>
+                {% if invoice.status == 'paid' %}
+                This invoice is settled, so it is locked. An invoice the client has paid is a
+                record — raise a new one rather than editing this.
+                {% else %}
+                This invoice is cancelled and locked.
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    var button = document.getElementById('invCopyUrl');
+    var field = document.getElementById('invPublicUrl');
+    if (!button || !field) { return; }
+    button.addEventListener('click', function () {
+        field.select();
+        // navigator.clipboard needs a secure context; select() plus execCommand is
+        // the fallback that still works when an admin is on plain http in dev.
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(field.value);
+        } else {
+            try { document.execCommand('copy'); } catch (err) { /* nothing to do */ }
+        }
+        button.innerHTML = '<i class="fas fa-check"></i>';
+        setTimeout(function () { button.innerHTML = '<i class="fas fa-copy"></i>'; }, 1400);
+    });
+})();
+</script>
+{% endblock %}

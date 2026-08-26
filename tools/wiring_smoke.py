@@ -22,6 +22,13 @@ search result. The sizing checks assert worker_plan reads the container's limits
 rather than the host's, which is the 503 this suite now catches before a deploy does:
 nine workers of 200MB cannot start inside a 512MB instance, and the kernel kills them
 without an application log line to explain it.
+
+The last group covers the rate limiter, whose defaults apply to every registered
+endpoint - including Flask's own 'static'. Untuned, one shop page carrying a dozen
+locally stored images spent thirteen requests of the caller's allowance instead of
+one, and /healthz shared the same bucket, so a busy address could 429 the health
+check and have the host restart the container for looking unhealthy. Both directions
+are asserted, because a 200 says nothing about whether a limit was applied.
 """
 import os, sys
 
@@ -31,6 +38,7 @@ os.environ['DISABLE_BACKGROUND_JOBS'] = '1'
 # Prove the new env vars are optional and Redis stays optional.
 for key in ('MARKET_COMPARABLE_TTL', 'PRICE_CHECK_RATE_LIMIT', 'PHONE_EVIDENCE_MIN_SCORE',
             'PHONE_EVIDENCE_REQUIRED', 'PHONE_EVIDENCE_RATE_LIMIT',
+            'RATE_LIMIT_PER_HOUR', 'RATE_LIMIT_PER_MINUTE',
             'REDIS_URL', 'CACHE_REDIS_URL'):
     os.environ.pop(key, None)
 
@@ -207,6 +215,11 @@ def defaults_present():
     assert main.PHONE_EVIDENCE_REQUIRED is True
     assert main.PHONE_EVIDENCE_RATE_LIMIT
     assert main.MARKET_COMPARABLE_TTL
+    # Popped above, so these are the built-in defaults. Asserted as whole strings
+    # because Flask-Limiter parses them itself and a typo like '2000 per hours' is
+    # a boot-time crash, not a wrong number.
+    assert main.RATE_LIMIT_PER_HOUR == '2000 per hour', main.RATE_LIMIT_PER_HOUR
+    assert main.RATE_LIMIT_PER_MINUTE == '180 per minute', main.RATE_LIMIT_PER_MINUTE
 
 
 check('new env vars default without being set', defaults_present)
@@ -414,6 +427,304 @@ def cgroup_parsers_are_safe():
 
 
 check('cgroup readers tolerate a host without cgroups', cgroup_parsers_are_safe)
+
+
+# ---------- Services and invoices ----------
+SERVICE_ROUTES = [
+    '/services',
+    '/services/<int:service_id>',
+    '/services/<int:service_id>/contact-admin',
+    '/services/<int:service_id>/order',
+    '/services/requests/<int:request_id>/thread',
+    '/services/create',
+    '/admin/services/duty',
+    '/admin/services/requests',
+    '/admin/services/requests/<int:request_id>/<action>',
+    '/admin/services/catalogue',
+    '/admin/users/<int:user_id>/service-agent',
+    '/invoice/<token>',
+    '/invoice/<token>/print',
+    '/invoice/<token>/pay',
+    '/invoice/<token>/status',
+    '/admin/invoices',
+    '/admin/invoices/new',
+    '/admin/invoices/<int:invoice_id>',
+    '/admin/invoices/<int:invoice_id>/send',
+    '/admin/invoices/<int:invoice_id>/cancel',
+    '/admin/invoices/<int:invoice_id>/record-payment',
+    '/admin/invoices/<int:invoice_id>/print',
+    '/admin/users/<int:user_id>/invoice-agent',
+]
+for want in SERVICE_ROUTES:
+    check(f'route {want}', lambda w=want: (_ for _ in ()).throw(AssertionError('missing'))
+          if w not in routes else None)
+
+SERVICE_TEMPLATES = ['services.html', 'service_detail.html', 'create_service.html',
+                     'admin/service_catalogue.html', 'admin/service_requests.html',
+                     'admin/invoices.html', 'admin/invoice_form.html',
+                     'admin/invoice_detail.html', 'invoice_public.html',
+                     'invoice_print.html', '_badges.html']
+for name in SERVICE_TEMPLATES:
+    check(f'template {name}', lambda n=name: app.jinja_env.get_template(n))
+
+
+def services_page_renders():
+    """The services listing must serve to an anonymous visitor.
+
+    It is reachable without an account and therefore reachable by every crawler, so
+    a 500 here is a public page that is down. Asserted on whatever the operator's
+    catalogue happens to hold, including empty.
+    """
+    with app.test_client() as client:
+        resp = client.get('/services', base_url='https://localhost')
+        assert resp.status_code == 200, resp.status_code
+        body = resp.get_data(as_text=True)
+        assert 'name="robots"' not in body, 'services must not be noindex'
+        # A search that finds nothing is still a 200, not a 500.
+        empty = client.get('/services?search=zzznosuchservicezzz',
+                           base_url='https://localhost')
+        assert empty.status_code == 200, empty.status_code
+        # An id that does not exist is a 404, not a traceback.
+        missing = client.get('/services/999999999', base_url='https://localhost')
+        assert missing.status_code == 404, missing.status_code
+
+
+check('/services renders for an anonymous visitor', services_page_renders)
+
+
+def badge_macro_renders():
+    """The four badges, from the one macro, with the crown printing "Brand".
+
+    `trusted` is passed explicitly so this stays fixture-free: the default calls
+    seller_is_trusted, which reads the trust table. The order of the three seals is
+    asserted because style.css stacks them with sibling selectors - swap two and
+    they render on top of each other.
+    """
+    from types import SimpleNamespace
+    crown, gem = chr(0x1F451), chr(0x1F48E)
+    # Both of these carry a trailing U+FE0F variation selector in _badges.html, and
+    # the match has to include it or the assertion would pass on a template that
+    # dropped the selector. Built with chr() so this file stays pure ASCII: its
+    # output is captured with the console codec by run_all_checks, and a cp1252
+    # console cannot print an emoji - a failure message would become a
+    # UnicodeEncodeError on top of the real failure.
+    tick, shield = chr(0x2611) + chr(0xFE0F), chr(0x1F6E1) + chr(0xFE0F)
+    source = ("{% from '_badges.html' import product_badges, product_badge_pills %}"
+              '{{ product_badges(product, trusted=trusted) }}'
+              '|{{ product_badge_pills(product, trusted=trusted) }}')
+    template = app.jinja_env.from_string(source)
+
+    seller = SimpleNamespace(id=1, is_brand=True, brand_name='Samsung',
+                             is_verified_seller=True,
+                             verified_seller_badge_enabled=True)
+    product = SimpleNamespace(seller=seller, is_original_source=True,
+                              is_hot_sale=False, is_brand_partner=False,
+                              brand_label='')
+    seals, pills = template.render(product=product, trusted=True).split('|')
+
+    for part, where in ((seals, 'seals'), (pills, 'pills')):
+        hidden = part.count('aria-hidden="true"')
+        assert '>Brand<' in part or '> Brand<' in part, f'{where}: crown not labelled Brand'
+        assert 'Samsung' not in part.replace('title="Samsung"', ''), \
+            f'{where}: brand name printed instead of kept in the tooltip'
+        assert 'title="Samsung"' in part, f'{where}: brand name lost from the tooltip'
+        assert crown in part, f'{where}: crown emoji missing'
+        assert gem in part, f'{where}: gem emoji missing'
+        assert tick in part, f'{where}: tick emoji missing'
+        assert shield in part, f'{where}: shield emoji missing'
+        assert 'Original' in part and 'Verified Seller' in part and 'Trusted' in part, \
+            f'{where}: a badge label is missing'
+        # Every emoji is hidden from screen readers and the word beside it is not,
+        # so the badge is read as a word rather than as "crown".
+        assert hidden == 4, f'{where}: expected 4 hidden emoji, got {hidden}'
+
+    assert seals.index('Original') < seals.index('Verified Seller') < seals.index('Trusted'), \
+        'seal order changed; style.css stacks them with sibling selectors'
+
+    # Nothing set: no badges at all, rather than four empty shells.
+    bare_seller = SimpleNamespace(id=2, is_brand=False, brand_name='',
+                                  is_verified_seller=False,
+                                  verified_seller_badge_enabled=False)
+    bare = SimpleNamespace(seller=bare_seller, is_original_source=False,
+                           is_hot_sale=False, is_brand_partner=False, brand_label='')
+    blank_seals, blank_pills = template.render(product=bare, trusted=False).split('|')
+    assert not blank_seals.strip(), f'unset product still rendered: {blank_seals[:60]!r}'
+    assert not blank_pills.strip(), f'unset product still rendered: {blank_pills[:60]!r}'
+
+    # A verified seller without the privilege gets no seal: the badge is an admin
+    # grant, not a side effect of the seller_status column.
+    ungranted = SimpleNamespace(id=3, is_brand=False, brand_name='',
+                                is_verified_seller=True,
+                                verified_seller_badge_enabled=False)
+    gated = SimpleNamespace(seller=ungranted, is_original_source=False,
+                            is_hot_sale=False, is_brand_partner=False, brand_label='')
+    out = template.render(product=gated, trusted=False)
+    assert 'Verified Seller' not in out, 'verified seal rendered without the grant'
+
+    # A brand-partner product with no seller account still gets the crown, and a
+    # missing seller must not raise - index.html renders cards for deleted sellers.
+    orphan = SimpleNamespace(seller=None, is_original_source=False, is_hot_sale=True,
+                             is_brand_partner=True, brand_label='Anker')
+    orphan_out = template.render(product=orphan, trusted=False)
+    assert 'title="Anker"' in orphan_out, 'brand partner label lost'
+    assert 'brand-tag-stacked' in orphan_out, 'hot-sale brand tag not stacked'
+
+
+check('badge macro renders four badges in a fixed order', badge_macro_renders)
+
+
+# ---------- Rate limiting ----------
+# The default ceilings apply to every registered endpoint, so this is the widest
+# blast radius of anything in this file: get it wrong and the platform refuses
+# ordinary browsing, or - worse - answers 429 to its own health check and the host
+# restarts the container for looking unhealthy. Both halves are asserted, because
+# "no limit was applied" and "a limit was applied and happened to pass" are
+# indistinguishable from the status code alone.
+
+
+def rate_limit_exempt_endpoints():
+    """The endpoints the ceilings skip, and the ones they must not.
+
+    rate_limit_exempt reads request.endpoint, so every case needs a real URL rather
+    than a made-up endpoint name - which is the point: it also proves each name in
+    RATE_LIMIT_EXEMPT_ENDPOINTS still matches a route. A renamed view would leave a
+    stale string in that set silently exempting nothing.
+    """
+    for url, endpoint in (('/static/style.css', 'static'),
+                          ('/favicon.ico', 'favicon'),
+                          ('/manifest.webmanifest', 'web_app_manifest'),
+                          ('/sw.js', 'service_worker'),
+                          ('/healthz', 'healthz'),
+                          ('/robots.txt', 'robots_txt')):
+        with app.test_request_context(url):
+            assert main.request.endpoint == endpoint, \
+                f'{url} resolves to {main.request.endpoint!r}, not {endpoint!r}'
+            assert main.rate_limit_exempt() is True, url
+    assert set(main.RATE_LIMIT_EXEMPT_ENDPOINTS) == {
+        'static', 'favicon', 'web_app_manifest', 'service_worker', 'healthz',
+        'robots_txt'}, sorted(main.RATE_LIMIT_EXEMPT_ENDPOINTS)
+
+    # Ordinary pages stay limited, and so does an unrouted URL: with no endpoint to
+    # name, counting the request is the safe direction.
+    for url in ('/services', '/about', '/zzz-no-such-url-here'):
+        with app.test_request_context(url):
+            assert main.rate_limit_exempt() is False, url
+
+
+check('the ceilings skip static and healthz, nothing else', rate_limit_exempt_endpoints)
+
+
+def rate_limit_key_prefers_the_account():
+    """Signed-in requests key on the account; anonymous ones on the address.
+
+    Kenyan carrier NAT puts many subscribers behind one public IPv4, so two
+    signed-in people sharing an address must not share a bucket. g._login_user is
+    set directly because that is the cache Flask-Login itself writes - it exercises
+    the real current_user proxy with no database fixture, and it is the same cache
+    rate_limit_key's docstring relies on for costing no extra query.
+    """
+    from types import SimpleNamespace
+    import flask
+
+    nat = {'REMOTE_ADDR': '41.90.64.7'}
+    with app.test_request_context('/', environ_base=nat):
+        # Reads through the real anonymous user before anything is cached.
+        assert main.rate_limit_key() == '41.90.64.7', main.rate_limit_key()
+        flask.g._login_user = SimpleNamespace(is_authenticated=True,
+                                              get_id=lambda: '4242')
+        assert main.rate_limit_key() == 'u4242', main.rate_limit_key()
+
+    with app.test_request_context('/', environ_base=nat):
+        flask.g._login_user = SimpleNamespace(is_authenticated=True,
+                                              get_id=lambda: '77')
+        assert main.rate_limit_key() == 'u77', main.rate_limit_key()
+
+    # A user object that raises on attribute access must fall back to the address
+    # rather than taking the request down: this runs in before_request on every
+    # single request, so an exception here is a site-wide 500.
+    class Exploding:
+        @property
+        def is_authenticated(self):
+            raise RuntimeError('login manager not ready')
+
+    with app.test_request_context('/', environ_base=nat):
+        flask.g._login_user = Exploding()
+        assert main.rate_limit_key() == '41.90.64.7', main.rate_limit_key()
+
+
+check('rate limit buckets are per account, not per address',
+      rate_limit_key_prefers_the_account)
+
+
+def rate_limit_headers_name_who_is_counted():
+    """End to end: an exempt request has no limit attached to it at all.
+
+    RATELIMIT_HEADERS_ENABLED is on, and Flask-Limiter only emits X-RateLimit-* when
+    it actually evaluated a limit for the request. So the presence of that header is
+    a direct reading of "this request was counted" - far more precise than a status
+    code, which is 200 both when a limit passed and when none existed.
+    """
+    with app.test_client() as client:
+        page = client.get('/services', base_url='https://localhost')
+        assert 'X-RateLimit-Limit' in page.headers, (
+            'an ordinary page carries no rate limit header: the default ceilings '
+            'are not live at all, so nothing is being limited')
+        for url in ('/static/style.css', '/favicon.ico', '/healthz',
+                    '/manifest.webmanifest', '/sw.js', '/robots.txt'):
+            resp = client.get(url, base_url='https://localhost')
+            # healthz answers 503 when the database is unreachable, which is a
+            # legitimate answer here; 429 never is.
+            assert resp.status_code != 429, (url, resp.status_code)
+            assert 'X-RateLimit-Limit' not in resp.headers, (
+                f'{url} still counts against the caller '
+                f'({resp.headers.get("X-RateLimit-Limit")} ceiling)')
+
+
+check('static and healthz are counted against nobody',
+      rate_limit_headers_name_who_is_counted)
+
+
+def static_burst_is_never_refused():
+    """The failure the exemption exists for, fired for real.
+
+    One shop page carrying a dozen locally stored product images used to spend
+    thirteen requests of the caller's allowance instead of one, so the old "200 per
+    hour" ceiling was reached in roughly fifteen page views. Firing more requests
+    than the per-minute ceiling allows is the only way to prove the exemption holds
+    under repetition rather than only on the first request.
+    """
+    try:
+        ceiling = int(str(main.RATE_LIMIT_PER_MINUTE).split()[0])
+    except (ValueError, IndexError):
+        raise AssertionError(
+            f'unparseable RATE_LIMIT_PER_MINUTE: {main.RATE_LIMIT_PER_MINUTE!r}')
+    burst = ceiling + 5
+    if burst > 400:
+        # Said out loud rather than quietly shortening the loop. A suite that
+        # reports a pass it did not run is worse than one that admits a skip.
+        print(f'         (burst skipped: a ceiling of {ceiling}/minute is too high '
+              f'to fire from a smoke test - the header check above still proves '
+              f'the exemption)')
+        return
+    with app.test_client() as client:
+        for index in range(burst):
+            resp = client.get('/static/style.css', base_url='https://localhost')
+            assert resp.status_code != 429, (
+                f'a static file was refused after {index + 1} requests against a '
+                f'{ceiling}/minute ceiling; the exemption is not working')
+        # And none of it touched the caller's real allowance. Compared as "how much
+        # has been spent" so the assertion does not depend on which of the two
+        # ceilings Flask-Limiter chooses to report. The slack covers the handful of
+        # ordinary page requests the checks above this one already made.
+        page = client.get('/services', base_url='https://localhost')
+        limit = int(page.headers['X-RateLimit-Limit'])
+        spent = limit - int(page.headers['X-RateLimit-Remaining'])
+        assert spent <= 40, (
+            f'{burst} static requests spent {spent} of a {limit} allowance; they '
+            f'should have spent none')
+
+
+check('a burst of static files is never refused', static_burst_is_never_refused)
 
 
 print()
