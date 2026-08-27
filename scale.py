@@ -208,6 +208,102 @@ def unpack_ids(packed):
     return list(packed)
 
 
+class SingleFlight:
+    """Let one caller compute a missing cache entry while the rest wait for it.
+
+    A TTL cache answers a warm key for free no matter how many ask at once -
+    measured at 0 queries for 24 simultaneous callers. It does nothing at all for a
+    *cold* key: the same measurement is 24 queries for 24 callers, one each, because
+    nothing stands between them and the database. Sequential tests cannot see this,
+    since with one caller the two cases are identical.
+
+    That gap matters at two specific moments, and both are ordinary rather than
+    exotic. Every TTL expiry on a popular key lands while requests for it are in
+    flight, so the busiest search on the platform re-runs its query once per
+    concurrent asker, every TTL, forever. And a deploy starts every worker with an
+    empty cache under whatever traffic is already arriving, which is the worst
+    possible moment to multiply the database load by the concurrency.
+
+    **Striped, not per-key.** A dict of locks keyed by cache key is itself a key
+    space that grows with traffic - the exact shape of leak this module's caches are
+    bounded to avoid - and refcounting entries out of it again is a second chance to
+    get it wrong. A fixed array of locks chosen by hash has no growth and no cleanup
+    path to be wrong: two unrelated keys can collide and one waits briefly for the
+    other, which costs a little latency on a miss and cannot cost correctness,
+    because callers re-check the cache after acquiring and simply do their own work
+    if it is still absent.
+
+    **The lock is an optimisation and never a dependency.** ``run`` waits only up to
+    ``timeout``; past that it computes anyway. So the worst thing a slow or stuck
+    holder can do is return this path to exactly the behaviour it had before this
+    class existed, rather than pile threads up behind it. That property is what makes
+    this safe to put on a page anyone can load.
+
+    **Per process, not per platform.** Each gunicorn worker holds its own locks and
+    its own cache, so a cold key across twelve workers costs up to twelve queries -
+    one each - not one. What this removes is the *inner* multiplier: the cost of a
+    cold key stops scaling with the concurrency inside a worker and scales only with
+    the worker count, which is a fixed number set at deploy. Collapsing it further
+    would take a shared lock in Redis, and Redis is optional here by requirement, so
+    a cross-process flight would either be a hard dependency or a second code path
+    that only runs in production. Worker-count duplication is the deliberate price of
+    not having either.
+    """
+
+    def __init__(self, stripes=64, timeout=2.5, name='single-flight'):
+        self._locks = [threading.Lock() for _ in range(max(1, int(stripes)))]
+        self.timeout = max(0.0, float(timeout))
+        self.name = name
+        # Guarded, unlike the read-mostly counters elsewhere in this module.
+        # ``x += 1`` is a load-add-store, so concurrent callers do lose increments -
+        # and the concurrency check asserts that every query beyond the first is
+        # explained by a recorded timeout, which a lost increment turns into a
+        # spurious failure. The lock is only ever taken on a cache miss, which is
+        # already about to do a database query.
+        self._counts = threading.Lock()
+        self.collapsed = 0
+        self.timeouts = 0
+
+    def _bump(self, attribute):
+        with self._counts:
+            setattr(self, attribute, getattr(self, attribute) + 1)
+
+    def run(self, key, read, compute):
+        """Return ``read()``'s value, computing it once across concurrent callers.
+
+        ``read`` must return the ``CACHE_MISS`` sentinel when absent, not None -
+        a cached empty list is a real answer and re-computing it on every request
+        would defeat the point on exactly the searches that return nothing.
+        """
+        lock = self._locks[hash(key) % len(self._locks)]
+        acquired = lock.acquire(timeout=self.timeout) if self.timeout else False
+        if not acquired:
+            # Either a genuinely slow holder or an unlucky stripe collision. Neither
+            # is worth queueing for: do the work, which is what would have happened
+            # anyway without any of this.
+            self._bump('timeouts')
+            return compute()
+        try:
+            # Double-checked on purpose: whoever held this lock may have been
+            # computing this very key and filling the cache while we waited.
+            found = read()
+            if found is not CACHE_MISS:
+                self._bump('collapsed')
+                return found
+            return compute()
+        finally:
+            lock.release()
+
+    def stats(self):
+        return {
+            'name': self.name,
+            'stripes': len(self._locks),
+            'timeout_seconds': self.timeout,
+            'collapsed': self.collapsed,
+            'timeouts': self.timeouts,
+        }
+
+
 class CounterBuffer:
     """Coalesces many small increments into occasional batched writes.
 

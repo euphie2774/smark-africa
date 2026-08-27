@@ -41,10 +41,11 @@ for key in ('MARKET_COMPARABLE_TTL', 'PRICE_CHECK_RATE_LIMIT', 'PHONE_EVIDENCE_M
             'PHONE_EVIDENCE_REQUIRED', 'PHONE_EVIDENCE_RATE_LIMIT',
             'RATE_LIMIT_PER_HOUR', 'RATE_LIMIT_PER_MINUTE',
             'PRODUCT_SEARCH_IDS_TTL', 'PRODUCT_SEARCH_IDS_MAX',
+            'SEARCH_FLIGHT_STRIPES', 'SEARCH_FLIGHT_WAIT', 'SITEMAP_FLIGHT_WAIT',
             'REDIS_URL', 'CACHE_REDIS_URL'):
     os.environ.pop(key, None)
 
-from scale import pack_ids, unpack_ids
+from scale import CACHE_MISS, SingleFlight, pack_ids, unpack_ids
 
 failures = []
 passed = []
@@ -302,7 +303,14 @@ def cache_keys_are_stable():
         hits, misses = ids_cache.hits, ids_cache.misses
         main.cached_product_search_ids()
         main.cached_product_search_ids()
-        assert ids_cache.hits - hits == 1 and ids_cache.misses - misses == 1, (
+        # +1 hit, and exactly +2 misses for two calls. The second miss is the
+        # single-flight re-reading the cache after taking the stripe: the first caller
+        # of a cold key looks twice on purpose, because between its own miss and the
+        # lock another thread may have filled the entry. Pinned rather than loosened to
+        # >=1 so both directions still fail loudly - one miss would mean the
+        # double-check was dropped and concurrent callers all query, three would mean
+        # the compute path is reading the cache again after writing it.
+        assert ids_cache.hits - hits == 1 and ids_cache.misses - misses == 2, (
             f'the unfiltered shop page did not hit its own cache on repeat: '
             f'+{ids_cache.hits - hits} hits, +{ids_cache.misses - misses} misses')
         assert len(ids_cache._data) == 1, (
@@ -450,6 +458,167 @@ def cached_id_lists_stay_small_in_memory():
 
 
 check('cached id lists are packed and stay copies', cached_id_lists_stay_small_in_memory)
+
+
+def single_flight_collapses_and_never_blocks():
+    """One caller computes a cold entry; the rest must not, and must not be stuck.
+
+    Concurrency itself is measured in tools/concurrency_smoke.py, which is kept out of
+    the suite because thread interleaving is not reproducible. What *is* deterministic
+    is the contract that measurement relies on, and all three parts of it can be
+    checked with no threads at all:
+
+      * A waiter that finds the entry present after acquiring returns it **without
+        calling compute**. This is the whole mechanism - a double-check that re-reads
+        rather than trusting its earlier miss. Drop the re-read and the class becomes
+        an expensive no-op that still runs every query.
+      * A miss falls through to compute. Obvious, and the reason the assertion exists:
+        a wrapper that swallowed a genuine miss would serve empty search results.
+      * ``CACHE_MISS`` is what signals absence, not ``None`` and not a falsy value. A
+        cached empty list is a real answer - the searches that legitimately match
+        nothing are precisely the cheap ones to cache - so treating ``[]`` as absent
+        would re-run the query on every request for them.
+
+    And the property that makes this safe to put on an anonymous page: the wait is
+    bounded. With a stripe already held and a zero timeout the caller computes
+    immediately rather than queueing, so the worst case is the behaviour that was
+    there before the class existed.
+    """
+    flight = SingleFlight(stripes=4, timeout=0.5, name='wiringsmoke-flight')
+    calls = []
+
+    def compute():
+        calls.append(1)
+        return ['computed']
+
+    # A cold key: nothing to find, so the work happens.
+    assert flight.run('k1', lambda: CACHE_MISS, compute) == ['computed'], \
+        'a cold key did not reach compute; every search would come back empty'
+    assert len(calls) == 1, calls
+    # A warm key: found on the re-read, so compute must not run at all.
+    assert flight.run('k1', lambda: ['cached'], compute) == ['cached'], \
+        'the re-read result was discarded; the flight recomputed an entry it had found'
+    assert len(calls) == 1, f'compute ran for an entry that was already present: {calls}'
+    # An empty list is a value, not a miss.
+    assert flight.run('k2', lambda: [], compute) == [], \
+        'a cached empty result was treated as absent'
+    assert len(calls) == 1, f'a cached empty result was recomputed: {calls}'
+    assert flight.collapsed >= 2, flight.stats()
+
+    # Bounded wait: hold the stripe this key maps to and give the caller no time to
+    # wait for it. It must compute rather than block.
+    held = flight._locks[hash('k3') % len(flight._locks)]
+    held.acquire()
+    try:
+        impatient = SingleFlight(stripes=4, timeout=0, name='wiringsmoke-nowait')
+        impatient._locks = flight._locks
+        assert impatient.run('k3', lambda: CACHE_MISS, compute) == ['computed']
+        assert impatient.timeouts == 1, impatient.stats()
+    finally:
+        held.release()
+
+
+check('single-flight collapses duplicate work without blocking on it',
+      single_flight_collapses_and_never_blocks)
+
+
+class FlightRecorder(SingleFlight):
+    """A SingleFlight that notes the keys it was asked for and otherwise behaves as one.
+
+    Shared by the two wiring checks below because they are asking the same question of
+    different call sites: was the flight actually reached.
+    """
+
+    def __init__(self, name='wiringsmoke-recorder'):
+        super().__init__(stripes=4, timeout=0.5, name=name)
+        self.keys = []
+
+    def run(self, key, read, compute):
+        self.keys.append(key)
+        return super().run(key, read, compute)
+
+
+def search_paths_run_under_the_flight():
+    """The searches anyone can hit must actually be wired to the flight.
+
+    Asserted separately from the class's own behaviour because a correct
+    SingleFlight that nothing calls is the failure mode with no symptom: every check
+    above still passes, the module still imports, and a cold key still costs one
+    query per concurrent caller. Counting the flight's own stats cannot show this -
+    sequential callers never collapse anything, so those numbers stay at zero whether
+    the wrapper is present or absent.
+
+    So the flight object is swapped for a recorder that notes the keys it was asked
+    for and otherwise behaves identically. Both caches are cleared first, because a
+    warm entry returns before reaching the flight at all - which is the fast path
+    working, and would read here as the wiring being gone.
+    """
+    recorder = FlightRecorder()
+    original = main._search_flight
+    main._search_flight = recorder
+    try:
+        with app.app_context():
+            main._product_ids_cache.clear()
+            main._service_ids_cache.clear()
+            ids = main.cached_product_search_ids(search='wiringsmoke-flightpath')
+            assert type(ids) is list, type(ids).__name__
+            service_ids = main.cached_service_ids(search='wiringsmoke-flightpath')
+            assert type(service_ids) is list, type(service_ids).__name__
+    finally:
+        main._search_flight = original
+
+    assert len(recorder.keys) == 2, (
+        f'expected the product and service searches to each take the flight once on a '
+        f'cold cache, got {recorder.keys}')
+    # The product key carries the full query signature; the service key is its own
+    # shorter form. Both must be the cache key, not a constant - a single shared key
+    # would serialise every unrelated search behind one lock.
+    assert recorder.keys[0] == main.product_search_cache_key(
+        'wiringsmoke-flightpath', '', '', 'newest'), recorder.keys[0]
+    assert 'wiringsmoke-flightpath' in recorder.keys[1].lower(), recorder.keys[1]
+    assert recorder.keys[0] != recorder.keys[1], recorder.keys
+
+
+check('the product and service searches go through the single-flight',
+      search_paths_run_under_the_flight)
+
+
+def service_reads_run_under_the_flight():
+    """The duty state and the catalogue must reach the flight too.
+
+    These two were measured stampeding - 24 queries for 24 simultaneous cold callers
+    in tools/concurrency_smoke.py - and the duty state is read on every service page
+    and every chatbot turn behind the shortest TTL in the app, so it goes cold four
+    times a minute. Wired here for the same reason the searches are: the wrapper being
+    silently unreached looks exactly like it working.
+
+    The two keys must differ. They share a stripe pool deliberately, but sharing a
+    *key* would mean a catalogue miss and a duty miss each waiting on the other's
+    query, and worse, a waiter's double-check reading the wrong cache and returning
+    one path's value to the other.
+    """
+    recorder = FlightRecorder('wiringsmoke-service-recorder')
+    original = main._service_flight
+    main._service_flight = recorder
+    try:
+        with app.app_context():
+            main._service_duty_cache.clear()
+            main._service_catalogue_cache.clear()
+            duty = main.service_duty_state()
+            assert type(duty) is tuple and len(duty) == 2, duty
+            catalogue = main.service_catalogue()
+            assert type(catalogue) is list, type(catalogue).__name__
+    finally:
+        main._service_flight = original
+
+    assert len(recorder.keys) == 2, (
+        f'expected the duty state and the catalogue to each take the flight once on a '
+        f'cold cache, got {recorder.keys}')
+    assert recorder.keys[0] != recorder.keys[1], recorder.keys
+
+
+check('the duty state and service catalogue go through the single-flight',
+      service_reads_run_under_the_flight)
 
 
 def market_reference_shape():

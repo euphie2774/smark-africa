@@ -56,8 +56,8 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     ServiceCatalogueItem, ServiceLinkRequest, ServiceLinkMessage, \
     Invoice, InvoiceItem, InvoicePayment, generate_invoice_token
 
-from scale import (CACHE_MISS, CounterBuffer, JobLease, TTLCache, bool_env, float_env,
-                   int_env, pack_ids, unpack_ids, worker_identity)
+from scale import (CACHE_MISS, CounterBuffer, JobLease, SingleFlight, TTLCache, bool_env,
+                   float_env, int_env, pack_ids, unpack_ids, worker_identity)
 from runtime import (acquire_lease, drain_outbound, enqueue, enqueue_detached, enqueue_email,
                      enqueue_many, enqueue_sms, ephemeral_delete, ephemeral_get,
                      ephemeral_get_json, ephemeral_set, fanout_notifications, housekeeping,
@@ -5995,6 +5995,14 @@ _product_ids_cache = TTLCache(
     max_entries=int_env('PRODUCT_SEARCH_IDS_MAX', 2048),
     name='product-search-ids')
 
+# Shared by the product and service searches: both are anonymous-reachable, both have
+# one hot key per popular query, and both had a cold key costing one query per
+# concurrent caller. The wait is bounded and falls through to computing anyway, so the
+# worst case is the behaviour that was here before it. See SingleFlight in scale.py.
+_search_flight = SingleFlight(stripes=int_env('SEARCH_FLIGHT_STRIPES', 64),
+                              timeout=float_env('SEARCH_FLIGHT_WAIT', 2.5),
+                              name='search-flight')
+
 
 def search_ids_cache_target():
     """Where per-search id lists belong: 'shared', 'local' or 'off'.
@@ -6029,22 +6037,52 @@ def search_ids_cache_target():
 
 
 def cached_product_search_ids(search='', category_slug='', product_type='', sort='newest'):
+    """Ids for a search, computed once per distinct query rather than per request.
+
+    Wrapped in a single-flight so a *cold* key costs one query across every caller
+    asking for it at that moment, not one query each. Measured before the wrapper:
+    24 identical simultaneous callers ran 24 queries. A warm key already cost zero,
+    so the wrapper changes nothing about the common case - it only closes the window
+    around an expiry and around a deploy, which is when every worker's cache is empty
+    under whatever traffic is already arriving. See tools/concurrency_smoke.py.
+    """
     key = product_search_cache_key(search, category_slug, product_type, sort)
     target = search_ids_cache_target()
-    if target == 'local':
-        cached_ids = _product_ids_cache.get(key)
-        if cached_ids is not None:
-            return unpack_ids(cached_ids)
-    elif target == 'shared':
-        cached_ids = cache.get(key)
-        if cached_ids is not None:
-            return cached_ids
+
+    def read():
+        if target == 'local':
+            cached_ids = _product_ids_cache.lookup(key)
+            return CACHE_MISS if cached_ids is CACHE_MISS else unpack_ids(cached_ids)
+        if target == 'shared':
+            cached_ids = cache.get(key)
+            # The shared backend has no miss sentinel of its own, so None has to
+            # stand in for absent. An id list is never legitimately None - the empty
+            # search returns [] - so nothing is lost by that.
+            return CACHE_MISS if cached_ids is None else cached_ids
+        return CACHE_MISS
+
+    found = read()
+    if found is not CACHE_MISS:
+        return found
+    if target == 'off':
+        return _compute_product_search_ids(key, target, search, category_slug,
+                                           product_type, sort)
+    return _search_flight.run(
+        key, read,
+        lambda: _compute_product_search_ids(key, target, search, category_slug,
+                                            product_type, sort))
+
+
+def _compute_product_search_ids(key, target, search, category_slug, product_type, sort):
     query, _ = build_product_search_query(search, category_slug, product_type, sort)
     ids = [row[0] for row in query.with_entities(Product.id).limit(1000).all()]
     # A search that found almost nothing gets widened. The extra ids are appended,
     # never interleaved, so genuine matches still lead the page - and the widened
     # list is what gets cached, so the expansion is computed once per query rather
-    # than once per search.
+    # than once per search. Running under the single-flight also means concurrent
+    # askers for one thin search make one expansion attempt between them rather than
+    # one each, which matters most when SEMANTIC_SEARCH_AI is on and the per-minute
+    # budget is small.
     if search and len(ids) <= SEMANTIC_SEARCH_MIN_RESULTS:
         try:
             extra = expanded_search_terms(search)
@@ -7564,6 +7602,14 @@ _sitemap_cache = TTLCache(ttl_seconds=int_env('SITEMAP_TTL', 3600), max_entries=
 # One key, so a request naming an unfamiliar host cannot make the database work.
 _sitemap_entry_cache = TTLCache(ttl_seconds=int_env('SITEMAP_TTL', 3600), max_entries=1,
                                 name='sitemap-entries')
+# Its own flight rather than the search one. There is exactly one key here, so one
+# stripe covers it - and sharing the search pool would mean a 1-in-64 chance that some
+# ordinary search hashed onto the stripe a crawler was holding for a 20,000-row scan.
+# The wait is bounded either way, but a shopper's search should not be able to wait on
+# a sitemap build at all, and separating them is cheaper than reasoning about when it
+# would matter.
+_sitemap_flight = SingleFlight(stripes=1, timeout=float_env('SITEMAP_FLIGHT_WAIT', 5.0),
+                               name='sitemap-flight')
 
 
 def sitemap_base():
@@ -7646,40 +7692,23 @@ def sitemap_xml():
     an unauthenticated GET, with no login and no body. Rate-limiting the endpoint is
     not the answer - a 429 here is read by a crawler as a sitemap it could not
     fetch, which is the same class of problem as the 503s this work started from.
+
+    The query layer runs under a single-flight of its own, because this is the most
+    expensive query in the app to duplicate: two crawlers arriving in the same second
+    after an expiry would otherwise each scan 20,000 rows. The flight's wait is
+    bounded and falls through to computing, so a slow scan still cannot make a
+    crawler wait indefinitely for one already in progress. The assembly layer is left
+    unguarded on purpose - it is string concatenation over a list already in memory,
+    so duplicating it costs nothing a lock would not also cost.
     """
     # lookup(), not get(): get() collapses a miss into None, and None is a value
     # this cache could legitimately hold. Only lookup() reports the miss.
     entries = _sitemap_entry_cache.lookup('entries')
     if entries is CACHE_MISS:
-        entries = []
-        for endpoint in ('home', 'shop', 'services_marketplace', 'about', 'terms'):
-            try:
-                entries.append((url_for(endpoint), None, '0.9'))
-            except Exception as exc:
-                # Logged rather than skipped in silence. A typo here drops a page
-                # from the sitemap without changing the status code, so the only
-                # symptom is a URL Google never hears about - which looks exactly
-                # like a URL Google chose to ignore. Getting 'home' wrong once
-                # already cost the homepage its entry.
-                app.logger.warning('sitemap: no endpoint %s (%s)', endpoint, exc)
-        categories = (db.session.query(Category.slug)
-                      .filter(Category.is_active.is_(True))
-                      .order_by(Category.slug).limit(500).all())
-        for (slug,) in categories:
-            entries.append((url_for('category_products', slug=slug), None, '0.7'))
-        products = (db.session.query(Product.slug, Product.updated_at, Product.created_at)
-                    .filter(Product.is_active.is_(True),
-                            or_(Product.review_status == 'approved',
-                                Product.review_status.is_(None)))
-                    .order_by(Product.created_at.desc())
-                    .limit(int_env('SITEMAP_MAX_PRODUCTS', 20000)).all())
-        for slug, updated, created in products:
-            if not slug:
-                continue
-            stamp = updated or created
-            entries.append((url_for('product_page', slug=slug),
-                            stamp.date().isoformat() if stamp else None, '0.8'))
-        _sitemap_entry_cache.set('entries', entries)
+        entries = _sitemap_flight.run(
+            'sitemap-entries',
+            lambda: _sitemap_entry_cache.lookup('entries'),
+            _build_sitemap_entries)
     base = sitemap_base()
     cached = _sitemap_cache.lookup(base)
     if cached is CACHE_MISS:
@@ -7698,6 +7727,43 @@ def sitemap_xml():
     response = make_response(cached)
     response.headers['Content-Type'] = 'application/xml; charset=utf-8'
     return response
+
+
+def _build_sitemap_entries():
+    """The host-independent half of the sitemap: relative paths and timestamps."""
+    entries = []
+    for endpoint in ('home', 'shop', 'services_marketplace', 'about', 'terms'):
+        try:
+            entries.append((url_for(endpoint), None, '0.9'))
+        except Exception as exc:
+            # Logged rather than skipped in silence. A typo here drops a page
+            # from the sitemap without changing the status code, so the only
+            # symptom is a URL Google never hears about - which looks exactly
+            # like a URL Google chose to ignore. Getting 'home' wrong once
+            # already cost the homepage its entry.
+            app.logger.warning('sitemap: no endpoint %s (%s)', endpoint, exc)
+    categories = (db.session.query(Category.slug)
+                  .filter(Category.is_active.is_(True))
+                  .order_by(Category.slug).limit(500).all())
+    for (slug,) in categories:
+        entries.append((url_for('category_products', slug=slug), None, '0.7'))
+    products = (db.session.query(Product.slug, Product.updated_at, Product.created_at)
+                .filter(Product.is_active.is_(True),
+                        or_(Product.review_status == 'approved',
+                            Product.review_status.is_(None)))
+                .order_by(Product.created_at.desc())
+                .limit(int_env('SITEMAP_MAX_PRODUCTS', 20000)).all())
+    for slug, updated, created in products:
+        if not slug:
+            continue
+        stamp = updated or created
+        entries.append((url_for('product_page', slug=slug),
+                        stamp.date().isoformat() if stamp else None, '0.8'))
+    # Set inside the computing function rather than at the call site so the
+    # single-flight's double-check can see it: the holder fills the cache before
+    # releasing the stripe, which is what makes a waiter's re-read succeed.
+    _sitemap_entry_cache.set('entries', entries)
+    return entries
 
 
 @app.route('/test-email')
@@ -18746,6 +18812,28 @@ _service_ids_cache = TTLCache(ttl_seconds=SERVICE_LIST_TTL, max_entries=256,
 _service_live_keys_cache = TTLCache(ttl_seconds=SERVICE_LIST_TTL, max_entries=4,
                                     name='service-live-keys')
 
+# Measured, not assumed: tools/concurrency_smoke.py put 24 simultaneous cold callers
+# through each cached read on this page. The duty state stampeded outright - 24 queries
+# for 24 callers - and the catalogue measured 2 on one run and 24 on the next, which is
+# the same defect wearing a luckier interleaving. Both go through this.
+#
+# The duty state is the one that matters most: shortest TTL in the app (15s, so it goes
+# cold four times a minute) on the widest read path (every service page and every
+# chatbot turn), which is the combination that turns a small query into a burst of them
+# at a million users.
+#
+# Four stripes for two keys, so the two normally hash apart; if they ever collide the
+# cost is one small query waiting on another small query, which is why they can share a
+# pool at all. The sitemap got its own flight instead because a 20,000-row crawler scan
+# and a shopper's search are not the same order of magnitude - these two are.
+#
+# The wait is deliberately shorter than the search flight's and deliberately not
+# tunable: these are `limit(200)` reads on indexed predicates, so a holder that has not
+# finished in a second is not slow, it is stuck - and the right response to stuck is to
+# compute rather than to keep waiting. The searches got a knob because their cost scales
+# with the catalogue; these do not.
+_service_flight = SingleFlight(stripes=4, timeout=1.0, name='service-flight')
+
 # The eighteen the MVP named. Seeded once; after that the table is the truth and
 # the admin owns it, so an admin who renames or deactivates one is not overwritten
 # on the next boot.
@@ -18829,18 +18917,34 @@ def service_catalogue(seller_only=False):
     Read on every services page and every chatbot turn that lists services. The
     full list is cached once and the seller view filtered in Python, so the switch
     between the two does not cost a second query.
+
+    The miss goes through the same flight as the duty state, for the same reason and
+    with an honest history: measured cold under 24 simultaneous callers this looked
+    like 2 queries on one run and 24 on the next, so the "too small to bother locking"
+    reading was an artefact of one interleaving rather than a property of the code. A
+    cache with no single-flight stampedes or does not purely on thread timing, and
+    guarding it costs a lock that is only ever taken on a miss.
     """
     cached = _service_catalogue_cache.lookup('rows')
     if cached is CACHE_MISS:
-        rows = ServiceCatalogueItem.query.filter_by(is_active=True).order_by(
-            ServiceCatalogueItem.sort_order.asc(),
-            ServiceCatalogueItem.label.asc()).limit(200).all()
-        cached = tuple(ServiceOption(row.key, row.label, row.emoji or '',
-                                     bool(row.seller_listable)) for row in rows)
-        _service_catalogue_cache.set('rows', cached)
+        cached = _service_flight.run(
+            'service-catalogue', lambda: _service_catalogue_cache.lookup('rows'),
+            _compute_service_catalogue)
     if seller_only:
         return [row for row in cached if row.seller_listable]
     return list(cached)
+
+
+def _compute_service_catalogue():
+    """The query half of service_catalogue, run by at most one caller at a time."""
+    rows = ServiceCatalogueItem.query.filter_by(is_active=True).order_by(
+        ServiceCatalogueItem.sort_order.asc(),
+        ServiceCatalogueItem.label.asc()).limit(200).all()
+    cached = tuple(ServiceOption(row.key, row.label, row.emoji or '',
+                                 bool(row.seller_listable)) for row in rows)
+    # Filled before the stripe is released so a waiter's re-read finds it.
+    _service_catalogue_cache.set('rows', cached)
+    return cached
 
 
 def invalidate_service_caches():
@@ -18880,10 +18984,30 @@ def service_duty_state():
     Two lists because a nominated agent is preferred but not required: requests are
     routed to an agent when one is on duty, and to any on-duty admin otherwise. A
     nomination that nobody honours must never be the reason a client is turned away.
+
+    Read on every service detail page and every chatbot turn, behind a 15-second TTL,
+    so the interesting case is not the hit - it is the four moments a minute when the
+    entry is gone and every request in flight wants it back. That is why the miss goes
+    through a single-flight rather than straight to the query.
     """
     cached = _service_duty_cache.lookup('duty')
     if cached is not CACHE_MISS:
         return cached
+    return _service_flight.run('duty',
+                               lambda: _service_duty_cache.lookup('duty'),
+                               _compute_service_duty_state)
+
+
+def _compute_service_duty_state():
+    """The query half of service_duty_state, run by at most one caller at a time.
+
+    The failure path stays deliberately uncached. Storing ([], []) would pin "nobody
+    is on duty" for the whole TTL, so one transient connection blip would send clients
+    to WhatsApp for fifteen seconds while an admin sat at the desk. The cost of not
+    caching it is that concurrent callers serialise through the flight on a failing
+    query instead of collapsing - which is bounded by the flight's own wait, and a
+    failing query returns immediately anyway.
+    """
     try:
         rows = db.session.query(User.id, User.service_linking_agent).filter(
             User.is_admin.is_(True),
@@ -18898,6 +19022,9 @@ def service_duty_state():
         db.session.rollback()
         return ([], [])
     state = ([row[0] for row in rows if row[1]], [row[0] for row in rows])
+    # Set here rather than at the call site so the single-flight's double-check can see
+    # it: the holder fills the cache before releasing the stripe, which is what makes a
+    # waiter's re-read succeed instead of running this query again.
     _service_duty_cache.set('duty', state)
     return state
 
@@ -18947,9 +19074,23 @@ def cached_service_ids(service_key='', search=''):
     # is why it needs the token at all rather than .lower() - 'dry clean' and
     # 'dry-clean' are different queries and must not share an entry.
     key = f'{exact_cache_token(service_key or "all", 60)}|{search_cache_token(search, 60)}'
-    cached = _service_ids_cache.lookup(key)
+
+    def read():
+        return _service_ids_cache.lookup(key)
+
+    cached = read()
     if cached is not CACHE_MISS:
         return unpack_ids(cached)
+    return _search_flight.run(key, lambda: _unpack_or_miss(read()),
+                              lambda: _compute_service_ids(key, service_key, search))
+
+
+def _unpack_or_miss(found):
+    """A service cache read, unpacked, with the miss sentinel passed straight through."""
+    return found if found is CACHE_MISS else unpack_ids(found)
+
+
+def _compute_service_ids(key, service_key, search):
     query = ServiceListing.query.filter_by(is_active=True)
     if service_key:
         query = query.filter(ServiceListing.service_key == service_key)

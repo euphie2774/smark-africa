@@ -42,6 +42,41 @@ SCRIPTS = [
 ]
 
 
+def report_failure(output, returncode, context=30, tail=20):
+    """Print enough of a failing script's output to diagnose it here.
+
+    Filtering to lines containing 'FAIL' threw away the one thing worth keeping.
+    The comparative checks in list_page_smoke.py print *why* a query count grew
+    immediately after the failing line - which statement, and how many times - and
+    none of those lines say 'FAIL', so a run of the suite reported two numbers and
+    discarded the explanation. An intermittent failure that only reproduces inside
+    the suite is then undiagnosable from the only place it appears.
+
+    So: from the first failing line onward, bounded. And when nothing matched at
+    all, the tail instead - a script killed by the OS (Windows exit 3221225477 is
+    an access violation) writes no failure line of its own, and the last thing it
+    printed is the only clue to where it died.
+    """
+    lines = output.splitlines()
+    marks = [i for i, line in enumerate(lines)
+             if 'FAIL' in line or 'Error' in line or 'error' in line]
+    if marks:
+        start = marks[0]
+        window = lines[start:start + context]
+        truncated = len(lines) - (start + len(window))
+    else:
+        window = lines[-tail:]
+        truncated = 0
+        print(f'         (exit {returncode}, no failure line printed; last '
+              f'{len(window)} line(s) of output)')
+    for line in window:
+        text = line.rstrip()
+        if text:
+            print(f'         {text[:200]}')
+    if truncated > 0:
+        print(f'         ... {truncated} further line(s) not shown')
+
+
 def main():
     env = dict(os.environ, DISABLE_BACKGROUND_JOBS='1', PYTHONWARNINGS='ignore')
     failed = []
@@ -62,9 +97,7 @@ def main():
         ok = result.returncode == 0
         if not ok:
             failed.append(script)
-            for line in output.splitlines():
-                if 'FAIL' in line or 'Error' in line or 'error' in line:
-                    print(f'         {line.strip()[:160]}')
+            report_failure(output, result.returncode)
         print(f'  [{"ok  " if ok else "FAIL"}] {script} - {note}')
 
     print()
