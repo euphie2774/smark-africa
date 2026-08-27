@@ -2851,6 +2851,19 @@ TRUSTED_SELLER_SCORE = float_env('TRUSTED_SELLER_MIN_SCORE', 80)
 _trusted_seller_cache = TTLCache(ttl_seconds=TRUSTED_SELLER_TTL, max_entries=2,
                                  name='trusted-sellers')
 
+# The cheap reads that happen on the way to rendering almost any page: the nav
+# categories, the trusted-seller id set behind every badge, and the catalogue keys the
+# chatbot menu is built from. Individually trivial queries, which is exactly why they
+# were left unguarded at first - and the wrong reason, because the cost of a cold key
+# is (queries x concurrent callers) no matter how small one query is, and these three
+# are read by more concurrent callers than anything else in the app.
+#
+# One shared pool because they are all the same order of magnitude, so a collision
+# costs one small query waiting on another. Eight stripes for four keys, and the wait
+# is short: nothing here scans, so a holder that has not finished in a second is stuck
+# rather than slow, and the answer to stuck is to compute.
+_render_flight = SingleFlight(stripes=8, timeout=1.0, name='render-flight')
+
 
 def trusted_seller_ids():
     """Ids of sellers scoring 80+ on trust, cached, as a frozenset.
@@ -2858,10 +2871,25 @@ def trusted_seller_ids():
     Capped at 5000 rather than unbounded: this is rendered on every shop page, and
     a set that grows without limit is a slow memory leak per worker. Past the cap a
     seller simply does not get the badge, which is the harmless direction to fail.
+
+    The miss runs under the render flight, so an expiry during a burst of shop-page
+    traffic costs one query rather than one per request in flight.
     """
     cached = _trusted_seller_cache.lookup('ids')
     if cached is not CACHE_MISS:
         return cached
+    return _render_flight.run('trusted-sellers',
+                              lambda: _trusted_seller_cache.lookup('ids'),
+                              _compute_trusted_seller_ids)
+
+
+def _compute_trusted_seller_ids():
+    """The query half of trusted_seller_ids, run by at most one caller at a time.
+
+    Unlike the duty state, the failure result *is* cached. A missing badge for one
+    TTL is invisible; "nobody is on duty" for one TTL sends a client to WhatsApp when
+    an admin was at the desk. Different blast radius, so a different choice.
+    """
     try:
         rows = db.session.query(TrustScore.entity_id).filter(
             TrustScore.entity_type == 'seller',
@@ -4300,7 +4328,18 @@ def comparable_price_stats(name='', category_id=None, exclude_id=None, limit=12)
     found = _comparable_price_cache.lookup(key)
     if found is not CACHE_MISS:
         return found
+    # On the search flight rather than the render one: this is an 80-row scan ordered by
+    # updated_at with a key space that grows per distinct query, which is the search
+    # profile, not the nav profile. Sellers typing the same popular product name is the
+    # normal case here, so those are exactly the callers worth collapsing.
+    return _search_flight.run(
+        key, lambda: _comparable_price_cache.lookup(key),
+        lambda: _compute_comparable_price_stats(key, tokens, category_id, exclude_id,
+                                                limit))
 
+
+def _compute_comparable_price_stats(key, tokens, category_id, exclude_id, limit):
+    """The query half of comparable_price_stats, one caller per key at a time."""
     query = db.session.query(
         Product.short_description, Product.name, Product.selling_price,
         Product.discount_percent, Product.updated_at, Product.created_at,
@@ -5781,16 +5820,31 @@ def nav_categories(active_only=True):
     Staleness here is a category appearing in the menu up to NAV_CATEGORY_TTL
     seconds late, which is worth trading for not asking the database the same
     question on every page view. Admin edits invalidate it immediately anyway.
+
+    This is the most-read cache in the app - almost every template renders the nav -
+    so it is also the one where a cold key costs the most: the multiplier on an expiry
+    is every request in flight, not every request to one page. Hence the flight.
     """
     key = 'active' if active_only else 'all'
     found = _nav_category_cache.lookup(key)
     if found is not CACHE_MISS:
         return found
+    return _render_flight.run(f'nav-categories:{key}',
+                              lambda: _nav_category_cache.lookup(key),
+                              lambda: _compute_nav_categories(key, active_only))
+
+
+def _compute_nav_categories(key, active_only):
+    """The query half of nav_categories, run by at most one caller at a time."""
     query = db.session.query(Category.id, Category.name, Category.slug)
     if active_only:
         query = query.filter(Category.is_active.is_(True))
+    # Capped like every other list in this module. Categories are admin-created so the
+    # table is small in practice, but "small in practice" is what an uncapped .all()
+    # relies on, and this one renders on every page - a nav with 500 entries is already
+    # broken as navigation long before the query is the problem.
     rows = [NavCategory(row[0], row[1], row[2])
-            for row in query.order_by(Category.name.asc()).all()]
+            for row in query.order_by(Category.name.asc()).limit(500).all()]
     return _nav_category_cache.set(key, rows)
 
 
@@ -5840,6 +5894,26 @@ DEFAULT_SEARCH_CONCEPTS = {
 _search_expansion_cache = TTLCache(
     ttl_seconds=float_env('SEMANTIC_SEARCH_TTL', 900), max_entries=512,
     name='search-expansion')
+
+# Its own pool, not the render one and not the search one, because this is the only
+# cached read in the app that can make an *outbound network call* on a miss. Two things
+# follow from that. Nothing cheap may ever queue behind it, which rules out sharing with
+# the nav reads. And duplicating a miss does not just cost a query - with
+# SEMANTIC_SEARCH_AI on it spends real money and burns the per-minute budget above, so
+# twenty people pasting the same failed search would eat two thirds of a minute's quota
+# on one answer. Collapsing them is worth more here than anywhere else.
+#
+# The wait is tunable and longer than the render flight's, because unlike those this
+# genuinely can take seconds by design (SEMANTIC_SEARCH_AI_TIMEOUT is 2.5s), and waiting
+# for an answer already being fetched beats paying for a second copy of it.
+#
+# Nested inside the search flight: _compute_product_search_ids holds a search stripe
+# when it calls expanded_search_terms. That ordering is one-directional - nothing on
+# this path calls back into the searches - and it could not deadlock even if it were,
+# because every acquire here is a bounded wait that falls through to computing.
+_expansion_flight = SingleFlight(stripes=32,
+                                 timeout=float_env('SEARCH_EXPANSION_FLIGHT_WAIT', 3.0),
+                                 name='expansion-flight')
 
 # The AI layer is off by default, deliberately. It is a network call on the
 # search path, and the standing instruction for this platform is that a million
@@ -5985,6 +6059,18 @@ def expanded_search_terms(text):
     cached = _search_expansion_cache.lookup(normalised)
     if cached is not CACHE_MISS:
         return cached
+    return _expansion_flight.run(normalised,
+                                 lambda: _search_expansion_cache.lookup(normalised),
+                                 lambda: _compute_expanded_terms(normalised))
+
+
+def _compute_expanded_terms(normalised):
+    """The expansion half, run by at most one caller per term at a time.
+
+    An empty result is cached like any other, and must be: a term the concept map does
+    not know and the AI could not help with is precisely the one that would otherwise
+    re-ask on every request for it.
+    """
     terms = concept_expansion(normalised) or ai_expansion(normalised)
     _search_expansion_cache.set(normalised, terms)
     return terms
@@ -18965,13 +19051,21 @@ def service_keys_with_providers():
     """
     cached = _service_live_keys_cache.lookup('keys')
     if cached is CACHE_MISS:
-        rows = (db.session.query(ServiceListing.service_key)
-                .filter(ServiceListing.is_active.is_(True),
-                        ServiceListing.service_key.isnot(None))
-                .group_by(ServiceListing.service_key).limit(400).all())
-        cached = {row[0] for row in rows if row[0]}
-        _service_live_keys_cache.set('keys', cached)
+        cached = _render_flight.run(
+            'service-live-keys', lambda: _service_live_keys_cache.lookup('keys'),
+            _compute_service_live_keys)
     return cached
+
+
+def _compute_service_live_keys():
+    """The query half of service_keys_with_providers, one caller at a time."""
+    rows = (db.session.query(ServiceListing.service_key)
+            .filter(ServiceListing.is_active.is_(True),
+                    ServiceListing.service_key.isnot(None))
+            .group_by(ServiceListing.service_key).limit(400).all())
+    keys = {row[0] for row in rows if row[0]}
+    _service_live_keys_cache.set('keys', keys)
+    return keys
 
 
 def service_catalogue_map():

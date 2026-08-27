@@ -257,17 +257,18 @@ def run():
     print(f'  ..... measured: {cold} queries for {THREADS} cold simultaneous callers '
           f'({cold / THREADS:.0%} of unbatched, {collapsed} collapsed, {timeouts} timed out)')
 
-    # --- the other cached read paths, measured rather than assumed ------------------
-    # The searches were wrapped because a duplicated query there is a full catalogue
-    # scan. These three are small indexed reads, so the question was not whether they
-    # can stampede - every unguarded cache can - but whether the burst is big enough
-    # to be worth another lock. Measured here so that judgement rests on a number.
+    # --- every other cached read path, measured rather than assumed -----------------
+    # The searches were wrapped first because a duplicated query there is a full
+    # catalogue scan. The rest are small indexed reads, so the question was whether the
+    # burst is big enough to be worth another lock - and the answer turned out to be
+    # that the question was wrong. Cold-key cost is (one query x concurrent callers) no
+    # matter how cheap one query is, and the cheapest reads here are the ones read by
+    # the most concurrent callers: the nav categories render on nearly every page.
     #
-    # It was worth it for all three, and the catalogue is why this loop exists rather
-    # than a one-off measurement: it read 2 queries for 24 callers on one run and 24 on
-    # the next, from identical code. A cache with no single-flight stampedes or does not
-    # purely on thread timing, so "measured small once" is not evidence of anything. All
-    # three now assert the sharp form, which cannot pass by luck.
+    # The catalogue is why this is a loop with a sharp assertion rather than a one-off
+    # measurement: it read 2 queries for 24 callers on one run and 24 on the next, from
+    # identical code. "Measured small once" is evidence of nothing. Every path asserts
+    # queries <= 1 + recorded flight timeouts, which cannot pass by luck.
     print('other cached reads, cold, all callers at once')
     for label, warm, clear, call, match, flight in (
         ('service ids', lambda: app_module.cached_service_ids(search=TAG),
@@ -282,6 +283,23 @@ def run():
          lambda: app_module._service_catalogue_cache.clear(),
          lambda i: app_module.service_catalogue(), 'from service_catalogue_items',
          app_module._service_flight),
+        ('service keys with providers', lambda: app_module.service_keys_with_providers(),
+         lambda: app_module._service_live_keys_cache.clear(),
+         lambda i: app_module.service_keys_with_providers(), 'from service_listings',
+         app_module._render_flight),
+        # Read on nearly every page in the app, so the widest multiplier of the lot.
+        ('nav categories', lambda: app_module.nav_categories(),
+         lambda: app_module._nav_category_cache.clear(),
+         lambda i: app_module.nav_categories(), 'from categories',
+         app_module._render_flight),
+        ('trusted seller ids', lambda: app_module.trusted_seller_ids(),
+         lambda: app_module._trusted_seller_cache.clear(),
+         lambda i: app_module.trusted_seller_ids(), 'from trust_scores',
+         app_module._render_flight),
+        ('comparable price stats', lambda: app_module.comparable_price_stats(name=TAG),
+         lambda: app_module._comparable_price_cache.clear(),
+         lambda i: app_module.comparable_price_stats(name=TAG), 'from products',
+         app_module._search_flight),
     ):
         warm()
         clear()
@@ -298,6 +316,48 @@ def run():
               f'{counter.count} queries with {timed_out} timeouts')
         print(f'  ..... {label}: {counter.count} queries for {THREADS} cold callers '
               f'({timed_out} timed out)')
+
+    # --- the expansion, counted at the compute rather than at the database ----------
+    # Every other path here is measured in queries. This one cannot be: the concept map
+    # comes from a Setting that is itself cached, so a cold expansion costs one settings
+    # query at most and often zero, and a query count would report success whether the
+    # flight worked or not.
+    #
+    # What it costs instead is an outbound AI call when SEMANTIC_SEARCH_AI is on - real
+    # money, against SEMANTIC_SEARCH_AI_PER_MINUTE. Twenty people pasting the same
+    # failed search is the exact case worth collapsing, and the thing to count is how
+    # many times the expansion actually ran.
+    print(f'{THREADS} simultaneous callers expanding the same failed search')
+    term = 'bluetooth jammer'
+    computes = []
+    computes_lock = threading.Lock()
+    original_compute = app_module._compute_expanded_terms
+
+    def counting_compute(normalised):
+        with computes_lock:
+            computes.append(normalised)
+        return original_compute(normalised)
+
+    app_module._search_expansion_cache.clear()
+    app_module._compute_expanded_terms = counting_compute
+    try:
+        before = app_module._expansion_flight.stats()
+        results, errors, alive = run_concurrently(
+            lambda i: app_module.expanded_search_terms(term))
+        timed_out = app_module._expansion_flight.stats()['timeouts'] - before['timeouts']
+    finally:
+        app_module._compute_expanded_terms = original_compute
+    check('no caller raised while expanding', not errors, '; '.join(errors[:3]))
+    check('no caller hung while expanding', not alive, f'{len(alive)} still running')
+    check('every expansion beyond the first is explained by a timeout',
+          len(computes) <= 1 + timed_out,
+          f'{len(computes)} expansions with {timed_out} timeouts')
+    expected_terms = results[0] if results else None
+    check('every caller got the same expansion',
+          all(r == expected_terms for r in results if r is not None),
+          f'{sum(1 for r in results if r != expected_terms)} of {THREADS} differed')
+    print(f'  ..... expansion: {len(computes)} computed for {THREADS} cold callers '
+          f'({timed_out} timed out) -> {expected_terms}')
 
 
     # Fanned out to what this process's connection pool can actually serve, not to

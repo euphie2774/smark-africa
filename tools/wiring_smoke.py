@@ -31,6 +31,8 @@ check and have the host restart the container for looking unhealthy. Both direct
 are asserted, because a 200 says nothing about whether a limit was applied.
 """
 import os, sys
+import pathlib
+import re
 from array import array
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -619,6 +621,112 @@ def service_reads_run_under_the_flight():
 
 check('the duty state and service catalogue go through the single-flight',
       service_reads_run_under_the_flight)
+
+
+def render_reads_run_under_the_flight():
+    """The per-render reads and the search expansion must reach their flights too.
+
+    Same failure mode as the two checks above and the same reason it needs its own
+    assertion: an unreached flight is indistinguishable from a working one. These are
+    the cheap reads, which is precisely why they were the last to be guarded and why
+    the guard matters - the nav categories render on nearly every page in the app, so
+    a cold key there multiplies by every request in flight rather than by the traffic
+    to one page.
+
+    The expansion is checked here rather than with the searches because it is on its
+    own pool: it is the only cached read that can make an outbound network call, so
+    nothing cheap may queue behind it.
+    """
+    render = FlightRecorder('wiringsmoke-render-recorder')
+    expansion = FlightRecorder('wiringsmoke-expansion-recorder')
+    originals = (main._render_flight, main._expansion_flight)
+    main._render_flight, main._expansion_flight = render, expansion
+    try:
+        with app.app_context():
+            main._nav_category_cache.clear()
+            main._trusted_seller_cache.clear()
+            main._service_live_keys_cache.clear()
+            main._search_expansion_cache.clear()
+            assert type(main.nav_categories()) is list, 'nav categories not a list'
+            assert type(main.trusted_seller_ids()) is frozenset, \
+                'trusted seller ids not a frozenset'
+            assert type(main.service_keys_with_providers()) is set, \
+                'live service keys not a set'
+            assert type(main.expanded_search_terms('bluetooth jammer')) is list, \
+                'expansion not a list'
+    finally:
+        main._render_flight, main._expansion_flight = originals
+
+    assert len(render.keys) == 3, (
+        f'expected the nav categories, trusted sellers and live service keys to each '
+        f'take the render flight once on a cold cache, got {render.keys}')
+    assert len(set(render.keys)) == 3, (
+        f'two render reads share a flight key, so each would serve the other its '
+        f'value on a double-check: {render.keys}')
+    assert len(expansion.keys) == 1, (
+        f'expected one expansion to take its own flight, got {expansion.keys}')
+    # The key must be the normalised term, not a constant: one shared key would put
+    # every unrelated failed search behind a single lock, and with the AI layer on that
+    # lock can be held for seconds.
+    assert expansion.keys[0] == main.normalise_search_text('bluetooth jammer'), \
+        expansion.keys[0]
+
+
+check('the per-render reads and the expansion go through their flights',
+      render_reads_run_under_the_flight)
+
+
+def every_ttl_cache_read_is_guarded():
+    """No cached read path may exist without somebody having thought about the cold case.
+
+    The checks above name their call sites, which means a *new* cache added next month
+    is guarded by nothing at all - and the defect this work fixed was a class of cache,
+    not a handful of instances. So this one is an inventory: every TTLCache in main.py
+    must be classified, and the classification must be exhaustive in both directions.
+    Add a cache and this fails until it is listed; delete one and it fails until the
+    stale entry goes.
+
+    Deliberately a hand-maintained list rather than a textual heuristic. The first
+    attempt at this inferred "flighted" from how many times a cache name appeared next
+    to a lookup, and it was wrong for exactly the two caches whose fast path and
+    double-check share one read() closure - it accused the searches, which were the
+    first two paths to be flighted at all. A check that cannot be trusted about its own
+    subject is worse than no check, so this asserts the inventory and leaves the
+    behaviour to the recorders above and to tools/concurrency_smoke.py.
+    """
+    # Read through a single-flight. Each of these is proven wired by one of the
+    # recorder checks above, or measured in tools/concurrency_smoke.py, or both.
+    FLIGHTED = {
+        '_product_ids_cache', '_service_ids_cache',        # search flight
+        '_comparable_price_cache',                         # search flight
+        '_service_duty_cache', '_service_catalogue_cache', # service flight
+        '_nav_category_cache', '_trusted_seller_cache',    # render flight
+        '_service_live_keys_cache',                        # render flight
+        '_search_expansion_cache',                         # its own pool
+        '_sitemap_entry_cache',                            # its own pool
+    }
+    # Not flighted, with the reason. An entry here is a decision, not an oversight.
+    EXEMPT = {
+        # The assembled XML per host. Its query layer is _sitemap_entry_cache, which is
+        # flighted; what is left is string concatenation over a list already in memory,
+        # and duplicating that costs nothing a lock would not also cost.
+        '_sitemap_cache': 'assembly only, no query - the entries cache is flighted',
+    }
+    source = pathlib.Path(main.__file__).read_text(encoding='utf-8')
+    found = set(re.findall(r'^(_\w+)\s*=\s*TTLCache\(', source, re.M))
+    assert len(found) >= 11, f'expected to find the caches, found {sorted(found)}'
+    unclassified = sorted(found - FLIGHTED - set(EXEMPT))
+    assert not unclassified, (
+        f'new cached read path(s) with no decision recorded about the cold case: '
+        f'{unclassified}. A cold key costs one query per concurrent caller unless the '
+        f'miss goes through a single-flight. Wrap it and add it to FLIGHTED here, or '
+        f'add it to EXEMPT with the reason.')
+    stale = sorted((FLIGHTED | set(EXEMPT)) - found)
+    assert not stale, f'these caches no longer exist and should leave the list: {stale}'
+
+
+check('every TTLCache in main.py is read through a flight or exempted',
+      every_ttl_cache_read_is_guarded)
 
 
 def market_reference_shape():
