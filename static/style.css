@@ -1675,7 +1675,21 @@ h6 {
 }
 
 /* ---------- Nav drawer ----------
-   #navbarNav is a Bootstrap responsive offcanvas (offcanvas-lg). Two jobs here:
+   #navbarNav is a Bootstrap responsive offcanvas (offcanvas-lg). Three jobs here.
+
+   First, the drawer has to be able to paint at all. It lives inside
+   .navbar.sticky-top, and .sticky-top is position: sticky with z-index 1020,
+   which makes the navbar a stacking context. Bootstrap gives the drawer z-index
+   1045 and appends its backdrop to <body> at 1040 - so those two numbers are
+   never compared to each other. The drawer's 1045 only orders it against its
+   siblings inside the navbar's 1020 layer, and the backdrop sits in the body's
+   layer, above that whole layer and therefore above the drawer. The menu was
+   opening correctly and being painted behind its own dimming, which is why
+   tapping the toggle looked like nothing happening and the next tap closed it.
+   The drawer cannot be lifted on its own - a child cannot escape its parent's
+   stacking context - so the navbar's layer is what moves, to just above the
+   backdrop. Below the offcanvas' own 1045 would do nothing; the comparison that
+   matters is navbar-layer against backdrop.
 
    At >=992px Bootstrap stops treating it as a drawer, but .offcanvas-body stays a
    block element - so the two nav groups would stack vertically and me-auto would
@@ -1685,6 +1699,10 @@ h6 {
    Below 992px it is a real side sheet: fixed width, its own scroll, and the long
    admin menu forced inline so it scrolls with the drawer instead of opening a
    floating menu taller than the phone. */
+.navbar.sticky-top {
+    z-index: 1046;
+}
+
 @media (min-width: 992px) {
     .navbar .offcanvas-body {
         display: flex;
@@ -2294,4 +2312,41 @@ h6 {
     .btn:active {
         transform: none;
     }
+}
+
+/* ---------- Overflow containment ----------
+   Last in the file on purpose. The market override block above re-declares body
+   with !important, so a guard placed near the original Base section would be
+   fighting it; at the end these win on order alone and need no !important.
+
+   This is a net, not a fix. The sideways scroll on phones had a specific cause -
+   a .container and a .row sharing one element in index.html, whose padding and
+   negative margin do not cancel - and that is fixed where it happened. What is
+   left is that nothing stopped a single wide element from widening the whole
+   document, and two things made that easy: Bootstrap's reboot caps no image
+   width (only .img-fluid does, and 6 of 43 images here use it), and the body is
+   a flex column, whose items will not shrink below their content.
+
+   overflow-x: clip, not hidden: hidden would make the element a scroll
+   container, and the navbar is position: sticky - sticky resolves against the
+   nearest scrollport, so hidden here is the standard way to break a sticky
+   header. clip does no such thing. A browser too old to know it ignores the
+   declaration and scrolls sideways exactly as before, which is the behaviour
+   being replaced, so there is nothing to fall back to. */
+html {
+    overflow-x: clip;
+}
+
+img,
+video,
+canvas {
+    max-width: 100%;
+}
+
+/* Only unsized images get their height recomputed, so the one admin thumbnail
+   that carries width and height attributes (admin/products.html) keeps its
+   square crop instead of being stretched by an auto height. */
+img:not([width]),
+video:not([width]) {
+    height: auto;
 }

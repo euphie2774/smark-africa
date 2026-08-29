@@ -120,23 +120,36 @@
 {% endif %}
 
 {% if current_user.is_authenticated and current_user.is_admin %}
-<section class="container row text-center mb-4 g-3" id="stats-counter">
-    <div class="col-md-4">
-        <div class="market-stat">
-            <h2 id="product-count">0</h2>
-            <p>Products</p>
+{# .container and .row must not share an element. .container adds padding of half
+   a gutter on each side, .row adds a negative margin of that same amount, and on
+   one element they do not cancel - the box ends up a full gutter wider than its
+   parent and hangs over both edges. Nothing outside it absorbs that here, so the
+   document itself became wider than a phone screen and scrolled sideways into
+   blank space; in the installed app that blank is the manifest's white
+   background_color rather than the site's cream, which is why it read as a white
+   page. Nested, the container's padding is exactly what the row's negative
+   margin pulls back against, which is the arrangement Bootstrap documents.
+   The id stays on the section: the counter script below only uses it as a
+   presence check. #}
+<section class="container mb-4" id="stats-counter">
+    <div class="row text-center g-3">
+        <div class="col-md-4">
+            <div class="market-stat">
+                <h2 id="product-count">0</h2>
+                <p>Products</p>
+            </div>
         </div>
-    </div>
-    <div class="col-md-4">
-        <div class="market-stat">
-            <h2 id="order-count">0</h2>
-            <p>Orders Completed</p>
+        <div class="col-md-4">
+            <div class="market-stat">
+                <h2 id="order-count">0</h2>
+                <p>Orders Completed</p>
+            </div>
         </div>
-    </div>
-    <div class="col-md-4">
-        <div class="market-stat">
-            <h2 id="user-count">0</h2>
-            <p>Happy Customers</p>
+        <div class="col-md-4">
+            <div class="market-stat">
+                <h2 id="user-count">0</h2>
+                <p>Happy Customers</p>
+            </div>
         </div>
     </div>
 </section>

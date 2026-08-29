@@ -13,6 +13,14 @@ a small dataset and then a large one, and what is asserted is that the query cou
 did not move. A number that holds while the data grows tenfold is the only real
 evidence that neither the list nor an N+1 inside it is unbounded; a fixed budget
 would just encode whatever today's number happens to be.
+
+One page needs a second comparison. Growing the table is enough to catch an
+unbounded list, but it cannot catch a lazy read on a page that is already capped:
+a thirty-row page costs the same two extra queries per row whether the table holds
+thirty rows or a million, so that count holds steady while the page is still three
+times more expensive than it should be. The moderation queue is therefore also
+measured full page against partial page, where the row count is what differs and
+an eager load is the only thing that keeps the two equal.
 """
 
 import contextlib
@@ -29,8 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import event
 
 import main as app_module
-from main import (ORDERS_PER_PAGE, REVIEWS_PER_PAGE, SELLER_PRODUCTS_PER_PAGE, app, db,
-                  flush_product_views)
+from main import (ADMIN_REVIEWS_PER_PAGE, ORDERS_PER_PAGE, REVIEWS_PER_PAGE,
+                  SELLER_PRODUCTS_PER_PAGE, app, db, flush_product_views)
 from models import BusinessStorefront, Category, Order, OrderItem, Product, Review, User
 from scale import CounterBuffer
 
@@ -144,11 +152,13 @@ def teardown():
     app_module.invalidate_product_cache()
 
 
-def make_user(suffix, seller=False):
+def make_user(suffix, seller=False, admin=False):
     # No phone: the column is unique, and a fixture inventing hundreds of numbers
     # would collide with itself or with real data long before it proved anything.
     user = User(username=f'{TAG}_{suffix}', email=f'{TAG}_{suffix}@example.invalid')
     user.set_password('x')
+    if admin:
+        user.is_admin = True
     if seller:
         user.seller_status = 'verified'
         for flag in ('is_verified_seller', 'is_seller'):
@@ -382,6 +392,75 @@ def run():
     finally:
         db.session.remove()
         client_ctx.pop()
+
+    print('the moderation queue is a page, not every review ever written')
+    admin_id = make_user('modadmin', admin=True).id
+    with as_user(admin_id) as client:
+        first, before = count_page(client, '/admin/reviews')
+        check('/admin/reviews renders for an admin', first.status_code == 200,
+              first.status_code)
+        check('and it is the queue, not a redirect to the login page',
+              b'Review number' in first.data)
+    add_reviews(subject_id, ADMIN_REVIEWS_PER_PAGE * 2, start=400)
+    # The comparison further down needs a partial last page, and this database is
+    # shared with every other script, so the total is not something this fixture
+    # controls on its own - top it up until it stops dividing evenly.
+    if Review.query.count() % ADMIN_REVIEWS_PER_PAGE == 0:
+        add_reviews(subject_id, 1, start=900)
+    with as_user(admin_id) as client:
+        second, after = count_page(client, '/admin/reviews')
+        check('still renders with many more reviews', second.status_code == 200,
+              second.status_code)
+        check_no_growth('the query count did not grow with the review count',
+                        before, after, '/admin/reviews')
+        rows = second.data.count(b'Review number')
+        check(f'at most {ADMIN_REVIEWS_PER_PAGE} reviews on the page',
+              rows <= ADMIN_REVIEWS_PER_PAGE, rows)
+
+        # The other half. A moderation queue that quietly shows the newest thirty
+        # and says nothing is worse than a slow one: the reviews past the cap are
+        # not merely off-screen, they are unmoderatable, and nothing on the page
+        # would say so. So the true total has to be on the page, and the rest has
+        # to be reachable.
+        total = Review.query.count()
+        check('the admin is told the real total, not the page size',
+              f'{total} review' in squash(second), f'total={total}, rows={rows}')
+        check('and there is a way to reach the rest', b'?page=2' in second.data)
+        check('the page links are windowed, not one per page',
+              second.data.count(b'?page=') < total, second.data.count(b'?page='))
+
+        last_page = (total + ADMIN_REVIEWS_PER_PAGE - 1) // ADMIN_REVIEWS_PER_PAGE
+        tail = total - (last_page - 1) * ADMIN_REVIEWS_PER_PAGE
+        # Asserted rather than skipped past: if the fixture ever divides evenly
+        # there is no partial page, and the comparison below would pass by
+        # measuring two identical pages.
+        check('the fixture leaves a partial last page to compare against',
+              last_page > 1 and tail < ADMIN_REVIEWS_PER_PAGE,
+              f'{total} reviews, {last_page} pages, {tail} on the last')
+
+        partial, partial_count = count_page(client, f'/admin/reviews?page={last_page}')
+        check('the last page renders', partial.status_code == 200, partial.status_code)
+        check('and holds fewer rows than a full one',
+              partial.data.count(b'Review number') < rows,
+              f'{partial.data.count(b"Review number")} vs {rows}')
+        # This is the eager-load assertion. The two pages differ only in how many
+        # rows they render, so a lazy read per row would make the full page cost
+        # about one query per extra row. Equal counts mean the rows came out of the
+        # query that fetched the page. Note which relationship is really being
+        # measured: every review here belongs to one product, so review.product
+        # would collapse to a single query through the session's identity map even
+        # without the joinedload, and it is review.author - one distinct user per
+        # review, by design in add_reviews - that this actually proves.
+        check('a full page costs what a nearly empty one costs',
+              after <= partial_count + 2, f'{partial_count} -> {after}')
+        if after > partial_count + 2:
+            # explain_growth compares two runs of the same path, and the pair that
+            # matters here is two different paths, so it would report the wrong
+            # diff. Print what the full page actually ran instead.
+            print('         the full page ran these, most repeated first:')
+            for shape, hits in sorted(_MEASUREMENTS['/admin/reviews'][-1].items(),
+                                      key=lambda item: -item[1])[:6]:
+                print(f'         x{hits}  {shape}')
 
     print('a category page is a page, not the whole category')
     ctx = app.app_context()

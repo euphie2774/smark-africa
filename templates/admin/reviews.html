@@ -58,7 +58,7 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {% for review in reviews %}
+                        {% for review in reviews.items %}
                         <tr>
                             <td>{{ review.id }}</td>
                             <td>{{ review.product.name[:30] if review.product else 'Deleted' }}</td>
@@ -97,6 +97,41 @@
                     </tbody>
                 </table>
             </div>
+
+            {% if reviews.pages > 1 %}
+            {# iter_pages(), not range(1, reviews.pages + 1) as
+               admin/transactions.html does. One link per page is harmless at a few
+               hundred reviews and is fifty thousand anchors at a million, which
+               makes the pagination itself the unbounded render it was added to
+               prevent. iter_pages yields a window around the current page, and
+               None for each gap it skips. #}
+            <nav class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3"
+                 aria-label="Review pages">
+                <small class="text-muted">
+                    Page {{ reviews.page }} of {{ reviews.pages }} &middot;
+                    {{ reviews.total }} review{{ '' if reviews.total == 1 else 's' }}
+                </small>
+                <ul class="pagination pagination-sm mb-0 flex-wrap">
+                    <li class="page-item{{ '' if reviews.has_prev else ' disabled' }}">
+                        <a class="page-link"
+                           href="{{ url_for('admin_reviews', page=reviews.prev_num or 1) }}">Previous</a>
+                    </li>
+                    {% for p in reviews.iter_pages() %}
+                        {% if p %}
+                    <li class="page-item{{ ' active' if p == reviews.page else '' }}">
+                        <a class="page-link" href="{{ url_for('admin_reviews', page=p) }}">{{ p }}</a>
+                    </li>
+                        {% else %}
+                    <li class="page-item disabled"><span class="page-link">&hellip;</span></li>
+                        {% endif %}
+                    {% endfor %}
+                    <li class="page-item{{ '' if reviews.has_next else ' disabled' }}">
+                        <a class="page-link"
+                           href="{{ url_for('admin_reviews', page=reviews.next_num or reviews.pages) }}">Next</a>
+                    </li>
+                </ul>
+            </nav>
+            {% endif %}
         </div>
     </div>
 </div>

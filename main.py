@@ -272,6 +272,26 @@ limiter = Limiter(
 # into normal document flow, landing on top of whatever follows the map.
 MAP_ASSET_HOST = 'https://unpkg.com'
 
+# Font Awesome, loaded by base.html and customer/set_pin.html. It needs two
+# permissions, not one: the stylesheet comes from this host and so do the .woff2
+# files it then asks for, so leaving it out of font-src would draw every icon as
+# a blank box even once the stylesheet itself is allowed.
+ICON_ASSET_HOST = 'https://cdnjs.cloudflare.com'
+
+# Google Analytics, rendered by base.html only when an admin has filled in the
+# google_analytics_id setting. It also needs two directives: gtag.js is fetched
+# from googletagmanager, and it then reports to the analytics hosts over XHR. With
+# only the script allowed the tag loads and every hit is refused, so an admin who
+# set their tracking ID would see no traffic at all and nothing would say why.
+# Nothing here is loaded unless that setting has a value.
+ANALYTICS_SCRIPT_HOST = 'https://www.googletagmanager.com'
+ANALYTICS_BEACON_HOSTS = [
+    'https://www.google-analytics.com',
+    'https://*.google-analytics.com',
+    'https://*.analytics.google.com',
+    'https://*.googletagmanager.com',
+]
+
 # Tiles and vector style JSON are fetched over XHR, so the hosts have to be
 # reachable from connect-src, not just img-src.
 MAP_TILE_HOSTS = [
@@ -298,7 +318,8 @@ csp = {
         "https://cdn.jsdelivr.net",
         "https://unpkg.com",
         "https://code.jquery.com",
-        "https://stackpath.bootstrapcdn.com"
+        "https://stackpath.bootstrapcdn.com",
+        ANALYTICS_SCRIPT_HOST
     ],
     'style-src': [
         "'self'",
@@ -306,6 +327,14 @@ csp = {
         "https://cdn.jsdelivr.net",
         "https://stackpath.bootstrapcdn.com",
         MAP_ASSET_HOST,  # maplibre-gl.css - without it markers land over the page
+        # Font Awesome. base.html loads every icon on the site from here, and the
+        # host was missing from this list, so the stylesheet was refused and every
+        # <i class="fas fa-*"> rendered as nothing - on every page, in every
+        # environment, since Talisman applies this policy whether or not HTTPS is
+        # being forced. A blocked stylesheet fails silently: the markup is still
+        # there and the layout still works, so there is nothing to see except
+        # missing icons, which reads as a design choice rather than a bug.
+        ICON_ASSET_HOST,
         "https://fonts.googleapis.com"
     ],
     # MapLibre runs its tile decoding in a worker created from a blob: URL.
@@ -319,12 +348,13 @@ csp = {
         "https:",
         "http:"  # Allow external images for products
     ],
-    'connect-src': ["'self'"] + MAP_TILE_HOSTS,
+    'connect-src': ["'self'"] + MAP_TILE_HOSTS + ANALYTICS_BEACON_HOSTS,
     'font-src': [
         "'self'",
         "data:",
         "https://fonts.gstatic.com",
-        "https://cdn.jsdelivr.net"
+        "https://cdn.jsdelivr.net",
+        ICON_ASSET_HOST  # the .woff2 files Font Awesome's stylesheet asks for
     ],
     'frame-ancestors': "'none'",
     'base-uri': "'self'",
@@ -4557,39 +4587,116 @@ def market_price_reference(name, category_id=None, price=None, buying_price=0, e
     }
 
 
+# The two things market intelligence reads out of the database do not change between
+# one poll and the next: the average price of each category's active listings, and
+# which manufacturer to name as the price source. The dashboard polls every 15 seconds
+# (admin/market_intelligence.html:381) and the signal itself only moves once an hour -
+# market_signal_for buckets the tick into hour blocks - so recomputing these per
+# request bought nothing at all. Held in process, per worker, because Redis is optional
+# here. One key, so max_entries is 2 rather than a number that looks like a limit.
+MARKET_FACTS_TTL = float_env('MARKET_FACTS_TTL', 60)
+_market_facts_cache = TTLCache(ttl_seconds=MARKET_FACTS_TTL, max_entries=2,
+                               name='market-facts')
+
+
+def market_category_facts():
+    """(id, name, base_price, source_name, source_region) for every category.
+
+    Three queries for the whole catalogue, whatever its size. What this replaces was
+    per category, inside the payload loop: one ``Product.query.filter_by(...).all()``
+    that pulled every active listing in the category into memory to average a single
+    column, and one leading-wildcard ``ilike`` against Manufacturer that no index can
+    serve. A category with fifty thousand listings was fifty thousand ORM instances
+    built and thrown away, and ``pricing_suggestions`` asked for that eighty times per
+    call.
+    """
+    found = _market_facts_cache.lookup('all')
+    if found is not CACHE_MISS:
+        return found
+    # Same flight as the nav rather than the search one: the key space here is a
+    # single key, not one per distinct query, so the cost of an expiry is every
+    # admin poll in flight at that moment rather than every caller of one page.
+    return _render_flight.run('market-facts',
+                              lambda: _market_facts_cache.lookup('all'),
+                              _compute_market_category_facts)
+
+
+def _compute_market_category_facts():
+    """The query half of market_category_facts, one caller at a time."""
+    categories = Category.query.order_by(Category.name.asc()).all()
+
+    # The average effective price, computed in SQL. ``discounted_price`` is a Python
+    # property (models.py:191) and not a column, so its arithmetic is restated here
+    # rather than referenced - the same reason comparable_price_stats recomputes it.
+    # One difference worth naming: the property rounds each row to 2dp and this rounds
+    # only the average, so the two can disagree in the last decimal place. The caller
+    # rounds to 2dp before display either way.
+    effective_price = case(
+        (Product.discount_percent > 0,
+         Product.selling_price * (1 - Product.discount_percent / 100.0)),
+        else_=Product.selling_price
+    )
+    averages = dict(db.session.query(
+        Product.category_id,
+        func.avg(func.coalesce(effective_price, 0.0))
+    ).filter(Product.is_active.is_(True)).group_by(Product.category_id).all())
+
+    # Ordered exactly as the per-category query ordered it, so the manufacturer named
+    # for a category is the one that query would have named. The matching moves to
+    # Python, which is also stricter: ilike('%name%') treats % and _ inside a category
+    # name as wildcards, and a plain substring test is what was meant.
+    makers = db.session.query(
+        Manufacturer.name, Manufacturer.country, Manufacturer.product_categories
+    ).order_by(Manufacturer.priority.desc(), Manufacturer.rating.desc()).limit(2000).all()
+
+    facts = []
+    for category in categories:
+        average = averages.get(category.id)
+        if average is None:
+            # No active listing in this category, so there is no market price to
+            # average - the same synthetic stand-in the old empty branch used.
+            base_price = 1000 + (category.id * 137)
+        else:
+            base_price = float(average)
+        needle = (category.name or '').lower()
+        match = next((maker for maker in makers
+                      if needle and needle in (maker.product_categories or '').lower()),
+                     None)
+        facts.append((
+            category.id,
+            category.name,
+            base_price,
+            match.name if match else 'World supplier index',
+            match.country if match and match.country else 'Global',
+        ))
+    return _market_facts_cache.set('all', facts)
+
+
 def build_market_intelligence_payload(selected_category='all'):
     tick = int(utcnow().timestamp())
-    categories = Category.query.order_by(Category.name.asc()).all()
     rows = []
     labels = []
     current_prices = []
     predicted_prices = []
     colors = []
 
-    for category in categories:
-        if selected_category != 'all' and str(category.id) != str(selected_category):
+    for category_id, category_name, base_price, source_name, source_region in market_category_facts():
+        if selected_category != 'all' and str(category_id) != str(selected_category):
             continue
-        products = Product.query.filter_by(category_id=category.id, is_active=True).all()
-        if products:
-            base_price = sum((p.discounted_price or p.selling_price or 0) for p in products) / max(1, len(products))
-        else:
-            base_price = 1000 + (category.id * 137)
-        predicted_price, percent_change, direction = market_signal_for(category.name, base_price, tick)
-        key = category_market_key(category.name)
-        manufacturer = Manufacturer.query.filter(
-            Manufacturer.product_categories.ilike(f'%{category.name}%')
-        ).order_by(Manufacturer.priority.desc(), Manufacturer.rating.desc()).first()
-        source_name = manufacturer.name if manufacturer else 'World supplier index'
-        source_region = manufacturer.country if manufacturer and manufacturer.country else 'Global'
-        headline = f'{source_region} {category.name} manufacturer price watch'
+        # Deliberately not cached alongside the facts: this is arithmetic over a hashed
+        # seed with no query behind it, so holding it would save nothing, and leaving it
+        # live keeps the dashboard's numbers moving exactly as they did before.
+        predicted_price, percent_change, direction = market_signal_for(category_name, base_price, tick)
+        key = category_market_key(category_name)
+        headline = f'{source_region} {category_name} manufacturer price watch'
 
-        labels.append(category.name)
+        labels.append(category_name)
         current_prices.append(round(base_price, 2))
         predicted_prices.append(predicted_price)
         colors.append(MARKET_CATEGORY_COLORS.get(key, MARKET_CATEGORY_COLORS['other']))
         rows.append({
-            'category_id': category.id,
-            'category': category.name,
+            'category_id': category_id,
+            'category': category_name,
             'market_key': key,
             'color': MARKET_CATEGORY_COLORS.get(key, MARKET_CATEGORY_COLORS['other']),
             'current_price': round(base_price, 2),
@@ -5812,6 +5919,22 @@ REVIEWS_PER_PAGE = int_env('REVIEWS_PER_PAGE', 10)
 ORDERS_PER_PAGE = int_env('ORDERS_PER_PAGE', 20)
 SELLER_PRODUCTS_PER_PAGE = int_env('SELLER_PRODUCTS_PER_PAGE', 25)
 
+# The moderation queue is a different job from a product's own review list, so it
+# gets its own size rather than sharing REVIEWS_PER_PAGE: an admin is scanning for
+# the one review to hide, and ten rows a page would make that unusable. Reviews
+# are among the fastest-growing tables here - one row per buyer per purchase, and
+# they are never deleted - so this is the page that decides whether the moderation
+# screen still opens at a million users.
+ADMIN_REVIEWS_PER_PAGE = int_env('ADMIN_REVIEWS_PER_PAGE', 30)
+
+# The phase-two dashboard is four numbers over three lists, and every list was a full
+# .all(). A dashboard is the one page where a cap needs care rather than confidence: an
+# unresolved claim or an unread complaint that scrolls off the end is not merely
+# off-screen, it is unactioned, and nothing on the page would have said so. So the lists
+# are capped here and the totals are counted separately, and the template says how many
+# of how many it is showing.
+ADMIN_DASHBOARD_LIST_LIMIT = int_env('ADMIN_DASHBOARD_LIST_LIMIT', 100)
+
 # Every product page view used to be a write and a commit on the product row, so
 # the more popular a listing got the more its viewers serialised behind each other
 # on the same lock. Now the deltas are held per worker and written together.
@@ -6718,10 +6841,29 @@ def smart_recommendation_reason(product, query, average_rating=None):
 
 
 def pricing_suggestions():
+    products = Product.query.filter_by(is_active=True).order_by(
+        Product.updated_at.desc()).limit(80).all()
+
+    # One payload for every category instead of one per product. This call was inside
+    # the loop below, keyed only on the product's category - so eighty rebuilds of at
+    # most a few dozen distinct answers, and each rebuild was itself a query per
+    # category. Indexed by category here, looked up per product.
+    rows = build_market_intelligence_payload('all')['rows']
+    by_category = {}
+    for row in rows:
+        by_category.setdefault(str(row['category_id']), row)
+    # What passing 'all' used to resolve to for a product with no category: the whole
+    # list, of which only the first row was ever read.
+    fallback = rows[0] if rows else None
+
+    # And the ratings in one query rather than one per product. average_rating iterates
+    # a lazy collection (models.py:211), so reading it in this loop was eighty more
+    # queries, each pulling every review of a product back to average one column.
+    ratings = average_ratings_for(products)
+
     suggestions = []
-    for product in Product.query.filter_by(is_active=True).order_by(Product.updated_at.desc()).limit(80).all():
-        market = build_market_intelligence_payload(str(product.category_id or 'all'))['rows']
-        signal = market[0] if market else None
+    for product in products:
+        signal = by_category.get(str(product.category_id)) or fallback
         current = product.discounted_price or product.selling_price or 0
         suggested = current
         reason = []
@@ -6734,7 +6876,8 @@ def pricing_suggestions():
         if product.stock is not None and product.stock <= 5 and not product.is_digital:
             suggested *= 1.02
             reason.append('low stock')
-        if product.average_rating and product.average_rating < 3:
+        rating = ratings.get(product.id)
+        if rating and rating < 3:
             suggested *= 0.97
             reason.append('rating pressure')
         if abs(suggested - current) >= 1:
@@ -14180,7 +14323,19 @@ def admin_toggle_brand_seller(uid):
 @login_required
 @admin_required
 def admin_reviews():
-    reviews = Review.query.order_by(Review.created_at.desc()).all()
+    # .all() here was every review ever written, in one list, on one page. The
+    # template then reads review.product.name and review.author.username on each
+    # row, and both of those are lazy - so the cost was never just the rows, it
+    # was two more queries per row on top of them. joinedload folds those into
+    # the single query that fetches the page, and the page is what bounds the
+    # rows; neither half is sufficient alone.
+    page = request.args.get('page', 1, type=int)
+    reviews = Review.query.options(
+        joinedload(Review.product),
+        joinedload(Review.author)
+    ).order_by(Review.created_at.desc()).paginate(
+        page=max(1, page), per_page=ADMIN_REVIEWS_PER_PAGE, error_out=False
+    )
     return render_template('admin/reviews.html', reviews=reviews)
 
 
@@ -17574,16 +17729,40 @@ def admin_social_ad_archive(post_id):
 @login_required
 @admin_required
 def admin_phase_two():
-    claims = PaymentClaim.query.order_by(PaymentClaim.created_at.desc()).all()
-    verifications = SellerVerification.query.order_by(SellerVerification.created_at.desc()).all()
-    verification_backups = SellerVerificationBackup.query.order_by(SellerVerificationBackup.created_at.desc()).limit(50).all()
-    seller_blacklist = SellerBlacklist.query.order_by(SellerBlacklist.created_at.desc()).limit(100).all()
-    withdrawals = WithdrawalRequest.query.order_by(WithdrawalRequest.created_at.desc()).all()
-    ads = AdCampaign.query.order_by(AdCampaign.created_at.desc()).all()
-    feedback = CustomerFeedback.query.filter(CustomerFeedback.read_at.is_(None)).order_by(CustomerFeedback.created_at.desc()).all()
-    return render_template('admin/phase_two.html', claims=claims, verifications=verifications,
-                           verification_backups=verification_backups, seller_blacklist=seller_blacklist,
-                           withdrawals=withdrawals, ads=ads, feedback=feedback)
+    limit = ADMIN_DASHBOARD_LIST_LIMIT
+    unread_feedback = CustomerFeedback.query.filter(CustomerFeedback.read_at.is_(None))
+
+    # joinedload on the two lists whose rows reach through a relationship: the claims
+    # table renders claim.order.order_number and claim.claimant.username, and the inbox
+    # renders item.user.username, all lazy. Capping the list without these would just
+    # fix the row count at the cap and leave three queries per row on top of it.
+    claims = PaymentClaim.query.options(
+        joinedload(PaymentClaim.order), joinedload(PaymentClaim.claimant)
+    ).order_by(PaymentClaim.created_at.desc()).limit(limit).all()
+    verifications = SellerVerification.query.order_by(
+        SellerVerification.created_at.desc()).limit(limit).all()
+    feedback = unread_feedback.options(joinedload(CustomerFeedback.user)).order_by(
+        CustomerFeedback.created_at.desc()).limit(limit).all()
+
+    # Counted, not measured off the capped lists. The template used to print
+    # `claims|length` as the headline number, which after a cap would have reported the
+    # cap - a dashboard confidently saying 100 while five thousand claims waited. These
+    # are the four numbers it actually wants, and a COUNT is cheaper than the .all() it
+    # replaces even before the cap.
+    counts = {
+        'claims': PaymentClaim.query.count(),
+        'verifications': SellerVerification.query.count(),
+        'withdrawals': WithdrawalRequest.query.count(),
+        'feedback': unread_feedback.count(),
+    }
+
+    # The withdrawal, ad-campaign, verification-backup and blacklist reads that used to
+    # be here are gone rather than capped: nothing in the template ever rendered them.
+    # Withdrawals were loaded in full to print one number, which counts.withdrawals now
+    # answers directly, and the other three were read and discarded on every load.
+    return render_template('admin/phase_two.html', claims=claims,
+                           verifications=verifications, feedback=feedback,
+                           counts=counts, list_limit=limit)
 
 
 @app.route('/admin/feedback/<int:feedback_id>/read', methods=['POST'])
@@ -21613,6 +21792,19 @@ def phase_two_schema_spec():
         ('ix_invoices_email_created', 'invoices', 'client_email, created_at', False),
         ('ix_invoice_items_invoice_order', 'invoice_items', 'invoice_id, sort_order', False),
         ('ix_invoice_payments_invoice_created', 'invoice_payments', 'invoice_id, created_at', False),
+        # The admin desks that read a growing table newest-first. Each of these is
+        # ORDER BY created_at DESC LIMIT n with nothing to sort by: the reviews table
+        # has one index and it leads with product_id, so it cannot serve the global
+        # moderation queue, and payment_claims, seller_verifications and
+        # customer_feedback had no created_at index at all. A LIMIT does not save a
+        # query from sorting the whole table first, so capping those pages without
+        # these indexes would have moved the cost rather than removed it.
+        ('ix_reviews_created', 'reviews', 'created_at', False),
+        ('ix_payment_claims_created', 'payment_claims', 'created_at', False),
+        ('ix_seller_verifications_created', 'seller_verifications', 'created_at', False),
+        # read_at first, because the inbox asks for the unread ones and then orders
+        # what is left; created_at alone would still scan every read row.
+        ('ix_customer_feedback_read_created', 'customer_feedback', 'read_at, created_at', False),
     ]
     return columns, index_specs
 

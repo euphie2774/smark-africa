@@ -13,15 +13,36 @@
         </div>
     </div>
 
+    {# counts.*, not claims|length. These lists are capped now, so measuring the
+       headline number off the list would have printed the cap: a desk confidently
+       reporting 100 claims while five thousand waited. The numbers are counted in
+       the database and mean exactly what they meant before the cap existed. #}
     <div class="row g-3 mb-4">
-        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Claims</h6><h2>{{ claims|length }}</h2></div></div></div>
-        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Verifications</h6><h2>{{ verifications|length }}</h2></div></div></div>
-        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Withdrawals</h6><h2>{{ withdrawals|length }}</h2></div></div></div>
-        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Feedback</h6><h2>{{ feedback|length }}</h2></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Claims</h6><h2>{{ counts.claims }}</h2></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Verifications</h6><h2>{{ counts.verifications }}</h2></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Withdrawals</h6><h2>{{ counts.withdrawals }}</h2></div></div></div>
+        <div class="col-md-3"><div class="card border-0 shadow-sm"><div class="card-body"><h6>Feedback</h6><h2>{{ counts.feedback }}</h2></div></div></div>
     </div>
 
+    {# Said out loud wherever a list is cut short. An unresolved claim below the cap
+       is not merely off-screen, it is unactioned, and a table that ends without
+       comment reads as a table that ended. #}
+    {% macro showing(shown, total) -%}
+        {%- if total > shown %}
+        <small class="text-warning-emphasis">
+            Showing the {{ shown }} most recent of {{ total }} &middot;
+            {{ total - shown }} older not listed
+        </small>
+        {%- else %}
+        <small class="text-muted">{{ total }} in total</small>
+        {%- endif %}
+    {%- endmacro %}
+
     <div class="card border-0 shadow-sm mb-4">
-        <div class="card-header bg-white"><h5 class="mb-0">Open Claims</h5></div>
+        <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <h5 class="mb-0">Open Claims</h5>
+            {{ showing(claims|length, counts.claims) }}
+        </div>
         <div class="card-body p-0 table-responsive">
             <table class="table table-hover mb-0">
                 <thead><tr><th>Order</th><th>Customer</th><th>Reason</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead>
@@ -51,7 +72,10 @@
     <div class="row g-4">
         <div class="col-lg-6">
             <div class="card border-0 shadow-sm">
-                <div class="card-header bg-white"><h5 class="mb-0">Seller Verification</h5></div>
+                <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <h5 class="mb-0">Seller Verification</h5>
+                    {{ showing(verifications|length, counts.verifications) }}
+                </div>
                 <div class="card-body">
                     {% for item in verifications %}
                     <div class="border-bottom py-2">
@@ -80,7 +104,10 @@
         </div>
         <div class="col-lg-6">
             <div class="card border-0 shadow-sm">
-                <div class="card-header bg-white"><h5 class="mb-0">Customer Feedback Inbox</h5></div>
+                <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <h5 class="mb-0">Customer Feedback Inbox</h5>
+                    {{ showing(feedback|length, counts.feedback) }}
+                </div>
                 <div class="card-body">
                     {% for item in feedback %}
                     <div class="border-bottom py-2">

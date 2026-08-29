@@ -29,6 +29,18 @@ locally stored images spent thirteen requests of the caller's allowance instead 
 one, and /healthz shared the same bucket, so a busy address could 429 the health
 check and have the host restart the container for looking unhealthy. Both directions
 are asserted, because a 200 says nothing about whether a limit was applied.
+
+After that comes a group about things that are broken in the browser and correct
+everywhere else, which is why they survived. A host missing from the CSP is refused
+with no error anywhere - the server sends 200, the markup arrives, the page lays
+out, and only the asset vanishes; Font Awesome was loaded from a host in no
+directive at all, so every icon on the site drew as nothing. The nav drawer opened
+behind its own backdrop, because a sticky navbar is a stacking context and the
+backdrop is appended outside it, so the drawer's z-index was never compared to the
+backdrop's. And a .container sharing an element with a .row hung a gutter over both
+screen edges, which is what scrolled the phone sideways into blank space. None of
+these can be seen from a status code, so each is asserted against the CSS or markup
+where its fix lives; confirming them by eye stays a manual step.
 """
 import os, sys
 import pathlib
@@ -1292,6 +1304,146 @@ def static_burst_is_never_refused():
 
 
 check('a burst of static files is never refused', static_burst_is_never_refused)
+
+
+# Every third-party host a template loads has to be named in the CSP directive
+# that governs how it is loaded. A missing host is refused by the browser and
+# nothing anywhere reports it: the server sends 200, the markup arrives intact,
+# the page lays out, and only the asset is silently dropped. Font Awesome was
+# loaded from cdnjs.cloudflare.com by base.html and every other page, and that
+# host was in no directive at all, so every <i class="fas fa-*"> on the site drew
+# as nothing - which looks like a design choice rather than a bug, and had
+# survived however long it had been there.
+ASSET_TAG = re.compile(r'<(link|script)\b[^>]*?>', re.I)
+ASSET_URL = re.compile(r'(?:href|src)=["\'](https://[^"\'/]+)', re.I)
+
+
+def external_assets():
+    """Yield (host, directive, template) for every third-party asset a template loads.
+
+    The directive follows how the browser fetches the thing, not what it is: a
+    stylesheet is style-src, a script is script-src. rel is read rather than
+    assumed, because a preconnect or a manifest carries an href too and neither is
+    governed by style-src - counting those would report failures that are not real.
+    Templates that do not extend base.html are walked as well; two of them load
+    their own copies of these CDNs.
+    """
+    for path in sorted(pathlib.Path(ROOT, 'templates').rglob('*.html')):
+        body = path.read_text(encoding='utf-8', errors='replace')
+        for tag in ASSET_TAG.finditer(body):
+            text = tag.group(0)
+            found = ASSET_URL.search(text)
+            if not found:
+                continue  # url_for(), a relative path, or a data: URI
+            rel = path.relative_to(pathlib.Path(ROOT, 'templates')).as_posix()
+            if tag.group(1).lower() == 'script':
+                yield found.group(1), 'script-src', rel
+            elif 'stylesheet' in text.lower():
+                yield found.group(1), 'style-src', rel
+
+
+def csp_allows_every_asset_a_template_loads():
+    scanned = list(external_assets())
+    # A scan that silently matched nothing would pass this check for the wrong
+    # reason, so the scanner is asserted to have found something first.
+    assert len(scanned) >= 10, f'only {len(scanned)} external assets found; scanner is broken'
+    missing = set()
+    for host, directive, template in scanned:
+        allowed = main.csp.get(directive) or []
+        if isinstance(allowed, str):
+            allowed = [allowed]
+        if host not in allowed:
+            missing.add(f'{host} loaded by {template} is absent from {directive}')
+    assert not missing, '; '.join(sorted(missing))
+
+
+check('the CSP allows every external asset the templates load',
+      csp_allows_every_asset_a_template_loads)
+
+
+def icon_host_may_also_serve_its_fonts():
+    """style-src gets the stylesheet in; font-src is what gets the glyphs in.
+
+    Font Awesome's stylesheet then asks the same host for .woff2 files, so allowing
+    only the stylesheet swaps invisible icons for blank boxes - still broken, and
+    harder to recognise. The scan above cannot see this: the font request is made
+    by the stylesheet, not written in any template.
+    """
+    fonts = main.csp.get('font-src') or []
+    assert main.ICON_ASSET_HOST in fonts, f'{main.ICON_ASSET_HOST} not in font-src: {fonts}'
+
+
+check('the icon host may serve its own webfonts', icon_host_may_also_serve_its_fonts)
+
+
+def the_nav_drawer_outranks_its_own_backdrop():
+    """The hamburger bug: the drawer was painted behind the dimming it triggers.
+
+    #navbarNav is inside .navbar.sticky-top. position: sticky with a z-index makes
+    that navbar a stacking context, so the drawer's own z-index only orders it
+    against its siblings inside the navbar's layer - while Bootstrap appends the
+    backdrop to <body>, in the layer above. The two numbers are never compared, so
+    raising the drawer does nothing and the navbar's layer is what has to move.
+    Asserted in CSS rather than in a browser because that is where the fix lives
+    and this suite has no DOM; the visual confirmation stays a manual step.
+    """
+    css = pathlib.Path(ROOT, 'static', 'style.css').read_text(encoding='utf-8',
+                                                              errors='replace')
+    match = re.search(r'\.navbar\.sticky-top\s*\{[^}]*?z-index:\s*(\d+)', css)
+    assert match, '.navbar.sticky-top has no z-index; the drawer opens behind the backdrop'
+    # 1040 is Bootstrap 5.3's $zindex-offcanvas-backdrop.
+    assert int(match.group(1)) > 1040, (
+        f'navbar layer is z-index {match.group(1)}, at or below the offcanvas '
+        f'backdrop at 1040, so the drawer is painted behind it')
+    markup = pathlib.Path(ROOT, 'templates', 'base.html').read_text(encoding='utf-8',
+                                                                    errors='replace')
+    assert 'data-bs-toggle="offcanvas"' in markup, 'the toggler no longer opens an offcanvas'
+    assert 'offcanvas-lg' in markup, 'the drawer is no longer a responsive offcanvas'
+
+
+check('the nav drawer outranks its own backdrop', the_nav_drawer_outranks_its_own_backdrop)
+
+
+def nothing_widens_the_page_past_the_viewport():
+    """The sideways scroll into blank space, asserted at its two causes.
+
+    .container and .row on one element is the specific bug that caused it: the
+    container's padding and the row's negative margin are the same size and do not
+    cancel on a single element, so the box hangs a full gutter over both edges. On
+    a phone that is the whole complaint, and in the installed app the blank it
+    scrolls into is the manifest's white background_color rather than the site's
+    cream, which is why it was reported as a white page.
+
+    The containment guard is asserted separately because it is what stops the next
+    one, and it has to be clip rather than hidden - hidden would make the element a
+    scroll container and the sticky navbar resolves against the nearest scrollport,
+    so hidden is the standard way to break a sticky header while fixing this.
+    """
+    both = []
+    for path in sorted(pathlib.Path(ROOT, 'templates').rglob('*.html')):
+        body = path.read_text(encoding='utf-8', errors='replace')
+        for attr in re.finditer(r'class="([^"]*)"', body):
+            names = attr.group(1).split()
+            if 'row' in names and 'container' in names:
+                both.append(path.relative_to(pathlib.Path(ROOT, 'templates')).as_posix())
+    assert not both, (
+        f'container and row share an element in {sorted(set(both))}; the negative '
+        f'margin hangs over the viewport and scrolls the page sideways')
+
+    css = pathlib.Path(ROOT, 'static', 'style.css').read_text(encoding='utf-8',
+                                                              errors='replace')
+    guard = re.search(r'html\s*\{[^}]*?overflow-x:\s*(\w+)', css)
+    assert guard, 'no overflow-x guard on html; one wide element widens the document'
+    assert guard.group(1) == 'clip', (
+        f'overflow-x is {guard.group(1)!r}; hidden makes html a scroll container '
+        f'and breaks the sticky navbar - clip does not')
+    assert re.search(r'^img,\s*$', css, re.M) or re.search(r'^img\s*\{', css, re.M), (
+        'no global img width cap; Bootstrap reboot has none and most images here '
+        'do not use .img-fluid, so one oversized upload widens the page')
+
+
+check('nothing widens the page past the viewport',
+      nothing_widens_the_page_past_the_viewport)
 
 
 print()
