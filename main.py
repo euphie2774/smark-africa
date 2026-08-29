@@ -2256,12 +2256,43 @@ def product_image_match_score(upload_profile, product_profile, upload_tokens, pr
     return round(min(score, 100), 2), ', '.join(notes) or 'catalog availability'
 
 
+IMAGE_MATCH_CANDIDATES = int_env('IMAGE_MATCH_CANDIDATES', 300)
+
+
 def find_similar_products(upload_path, original_filename, limit=12):
+    """Score a bounded slice of the catalogue against an uploaded image.
+
+    The loop used to run over `Product.query.filter_by(is_active=True).all()`,
+    and the body of it opens each product's image off disk and profiles it with
+    PIL. So the cost of one upload was one image read per active product - not a
+    memory problem so much as a wall-clock one, and it grows with the catalogue
+    while the caller waits. Ten thousand products is ten thousand image opens
+    for twelve results.
+
+    The candidate slice is ordered the way this function's own no-match fallback
+    below already orders: admin priority, then featured, then newest. That was
+    the existing answer to "which products matter most" and it did not need a
+    second one. IMAGE_MATCH_CANDIDATES is sized by the profiling cost rather
+    than by memory - a few hundred image reads per upload instead of the whole
+    catalogue - and it is an env var so it can be raised without a deploy.
+
+    This does narrow what can be matched: a product ranked below the cut is not
+    scored, where before it was. That is a real trade, made because the previous
+    behaviour stops working entirely at catalogue sizes this platform is being
+    built for.
+    """
     upload_profile = image_profile(upload_path)
     upload_tokens = token_set(original_filename)
     matches = []
 
-    for product in Product.query.filter_by(is_active=True).all():
+    candidates = (Product.query
+                  .filter_by(is_active=True)
+                  .order_by(Product.admin_priority.desc(),
+                            Product.is_featured.desc(),
+                            Product.created_at.desc())
+                  .limit(IMAGE_MATCH_CANDIDATES)
+                  .all())
+    for product in candidates:
         product_path = image_url_to_path(product.image_url)
         product_profile = image_profile(product_path) if product_path and os.path.exists(product_path) else None
         score, reason = product_image_match_score(upload_profile, product_profile, upload_tokens, product)
@@ -3499,17 +3530,52 @@ def send_feedback_request(order):
     send_email(user.email, 'Share Your Feedback! ⭐', body)
 
 
+SYSTEM_EMAIL_BATCH = int_env('SYSTEM_EMAIL_BATCH', 500)
+
+
 def send_system_update(subject, message):
-    """Send system update email to all users"""
-    users = User.query.filter_by(is_active=True).all()
-    for user in users:
-        body = f"""
+    """Queue a system update email for every active user, in bounded batches.
+
+    This was `User.query.filter_by(is_active=True).all()` and a loop. At a few
+    hundred users that is fine; at a million it is a million User objects in one
+    worker's memory before the first email is queued, which is an OOM kill on a
+    512MB container rather than a slow page.
+
+    The keyset walk is the same shape as the price-alert and category-digest
+    jobs: order by id, take a batch, remember the last id. Memory is bounded by
+    the batch size instead of the user count, and every user is still reached. A
+    plain `.limit()` would have bounded memory too, but by silently skipping
+    everyone past the cap - a worse failure than the one being fixed, and an
+    invisible one.
+
+    What this does **not** fix: the walk still runs inline in the admin request
+    that triggers it, so a blast to a very large user table is a long request a
+    worker timeout can cut short partway through. `send_email` only enqueues, so
+    each iteration is cheap, but cheap times a million is still too long to hold
+    a request open. Making it resumable needs a stored cursor and a background
+    job, which is a larger change than this one.
+    """
+    body = f"""
         <h2>System Update</h2>
         <p><strong>{subject}</strong></p>
         <p>{message}</p>
         <br><p>SMARKAFRICA Team</p>
         """
-        send_email(user.email, subject, body)
+    queued = 0
+    last_id = 0
+    while True:
+        users = (User.query
+                 .filter(User.is_active.is_(True), User.id > last_id)
+                 .order_by(User.id.asc())
+                 .limit(SYSTEM_EMAIL_BATCH)
+                 .all())
+        if not users:
+            break
+        last_id = users[-1].id
+        for user in users:
+            if send_email(user.email, subject, body):
+                queued += 1
+    return queued
 
 
 def send_welcome_email(user):
@@ -6368,7 +6434,48 @@ def increment_seller_critical_mismatch(user, reason='Manual KYC mismatch'):
     return count
 
 
-def product_search_score(product, query):
+def average_ratings_for(products):
+    """{product_id: average visible rating} for many products in one query.
+
+    `Product.average_rating` (models.py:210) iterates `self.reviews`, a lazy
+    one-to-many. Reading it in a loop is one query per product, and each of
+    those queries pulls every review row of that product into memory to average
+    a single column of them. Bounding the candidate set below stopped the cost
+    growing with the catalogue and then put the growth straight back, keyed on
+    candidates instead: 400 candidates meant 400 queries.
+
+    That is also why it hid so well. The instance caches the collection after
+    the first touch, so the scorer and the reason string share one query per
+    product - the statement count grows by exactly one per row and never looks
+    like the N+1 it is.
+
+    The filters mirror the property exactly. `is_(True)` drops a null
+    is_visible the way a falsy `r.is_visible` did, and `!= 0` drops a zero
+    rating the way a falsy `r.rating` did. In SQL that second one excludes nulls
+    by itself, but both are spelt out because returning the same numbers the
+    property returned is the whole point of the helper. Reviews are indexed on
+    (product_id, is_visible, created_at), so this reads the index.
+
+    Bounded by construction despite the bare `.all()`: at most one row comes
+    back per id passed in, and callers pass an already-capped list. The ids go
+    in as one IN clause, which is fine at the default cap of 400 and on
+    Postgres generally; a cap raised past ~900 would need chunking on old
+    SQLite builds.
+    """
+    ids = sorted({product.id for product in products if product.id})
+    if not ids:
+        return {}
+    rows = (db.session.query(Review.product_id, func.avg(Review.rating))
+            .filter(Review.product_id.in_(ids),
+                    Review.is_visible.is_(True),
+                    Review.rating.isnot(None),
+                    Review.rating != 0)
+            .group_by(Review.product_id)
+            .all())
+    return {product_id: float(average or 0.0) for product_id, average in rows}
+
+
+def product_search_score(product, query, average_rating=None):
     text = ' '.join([
         product.name or '',
         product.short_description or '',
@@ -6386,16 +6493,76 @@ def product_search_score(product, query):
         score += 5
     if any(word in q for word in ['rain', 'water', 'weather']) and any(word in text for word in ['water', 'rain', 'boot', 'rubber', 'weather']):
         score += 5
-    if product.average_rating:
-        score += product.average_rating
+    # None means "look it up", not "no rating", so a 0.0 handed in by a caller
+    # that preloaded the whole candidate set is honoured instead of quietly
+    # triggering the per-product query this parameter exists to avoid.
+    rating = product.average_rating if average_rating is None else average_rating
+    if rating:
+        score += rating
     score += min(product.stock or 0, 10) / 10
     return score
 
 
+SMART_RECOMMENDATION_CANDIDATES = int_env('SMART_RECOMMENDATION_CANDIDATES', 400)
+
+
 def smart_product_recommendations(query, limit=6):
-    products = Product.query.filter_by(is_active=True).all()
+    """Score a bounded candidate set for the query rather than the whole catalogue.
+
+    Two separate faults lived in `Product.query.filter_by(is_active=True).all()`
+    here. The obvious one is the entire active catalogue in memory per call, on a
+    path three callers reach - including a price-alert job that calls it once per
+    alert, so the cost was catalogue size times alert count. The quieter one is
+    that `product_search_score` reads `product.category.name`, and category is a
+    lazy relationship: scoring N products issued N further queries. joinedload
+    settles that regardless of how many candidates there are.
+
+    Fixing the category N+1 left a second one standing, which the bounded-read
+    smoke caught: the scorer also reads `product.average_rating`, another lazy
+    relationship. `average_ratings_for` collapses those into one aggregate, and
+    both the score and the reason string are handed the result, so a call costs
+    two queries whatever the candidate count is.
+
+    Capping by admin priority - what find_similar_products does - would have been
+    the wrong cap here. This score is driven by term matches, so a priority
+    ordered slice means a search for a specific item silently cannot find it
+    unless it already ranks near the top. That is not slow-but-correct, it is
+    wrong in a way that looks like the product does not exist. So the query
+    narrows the candidates in SQL first and only matches get scored, with the
+    priority ordering kept as the fallback for an empty query or no matches.
+
+    The ilike filter covers all five fields the scorer reads, category name
+    included, so which products *can* match is unchanged - only how many are
+    pulled into Python. It is still an unindexed scan in the database; what it is
+    not is a scan plus a million ORM objects plus a million lazy loads. The
+    user-facing search does not come through here - it uses the cached id path -
+    so this stays the simple helper its callers expect.
+    """
+    terms = [term for term in slugify(query or '', 500).split('-') if len(term) > 2]
+    base = Product.query.options(joinedload(Product.category)).filter_by(is_active=True)
+    ranking = (Product.admin_priority.desc(), Product.is_featured.desc(),
+               Product.created_at.desc())
+
+    products = []
+    if terms:
+        patterns = [f'%{term}%' for term in terms]
+        products = (base
+                    .filter(or_(*[or_(Product.name.ilike(pattern),
+                                      Product.short_description.ilike(pattern),
+                                      Product.description.ilike(pattern),
+                                      Product.product_condition.ilike(pattern),
+                                      Product.category.has(Category.name.ilike(pattern)))
+                                  for pattern in patterns]))
+                    .order_by(*ranking)
+                    .limit(SMART_RECOMMENDATION_CANDIDATES)
+                    .all())
+    if not products:
+        products = base.order_by(*ranking).limit(SMART_RECOMMENDATION_CANDIDATES).all()
+
+    ratings = average_ratings_for(products)
     scored = sorted(
-        [(product_search_score(product, query), product) for product in products],
+        [(product_search_score(product, query, ratings.get(product.id, 0.0)), product)
+         for product in products],
         key=lambda item: item[0],
         reverse=True
     )
@@ -6406,7 +6573,8 @@ def smart_product_recommendations(query, limit=6):
         recommendations.append({
             'product': product,
             'score': round(score, 1),
-            'reason': smart_recommendation_reason(product, query),
+            'reason': smart_recommendation_reason(product, query,
+                                                 ratings.get(product.id, 0.0)),
         })
     return recommendations
 
@@ -6530,11 +6698,12 @@ def build_product_comparison(recommendations):
     return comparison
 
 
-def smart_recommendation_reason(product, query):
+def smart_recommendation_reason(product, query, average_rating=None):
     reasons = []
     q = (query or '').lower()
-    if product.average_rating:
-        reasons.append(f'{product.average_rating:.1f}/5 average rating')
+    rating = product.average_rating if average_rating is None else average_rating
+    if rating:
+        reasons.append(f'{rating:.1f}/5 average rating')
     if product.stock and product.stock > 0:
         reasons.append(f'{product.stock} in stock')
     if product.discount_percent:
@@ -12882,7 +13051,16 @@ def pos_report_payload(start=None, end=None):
             product_units[item.product_name] = product_units.get(item.product_name, 0) + (item.quantity or 0)
             if item.product:
                 cogs += (item.product.buying_price or 0) * (item.quantity or 0)
-    inventory_value = sum((product.buying_price or 0) * (product.stock or 0) for product in Product.query.filter_by(is_digital=False).all())
+    # Summed in SQL, not in Python. This used to load every non-digital product
+    # to multiply two of its columns, which is the whole catalogue in memory for
+    # one number. Capping the read would have bounded it while quietly reporting
+    # a wrong total, which for a money figure on an owner's dashboard is worse
+    # than slow. coalesce mirrors the `(x or 0)` the Python version applied, so
+    # rows with a null price or stock still contribute zero rather than nothing.
+    inventory_value = db.session.query(
+        func.coalesce(func.sum(func.coalesce(Product.buying_price, 0)
+                               * func.coalesce(Product.stock, 0)), 0)
+    ).filter(Product.is_digital.is_(False)).scalar() or 0
     low_stock = stock_warnings()
     return {
         'sales': sales,
