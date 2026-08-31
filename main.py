@@ -5919,6 +5919,14 @@ REVIEWS_PER_PAGE = int_env('REVIEWS_PER_PAGE', 10)
 ORDERS_PER_PAGE = int_env('ORDERS_PER_PAGE', 20)
 SELLER_PRODUCTS_PER_PAGE = int_env('SELLER_PRODUCTS_PER_PAGE', 25)
 
+# The seller's earnings ledger and withdrawal history. Both only ever grow, and they
+# grow fastest for the sellers the platform can least afford to lose - which is the
+# reason these two are paginated rather than capped like a dashboard list. Money the
+# page does not show has to still be reachable; a ledger that quietly stops at the
+# most recent twenty-five is a seller who cannot find the payment they are looking
+# for and has no way to ask the page for it.
+LEDGER_PER_PAGE = int_env('LEDGER_PER_PAGE', 25)
+
 # The moderation queue is a different job from a product's own review list, so it
 # gets its own size rather than sharing REVIEWS_PER_PAGE: an admin is scanning for
 # the one review to hide, and ten rows a page would make that unusable. Reviews
@@ -7002,9 +7010,17 @@ def business_intelligence_answer(question):
 
 def bi_period_snapshot(days, period_type):
     start = utcnow() - timedelta(days=days)
-    orders = Order.query.filter(Order.created_at >= start).all()
-    sales_total = sum(order.amount_paid or 0 for order in orders)
-    orders_count = len(orders)
+    # Two numbers out of one aggregate, rather than every order in the window pulled
+    # into Python to be summed there. business_intelligence_answer above already reads
+    # exactly these figures this way; this function was the copy that did not. It runs
+    # three times per check-in, the widest window is thirty days, and thirty days of
+    # orders is a number that grows with the platform - so the old shape was the recent
+    # orders table materialised three times over, on whatever request happened to
+    # trigger the check-in.
+    sales_total, orders_count = db.session.query(
+        func.coalesce(func.sum(Order.amount_paid), 0.0), func.count(Order.id)
+    ).filter(Order.created_at >= start).one()
+    sales_total = float(sales_total or 0)
     slow_products = Product.query.filter(
         Product.is_active == True,
         Product.sales_count <= 0,
@@ -17055,8 +17071,19 @@ def seller_withdrawals():
             db.session.commit()
             flash('Withdrawal request submitted for review.', 'success')
         return redirect(url_for('seller_withdrawals'))
-    earnings = Transaction.query.filter_by(user_id=current_user.id).order_by(Transaction.created_at.desc()).all()
-    withdrawals = WithdrawalRequest.query.filter_by(user_id=current_user.id).order_by(WithdrawalRequest.created_at.desc()).all()
+    # Both of these used to be every row the seller had ever accumulated, ordered
+    # newest first and rendered in full. Two independent page arguments rather than
+    # one, so that paging through the earnings ledger does not silently reset the
+    # withdrawal list underneath it - the two lists answer different questions and a
+    # seller reading one is usually holding a place in the other.
+    earnings_page = request.args.get('earnings_page', 1, type=int)
+    withdrawals_page = request.args.get('withdrawals_page', 1, type=int)
+    earnings = Transaction.query.filter_by(user_id=current_user.id).order_by(
+        Transaction.created_at.desc()).paginate(
+            page=max(1, earnings_page), per_page=LEDGER_PER_PAGE, error_out=False)
+    withdrawals = WithdrawalRequest.query.filter_by(user_id=current_user.id).order_by(
+        WithdrawalRequest.created_at.desc()).paginate(
+            page=max(1, withdrawals_page), per_page=LEDGER_PER_PAGE, error_out=False)
     return render_template('seller_withdrawals.html', earnings=earnings, withdrawals=withdrawals,
                            available_balance=seller_available_balance(current_user.id))
 
@@ -17762,7 +17789,7 @@ def admin_phase_two():
     # answers directly, and the other three were read and discarded on every load.
     return render_template('admin/phase_two.html', claims=claims,
                            verifications=verifications, feedback=feedback,
-                           counts=counts, list_limit=limit)
+                           counts=counts)
 
 
 @app.route('/admin/feedback/<int:feedback_id>/read', methods=['POST'])
@@ -21805,6 +21832,10 @@ def phase_two_schema_spec():
         # read_at first, because the inbox asks for the unread ones and then orders
         # what is left; created_at alone would still scan every read row.
         ('ix_customer_feedback_read_created', 'customer_feedback', 'read_at, created_at', False),
+        # Every business-intelligence figure is "since a date", and all four existing
+        # orders indexes lead with a status column, so none of them can serve a window
+        # that spans every status.
+        ('ix_orders_created', 'orders', 'created_at', False),
     ]
     return columns, index_specs
 

@@ -48,11 +48,40 @@
                 </div>
             </div>
         </div>
+{# One nav for both ledgers. Each link carries the other list's current page, so
+   turning a page here leaves the list below exactly where the seller left it. #}
+{% macro ledger_pages(pager, arg, other_arg, other_page, label) -%}
+{%- if pager.pages > 1 %}
+                    <nav class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3"
+                         aria-label="{{ label }} pages">
+                        <small class="text-muted">
+                            Page {{ pager.page }} of {{ pager.pages }} &middot; {{ pager.total }} in total
+                        </small>
+                        <ul class="pagination pagination-sm mb-0 flex-wrap">
+                            <li class="page-item{{ '' if pager.has_prev else ' disabled' }}">
+                                <a class="page-link" href="{{ url_for('seller_withdrawals', **{arg: pager.prev_num or 1, other_arg: other_page}) }}">Previous</a>
+                            </li>
+                            {%- for p in pager.iter_pages() %}
+                                {%- if p %}
+                            <li class="page-item{{ ' active' if p == pager.page else '' }}">
+                                <a class="page-link" href="{{ url_for('seller_withdrawals', **{arg: p, other_arg: other_page}) }}">{{ p }}</a>
+                            </li>
+                                {%- else %}
+                            <li class="page-item disabled"><span class="page-link">&hellip;</span></li>
+                                {%- endif %}
+                            {%- endfor %}
+                            <li class="page-item{{ '' if pager.has_next else ' disabled' }}">
+                                <a class="page-link" href="{{ url_for('seller_withdrawals', **{arg: pager.next_num or pager.pages, other_arg: other_page}) }}">Next</a>
+                            </li>
+                        </ul>
+                    </nav>
+{%- endif %}
+{%- endmacro %}
         <div class="col-lg-8">
             <div class="card border-0 shadow-sm mb-3">
                 <div class="card-body">
                     <h5>Earnings Ledger</h5>
-                    {% for txn in earnings %}
+                    {% for txn in earnings.items %}
                     <div class="d-flex justify-content-between border-bottom py-2">
                         <span>{{ txn.description or txn.type }} <small class="text-muted">{{ txn.status }}</small></span>
                         <strong>KSh {{ "%.2f"|format(txn.amount) }}</strong>
@@ -60,12 +89,13 @@
                     {% else %}
                     <p class="text-muted">No earnings yet.</p>
                     {% endfor %}
+                    {{ ledger_pages(earnings, 'earnings_page', 'withdrawals_page', withdrawals.page, 'Earnings') }}
                 </div>
             </div>
             <div class="card border-0 shadow-sm">
                 <div class="card-body">
                     <h5>Withdrawal Requests</h5>
-                    {% for item in withdrawals %}
+                    {% for item in withdrawals.items %}
                     <div class="d-flex justify-content-between border-bottom py-2">
                         <span>{{ item.method }} to {{ item.destination }} <small class="text-muted">{{ item.status }}</small></span>
                         <strong>KSh {{ "%.2f"|format(item.amount) }}</strong>
@@ -73,6 +103,7 @@
                     {% else %}
                     <p class="text-muted">No withdrawals requested.</p>
                     {% endfor %}
+                    {{ ledger_pages(withdrawals, 'withdrawals_page', 'earnings_page', earnings.page, 'Withdrawal') }}
                 </div>
             </div>
         </div>

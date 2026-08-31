@@ -21,6 +21,14 @@ thirty rows or a million, so that count holds steady while the page is still thr
 times more expensive than it should be. The moderation queue is therefore also
 measured full page against partial page, where the row count is what differs and
 an eager load is the only thing that keeps the two equal.
+
+The protection desk needs neither trick, because the growth it is measured across
+crosses its own cap: the fixture starts with a handful of claims and ends with more
+than the page will show, so one comparison covers the cap and the eager loads at
+once. That page is also where a cap is most dangerous - three moderation queues on
+one screen, and every headline number on it used to be the length of the list
+below it, which after a cap would report the cap. So what it displays is checked
+too, not only what it costs.
 """
 
 import contextlib
@@ -32,14 +40,20 @@ from datetime import datetime, timedelta
 
 os.environ.setdefault('DISABLE_BACKGROUND_JOBS', '1')
 os.environ.setdefault('CACHE_TYPE', 'NullCache')
+# Smaller than the shipped default so the fixture can cross the cap without
+# inventing a hundred users, orders and claims to do it. The code path is the
+# same one production takes; only the number differs.
+os.environ.setdefault('ADMIN_DASHBOARD_LIST_LIMIT', '12')
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import event
 
 import main as app_module
-from main import (ADMIN_REVIEWS_PER_PAGE, ORDERS_PER_PAGE, REVIEWS_PER_PAGE,
-                  SELLER_PRODUCTS_PER_PAGE, app, db, flush_product_views)
-from models import BusinessStorefront, Category, Order, OrderItem, Product, Review, User
+from main import (ADMIN_DASHBOARD_LIST_LIMIT, ADMIN_REVIEWS_PER_PAGE, ORDERS_PER_PAGE,
+                  REVIEWS_PER_PAGE, SELLER_PRODUCTS_PER_PAGE, app, db,
+                  flush_product_views)
+from models import (BusinessStorefront, Category, CustomerFeedback, Order, OrderItem,
+                    PaymentClaim, Product, Review, SellerVerification, User)
 from scale import CounterBuffer
 
 FAILURES = []
@@ -138,7 +152,13 @@ def teardown():
                    .filter(Product.name.like(f'{TAG}%')).all()] or [0]
     order_ids = [row[0] for row in db.session.query(Order.id)
                  .filter(Order.user_id.in_(user_ids)).all()] or [0]
-    for model, clause in ((OrderItem, OrderItem.order_id.in_(order_ids)),
+    # Claims before orders: payment_claims.order_id is a not-null foreign key, so
+    # clearing the orders first leaves rows pointing at nothing and Postgres
+    # refuses the delete outright.
+    for model, clause in ((PaymentClaim, PaymentClaim.claimant_id.in_(user_ids)),
+                          (SellerVerification, SellerVerification.user_id.in_(user_ids)),
+                          (CustomerFeedback, CustomerFeedback.user_id.in_(user_ids)),
+                          (OrderItem, OrderItem.order_id.in_(order_ids)),
                           (Order, Order.id.in_(order_ids)),
                           (Review, Review.product_id.in_(product_ids)),
                           (Product, Product.id.in_(product_ids)),
@@ -227,6 +247,37 @@ def add_reviews(product_id, count, start=0):
     db.session.commit()
 
 
+def add_protection_rows(count, start=0):
+    """Claims, verifications and unread feedback, one distinct actor each.
+
+    A distinct user and a distinct order per row, deliberately. The protection desk
+    renders claim.order.order_number, claim.claimant.username and
+    feedback.user.username, and rows sharing a parent are served from the session's
+    identity map on the second read - so with shared parents a per-row lazy load
+    would cost two queries in total rather than two per row, and the eager loads
+    this is here to prove would look like they were doing nothing.
+    """
+    for i in range(start, start + count):
+        actor = make_user(f'prot{i}')
+        order = Order(user_id=actor.id, amount_paid=300.0,
+                      order_number=f'{TAG}-ORD-{i}', payment_status='completed',
+                      status='completed')
+        db.session.add(order)
+        db.session.flush()
+        db.session.add(PaymentClaim(order_id=order.id, claimant_id=actor.id,
+                                    reason=f'{TAG} claim {i}', amount=250.0,
+                                    status='open'))
+        db.session.add(SellerVerification(user_id=actor.id, document_type='id_card',
+                                          legal_name=f'{TAG} legal {i}',
+                                          country='Kenya', status='pending'))
+        # read_at left null, because the inbox is the unread ones and a row with a
+        # timestamp would be filtered out before it could be counted.
+        db.session.add(CustomerFeedback(user_id=actor.id, experience_rating=3,
+                                        satisfaction_rating=3,
+                                        improvement_text=f'{TAG} feedback {i}'))
+    db.session.commit()
+
+
 @contextlib.contextmanager
 def steady_view_buffer():
     """Keep the product-view buffer from flushing inside a measured window.
@@ -262,6 +313,23 @@ _MEASUREMENTS = {}
 
 
 def count_page(client, path, match=None):
+    # Rendered once outside the window before it is measured. Every page here reads
+    # at least one process-level TTLCache - nav categories at 120s, market facts and
+    # comparable prices at 60s, service duty at 15s - and the gap between the two
+    # renders of a comparison is however long it takes to seed a few hundred rows.
+    # A cache that was warm for the first render and expired before the second makes
+    # an unchanged page look like it grew: that is what had the review comparison
+    # here reporting 13 -> 20 on one run and 21 -> 20 on the next, with nothing about
+    # the app different between them. Warming immediately before each measurement
+    # puts both renders on the same footing, which is the same trick
+    # steady_view_buffer plays on the view-count timer.
+    client.get(path)
+    # And then the identity map goes with it, because otherwise the warm-up would
+    # hide the very thing being measured. A many-to-one lazy load resolves straight
+    # out of the session's identity map without touching the database, so a second
+    # render of a page whose rows were just loaded would report no N+1 even where
+    # one exists.
+    db.session.remove()
     with steady_view_buffer(), StatementCounter(match=match) as counter:
         response = client.get(path)
     if counter.other_threads:
@@ -461,6 +529,60 @@ def run():
             for shape, hits in sorted(_MEASUREMENTS['/admin/reviews'][-1].items(),
                                       key=lambda item: -item[1])[:6]:
                 print(f'         x{hits}  {shape}')
+
+    print('the protection desk is three capped lists, not three whole tables')
+    limit = ADMIN_DASHBOARD_LIST_LIMIT
+    add_protection_rows(3)
+    with as_user(admin_id) as client:
+        first, before = count_page(client, '/admin/phase-two')
+        check('/admin/phase-two renders for an admin', first.status_code == 200,
+              first.status_code)
+        check('and it is the desk, not a redirect to the login page',
+              b'Phase Two Protection Desk' in first.data)
+        started = first.data.count(f'{TAG} claim'.encode())
+        # The comparison below only means something if the first render was below
+        # the cap. This database is shared, so a dev copy already holding a hundred
+        # real claims would push the fixture past the cap on the first render and
+        # the growth check would pass by measuring the same page twice.
+        check('the fixture starts below the cap', started < limit,
+              f'{started} of the fixture\'s 3 claims visible, cap {limit}')
+
+    add_protection_rows(limit + 8, start=100)
+    with as_user(admin_id) as client:
+        second, after = count_page(client, '/admin/phase-two')
+        check('still renders with far more claims than the page shows',
+              second.status_code == 200, second.status_code)
+        # One comparison, two properties. The row count crosses the cap here, so an
+        # uncapped list shows up as a growing count and a lazy read per row shows up
+        # the same way - two queries per extra row for the claims table alone.
+        check_no_growth('the query count did not grow with the tables',
+                        before, after, '/admin/phase-two')
+        claim_rows = second.data.count(f'{TAG} claim'.encode())
+        check(f'at most {limit} claims on the page', claim_rows <= limit, claim_rows)
+        check(f'at most {limit} verifications on the page',
+              second.data.count(f'{TAG} legal'.encode()) <= limit,
+              second.data.count(f'{TAG} legal'.encode()))
+        check(f'at most {limit} feedback notes on the page',
+              second.data.count(f'{TAG} feedback'.encode()) <= limit,
+              second.data.count(f'{TAG} feedback'.encode()))
+
+        # And the other half, which no query count can see. Every headline number on
+        # this page used to be the length of the list under it, so capping the list
+        # would have capped the number with it - a desk reporting twelve claims with
+        # thousands waiting, and nothing on the page to say otherwise.
+        body = squash(second)
+        totals = {'claims': PaymentClaim.query.count(),
+                  'verifications': SellerVerification.query.count(),
+                  'feedback': CustomerFeedback.query.filter(
+                      CustomerFeedback.read_at.is_(None)).count()}
+        for name, total in totals.items():
+            check(f'the {name} headline is the real total, not the page size',
+                  f'<h2>{total}</h2>' in body, f'{name}={total}')
+        check('withdrawals are counted rather than loaded to be counted',
+              f'<h2>{app_module.WithdrawalRequest.query.count()}</h2>' in body)
+        check('and the page says how much of each list it is showing',
+              f'of {totals["claims"]}' in body and 'older not listed' in body,
+              body[body.find('Open Claims'):body.find('Open Claims') + 160])
 
     print('a category page is a page, not the whole category')
     ctx = app.app_context()
