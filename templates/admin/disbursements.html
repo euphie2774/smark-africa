@@ -170,6 +170,25 @@
                             {% if not snapshot.pending_withdrawals and not snapshot.pending_salaries and snapshot.manufacturer_reserve <= 0 %}
                             <tr><td colspan="5" class="text-center text-muted py-4">No queued disbursements</td></tr>
                             {% endif %}
+                            {# Both lists above stop at snapshot.list_limit, oldest first.
+                               Saying so matters more here than on most capped tables:
+                               a withdrawal that scrolls off the end is not merely
+                               unseen, it is unpaid, and nothing else on the page would
+                               have hinted that there were more. Running the cycle
+                               drains them oldest-first, so the rest are reachable by
+                               pressing it again - which the flash message also says. #}
+                            {% if snapshot.pending_withdrawal_count > snapshot.pending_withdrawals|length
+                                  or snapshot.pending_salary_count > snapshot.pending_salaries|length %}
+                            <tr class="table-warning">
+                                <td colspan="5" class="small py-3">
+                                    Showing the oldest {{ snapshot.pending_withdrawals|length }}
+                                    of <strong>{{ snapshot.pending_withdrawal_count }}</strong> pending withdrawal(s)
+                                    and {{ snapshot.pending_salaries|length }}
+                                    of <strong>{{ snapshot.pending_salary_count }}</strong> salary item(s).
+                                    Run the disbursement cycle to queue them in order.
+                                </td>
+                            </tr>
+                            {% endif %}
                         </tbody>
                     </table>
                 </div>

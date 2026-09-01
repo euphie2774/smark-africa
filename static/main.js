@@ -115,22 +115,26 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // Search functionality (if implemented)
-    const searchInput = document.querySelector('[name="search"]');
-    if (searchInput) {
-        searchInput.addEventListener('keyup', debounce(function() {
-            this.form.submit();
-        }, 500));
-    }
-
-    // Debounce helper
-    function debounce(func, wait) {
-        let timeout;
-        return function() {
-            clearTimeout(timeout);
-            timeout = setTimeout(() => func.apply(this, arguments), wait);
-        };
-    }
+    // No auto-submit on the search box, deliberately.
+    //
+    // This used to be `searchInput.addEventListener('keyup', debounce(() =>
+    // this.form.submit(), 500))`, and it was wrong in four separate ways:
+    //
+    //  - It navigated the page mid-word. On a phone a navigation closes the
+    //    keyboard, so typing on the home page meant three letters, a pause, and
+    //    the keyboard dropping while the page reloaded underneath you.
+    //  - It fired on every keyup, arrow keys and Tab included, so moving the
+    //    caret resubmitted the form.
+    //  - `querySelector('[name="search"]')` matches the first such input on the
+    //    page, which on admin/users.html and admin/promo_codes.html is a filter
+    //    box - so an admin typing a username got a page load per pause too.
+    //  - Every one of those loads ran the full product search, the most expensive
+    //    query on the site, for a term the user had not finished typing.
+    //
+    // Both search forms have a submit button and submit on Enter without any
+    // JavaScript at all, which is the behaviour people expect. Live suggestions,
+    // if they are wanted, belong on a JSON endpoint returning a short list - not
+    // on a full page render per keystroke pause.
 
     // Review star highlight
     document.querySelectorAll('.rating-stars input[type="radio"]').forEach(function(input) {

@@ -86,10 +86,33 @@ main {
 }
 
 /* ─── Navbar ────────────────────────────────────────── */
+/* No backdrop-filter here. It used to carry `backdrop-filter: blur(10px)`, and that
+   one declaration was the whole of the broken phone layout.
+
+   A backdrop-filter other than `none` makes the element a containing block for its
+   position: fixed descendants - the same rule transform and filter follow. The nav
+   drawer is one of those descendants: below 992px Bootstrap gives #navbarNav
+   `position: fixed; top: 0; right: 0; bottom: 0; width: 300px` and parks it off-screen
+   with `transform: translateX(100%)` until it opens. Resolved against the viewport
+   that is correct. Resolved against the navbar it is three separate bugs:
+
+     - closed, translateX(100%) puts it 300px past the navbar's right edge, so the
+       document became 300px wider than the screen. That is the sideways scroll into a
+       blank white page - there is nothing painted out there, because a closed drawer
+       is visibility: hidden, so you were scrolling into bare canvas.
+     - open, top: 0 and bottom: 0 resolved to the navbar's own height, so the drawer
+       was a 300px x ~56px sliver wedged into the end of the navbar instead of a
+       full-height side sheet. Tapping the toggle looked like nothing happening.
+     - and the navbar's container was being stretched by the overflow, which is what
+       had the brand logo sitting wrong on the home page.
+
+   Removing it costs nothing to look at: the background above is rgba(...,0.95), and a
+   blur behind a 95%-opaque fill is not visible. What it does buy back is a per-frame
+   GPU blur of everything scrolling behind a sticky bar, which is real work on the
+   mid-range Android hardware most of this traffic is on. */
 .navbar {
     background: rgba(13,31,22,0.95) !important;
     border-bottom: 1px solid var(--border-gold);
-    backdrop-filter: blur(10px);
 }
 
 .navbar-brand {
@@ -2343,10 +2366,36 @@ canvas {
     max-width: 100%;
 }
 
-/* Only unsized images get their height recomputed, so the one admin thumbnail
-   that carries width and height attributes (admin/products.html) keeps its
-   square crop instead of being stretched by an auto height. */
-img:not([width]),
-video:not([width]) {
+/* Unsized images get their height recomputed so max-width: 100% narrows them
+   instead of squashing them, and the one admin thumbnail that carries width and
+   height attributes (admin/products.html) keeps its square crop.
+
+   Wrapped in :where() because this is a reset, and a reset has to lose every
+   argument it has with a component. Written the obvious way - `img:not([width])`
+   - it is (0,1,1), which quietly outranked or tied nine deliberate rules and,
+   being last in the file, won every tie:
+
+     .site-logo             34px  -> auto   (0,1,0), outranked outright
+     .product-media img     100%  -> auto   tie, lost on source order
+     .hot-deal-media img    100%  -> auto
+     .trend-hero img        100%  -> auto
+     .hot-sale-pop img      160px -> auto
+     .platform-ad-pop img   180px -> auto
+     .product-thumb img     70px  -> auto
+     .image-match-preview   74px  -> auto
+
+   Those heights are what crops a card image to a uniform box, so losing them let
+   every product image render at its own natural aspect ratio: a grid of cards no
+   two of which were the same height, and a navbar brand scaled to whatever
+   max-width: 128px made of the logo's real proportions. :where() contributes zero
+   specificity, so all nine win again while unsized images still get their height
+   recomputed. A browser too old to know :where() drops this rule and behaves as it
+   did before it existed, which is the safe direction to fail in.
+
+   The aspect-ratio rules (.trend-card-image, .market-news-image,
+   .product-main-image, .capture-video, .scanner-video) set no explicit height and
+   are correct under either version - they are listed nowhere above for that
+   reason, not by omission. */
+:where(img:not([width]), video:not([width])) {
     height: auto;
 }

@@ -375,12 +375,85 @@ def check_download_gate(reference):
             ctx.pop()
 
 
+def check_static_upload_guard():
+    """Who can fetch an upload folder straight off /static/, by identity.
+
+    tools/wiring_smoke.py already asserts the anonymous half of this, but it signs
+    nobody in, so the *admin* half - the one that decides whether a KYC reviewer can
+    see the document they are reviewing - has no coverage there at all. That half fails
+    silently: an over-tight guard shows up as an empty <img> on one admin page and
+    nowhere else, and the reviewer has no way to tell a blocked file from a missing
+    upload.
+
+    Real files, written here and removed in the finally, so the answer does not depend
+    on what happens to be on disk. A 404 on a file that was never there proves nothing.
+    """
+    print('the static route serves an upload folder only to who should have it')
+
+    admin = make_user('guardadmin')
+    admin.is_admin = True
+    plain = make_user('guardplain')
+    db.session.commit()
+    admin_id, plain_id = admin.id, plain.id
+
+    root = app.config['UPLOAD_FOLDER']
+    written = []
+    try:
+        for folder in ('digital', 'seller_docs', 'kyc', 'phone_docs', 'products'):
+            target = os.path.join(root, folder)
+            os.makedirs(target, exist_ok=True)
+            path = os.path.join(target, f'{TAG}_guard_probe.bin')
+            io.open(path, 'wb').write(b'probe')
+            written.append((folder, f'{TAG}_guard_probe.bin', path))
+
+        def url(folder, name):
+            return f'/static/uploads/{folder}/{name}'
+
+        # Anonymous: everything private is refused, and refused as a 404. A 403 would
+        # confirm the file exists, and for an ID document that is the fact worth
+        # withholding.
+        with app.test_client() as anon:
+            for folder, name, _ in written:
+                got = anon.get(url(folder, name))
+                want = 200 if folder == 'products' else 404
+                check(f'anonymous gets {want} for {folder}',
+                      got.status_code == want, got.status_code)
+
+        # A signed-in customer is not an admin. Worth asserting separately: the guard
+        # reads current_user, and "logged in" is the easiest thing to mistake for
+        # "allowed".
+        with as_user(plain_id) as client:
+            for folder in ('seller_docs', 'kyc', 'phone_docs'):
+                got = client.get(url(folder, f'{TAG}_guard_probe.bin'))
+                check(f'a signed-in customer still gets 404 for {folder}',
+                      got.status_code == 404, got.status_code)
+
+        with as_user(admin_id) as client:
+            for folder in ('seller_docs', 'kyc', 'phone_docs'):
+                got = client.get(url(folder, f'{TAG}_guard_probe.bin'))
+                check(f'an admin can read {folder} for review',
+                      got.status_code == 200, got.status_code)
+            # Not even an admin, and not an oversight: the paid-download route reads
+            # the folder off disk itself, so nothing legitimate needs this URL, and an
+            # admin session on a shared machine is the likeliest way the link escapes.
+            got = client.get(url('digital', f'{TAG}_guard_probe.bin'))
+            check('and digital is closed even to an admin',
+                  got.status_code == 404, got.status_code)
+    finally:
+        for _, _, path in written:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 def run():
     reference = check_references()
     check_folder_sets()
     check_signing(reference)
     check_upload_routing()
     check_download_gate(reference)
+    check_static_upload_guard()
 
 
 def main():

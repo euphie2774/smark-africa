@@ -234,9 +234,11 @@ def rate_limit_key():
     who have made one request. Anonymous traffic has nothing else to key on and
     still uses the address, which is what the ceilings above are sized for.
 
-    This costs no extra query. before_request already reads current_user on every
-    request to build g.auth_user, and Flask-Login caches the loaded user on the
-    application context.
+    This costs no extra query. before_request already reads current_user to build
+    g.auth_user on every request that reaches a view of ours, and Flask-Login caches
+    the loaded user on the application context. It deliberately skips that for static
+    files - which is fine here, because 'static' is in RATE_LIMIT_EXEMPT_ENDPOINTS and
+    so never reaches this function. Take static out of that set and it would.
     """
     try:
         if current_user.is_authenticated:
@@ -1560,6 +1562,69 @@ CLOUDINARY_PRIVATE_FOLDERS = {'digital'}
 # existing helper that tests for the static prefix keeps returning "not local"
 # rather than mangling it.
 CLOUDINARY_REF_PREFIX = 'cloudinary:'
+
+
+# Folders under static/uploads that the plain static route must not hand out.
+#
+# Flask serves the whole static/ tree and nothing here replaces the static view, so
+# every upload folder is a public URL by default. That is right for products, banners,
+# services and inspo. It is wrong for four of them, and the checks that were meant to
+# protect those sit on *different* URLs and never see the request:
+#
+#   digital      download_digital checks login and order ownership, then calls
+#                send_from_directory on the folder. A request straight to
+#                /static/uploads/digital/<name> gets the same bytes without passing
+#                through any of it. Confirmed unused by anything legitimate: no
+#                template links there, preview_digital reads the bytes itself, and the
+#                only place file_path reaches a template it is printed as text.
+#   seller_docs  ID documents and liveness selfies, written by save_capture_data.
+#   kyc          the same material under the older folder name.
+#   phone_docs   IMEI photographs and purchase receipts.
+#
+# The three identity folders are admin-only rather than closed outright, because
+# admin/phone_evidence.html renders them as <img src> and a reviewer who cannot see
+# the document cannot review it. Closed is the wrong default for a folder a human has
+# to look at; open to the world is the wrong default for what is in it.
+#
+# This changes no key and adds no env var. It also does not make the folders safe on
+# its own - anything already committed to a public repository is already published,
+# and moving new digital uploads to Cloudinary's authenticated delivery
+# (CLOUDINARY_PRIVATE_UPLOADS) is still the real fix for paid files.
+GUARDED_UPLOAD_FOLDERS = {
+    'digital': 'nobody',
+    'seller_docs': 'admin',
+    'kyc': 'admin',
+    'phone_docs': 'admin',
+}
+
+
+def guarded_upload_request():
+    """True when this request is reaching into a private upload folder via /static/.
+
+    Reads the folder name out of the path rather than the routing arguments, because
+    this has to run before the static view does and the endpoint is the same one that
+    serves the stylesheet. Lower-cased on the way in: a Windows filesystem answers
+    /static/uploads/DIGITAL/x.pdf perfectly happily, and a guard that only matched the
+    exact spelling would be a guard that worked in production and not in development,
+    which is the wrong way round for finding out.
+    """
+    prefix = (app.static_url_path or '/static').rstrip('/') + '/uploads/'
+    path = request.path or ''
+    if not path.startswith(prefix):
+        return False
+    folder = path[len(prefix):].split('/', 1)[0].lower()
+    rule = GUARDED_UPLOAD_FOLDERS.get(folder)
+    if not rule:
+        return False
+    if rule == 'admin':
+        try:
+            if current_user.is_authenticated and getattr(current_user, 'is_admin', False):
+                return False
+        except Exception:
+            # No login context at all - treat it as not an admin rather than as an
+            # error, so a misconfiguration fails closed instead of open.
+            pass
+    return True
 
 
 def private_uploads_enabled():
@@ -4845,6 +4910,19 @@ def build_category_market_news_item(row):
 
 
 def disbursement_snapshot():
+    """Money owed, for the disbursement desk to look at.
+
+    The two lists here are for *display*. They are capped, and the true totals are
+    counted separately so the template can say "showing 100 of 4,312" rather than
+    implying the backlog is a hundred rows long.
+
+    They are deliberately no longer what the run-cycle action iterates. Both used to
+    be unbounded .all() calls that the POST branch then looped over to queue real
+    payments, which made this function's cap and the payment run the same number - so
+    capping it for the page's sake would have stopped paying sellers past the cap,
+    with the flash message still reporting success. The cycle now reads its own
+    batches; see admin_disbursements.
+    """
     incoming_types = ['sale', 'commission', 'ad_commission', 'raffle_ticket_sale', 'platform_commission_disbursement']
     outgoing_types = ['refund', 'withdrawal', 'salary', 'manufacturer_payout', 'disbursement', 'seller_payout_disbursement']
     incoming_total = db.session.query(func.sum(Transaction.amount)).filter(
@@ -4854,12 +4932,23 @@ def disbursement_snapshot():
     outgoing_total = db.session.query(func.sum(func.abs(Transaction.amount))).filter(
         Transaction.type.in_(outgoing_types)
     ).scalar() or 0.0
-    pending_withdrawals = WithdrawalRequest.query.filter_by(status='pending_review').all()
+    pending_withdrawal_q = WithdrawalRequest.query.filter_by(status='pending_review')
+    pending_withdrawal_count = pending_withdrawal_q.count()
+    # The template prints item.user.username and salary.admin.username, and both
+    # relationships are lazy=True, so a hundred displayed rows were a hundred further
+    # queries each. Many-to-one, so joinedload is a LEFT JOIN that cannot multiply rows.
+    pending_withdrawals = pending_withdrawal_q.options(
+        joinedload(WithdrawalRequest.user)
+    ).order_by(WithdrawalRequest.created_at.asc()).limit(DISBURSEMENT_LIST_LIMIT).all()
     releasable_seller_earnings = Transaction.query.filter(
         Transaction.type == 'seller_earning',
         Transaction.status == 'pending_review'
     ).count()
-    pending_salaries = AdminSalary.query.filter(AdminSalary.status.in_(['pending', 'queued'])).all()
+    pending_salary_q = AdminSalary.query.filter(AdminSalary.status.in_(['pending', 'queued']))
+    pending_salary_count = pending_salary_q.count()
+    pending_salaries = pending_salary_q.options(
+        joinedload(AdminSalary.admin)
+    ).order_by(AdminSalary.created_at.asc()).limit(DISBURSEMENT_LIST_LIMIT).all()
     manufacturer_reserve = round(max(0.0, incoming_total * 0.35), 2)
     available_balance = round(incoming_total - outgoing_total, 2)
     return {
@@ -4867,9 +4956,12 @@ def disbursement_snapshot():
         'outgoing_total': outgoing_total,
         'available_balance': available_balance,
         'pending_withdrawals': pending_withdrawals,
+        'pending_withdrawal_count': pending_withdrawal_count,
         'releasable_seller_earnings': releasable_seller_earnings,
         'pending_salaries': pending_salaries,
+        'pending_salary_count': pending_salary_count,
         'manufacturer_reserve': manufacturer_reserve,
+        'list_limit': DISBURSEMENT_LIST_LIMIT,
     }
 
 
@@ -5927,6 +6019,20 @@ SELLER_PRODUCTS_PER_PAGE = int_env('SELLER_PRODUCTS_PER_PAGE', 25)
 # for and has no way to ask the page for it.
 LEDGER_PER_PAGE = int_env('LEDGER_PER_PAGE', 25)
 
+# A seller's paid ad history, for the same reason and with the same care as the ledger
+# above: the seller paid for every row, so one that falls off the end is money they
+# cannot account for. Paginated rather than capped.
+SELLER_ADS_PER_PAGE = int_env('SELLER_ADS_PER_PAGE', 25)
+
+# The product dropdown on both ad pages. It was every active product on the platform
+# for an admin and a seller's entire catalogue for a seller, rendered as one <option>
+# each - so bulk digital upload, which is a few thousand listings in an afternoon, was
+# also a few thousand options in a select element on every visit. Capped newest-first,
+# because the thing being advertised is nearly always something just listed, and the
+# template says how many of how many it is offering so a missing product reads as
+# truncation rather than as the listing having vanished.
+AD_PRODUCT_CHOICES = int_env('AD_PRODUCT_CHOICES', 200)
+
 # The moderation queue is a different job from a product's own review list, so it
 # gets its own size rather than sharing REVIEWS_PER_PAGE: an admin is scanning for
 # the one review to hide, and ten rows a page would make that unusable. Reviews
@@ -5942,6 +6048,25 @@ ADMIN_REVIEWS_PER_PAGE = int_env('ADMIN_REVIEWS_PER_PAGE', 30)
 # are capped here and the totals are counted separately, and the template says how many
 # of how many it is showing.
 ADMIN_DASHBOARD_LIST_LIMIT = int_env('ADMIN_DASHBOARD_LIST_LIMIT', 100)
+
+# The disbursement desk needs the same treatment as the dashboard above, and needs it
+# more carefully, because the pending-withdrawal list there is not only displayed - the
+# "run cycle" action iterates it to queue the actual payments. So the two uses get two
+# different bounds and a cap on the wrong one would have been a silent short-payment:
+#
+#   DISBURSEMENT_LIST_LIMIT is the display cap. The page shows the oldest requests
+#   first, because this is a work queue and the ones that have waited longest are the
+#   ones an admin needs to see, and the true totals are counted separately so a
+#   request past the cap is never merely invisible.
+#
+#   DISBURSEMENT_CYCLE_BATCH is how many payments one press of "run cycle" queues.
+#   Processing every pending row in one transaction is unbounded work by definition -
+#   the list is as long as the backlog - so the run is bounded and then *says* what it
+#   left, rather than either loading the whole table or quietly stopping at a display
+#   cap. Oldest-first here too, so a repeated run drains the queue instead of
+#   revisiting the same rows and starving the back of it.
+DISBURSEMENT_LIST_LIMIT = int_env('DISBURSEMENT_LIST_LIMIT', 100)
+DISBURSEMENT_CYCLE_BATCH = int_env('DISBURSEMENT_CYCLE_BATCH', 500)
 
 # Every product page view used to be a write and a commit on the product row, so
 # the more popular a listing got the more its viewers serialised behind each other
@@ -7920,6 +8045,56 @@ def canonical_url():
         return url
     except Exception:
         return ''
+
+
+# ---------- Static asset versions ----------
+_asset_version_cache = {}
+
+
+def asset_version(filename):
+    """A cache-busting token for a file under static/, taken from its mtime.
+
+    Nothing here sets SEND_FILE_MAX_AGE_DEFAULT, so Flask sends static files with no
+    explicit Cache-Control and a browser is free to keep reusing the stylesheet it
+    already has, for as long as its own heuristics allow, without ever asking us
+    whether it changed. That is normally invisible. It was not invisible for the
+    phone layout fixes in style.css: those had to reach devices that had already
+    installed the app with the broken copy, and there was nothing in the URL to tell
+    the two apart. static/sw.js caches nothing, so the service worker was never the
+    thing holding the old file - the plain HTTP cache was, and only a changed URL
+    moves it.
+
+    The token is the file's mtime rather than a hand-typed date like the v='20260730'
+    already on the favicon, because a hand-typed date is one more thing to remember
+    on precisely the release where the CSS change *is* the release. An mtime changes
+    on its own, every time the file does.
+
+    Memoised per process: the value can only change when the file changes, and the
+    file changing means a deploy, which means a new process. Under the debug reloader
+    editing a stylesheet restarts nothing, so there the stat is repeated instead -
+    otherwise local CSS work would serve a stale token all session.
+    """
+    if not app.debug:
+        hit = _asset_version_cache.get(filename)
+        if hit is not None:
+            return hit
+    try:
+        stamp = str(int(os.path.getmtime(os.path.join(app.static_folder, filename))))
+    except (OSError, TypeError, ValueError):
+        # A missing or unreadable file is a deployment problem, not this function's.
+        # Return a constant so the URL still renders and the 404 that follows is the
+        # honest one, instead of raising here and turning it into a 500 on every page.
+        stamp = '0'
+    _asset_version_cache[filename] = stamp
+    return stamp
+
+
+# Registered as a Jinja global rather than added to inject_globals below, because
+# inject_globals is wrapped in a try/except that falls back to a hand-written dict.
+# A name that lives in that dict has to be remembered twice, and base.html needs this
+# one on the error pages too - the 404 and 500 handlers render templates that extend
+# it. A Jinja global cannot go missing on one branch and not the other.
+app.jinja_env.globals['asset_version'] = asset_version
 
 
 @app.context_processor
@@ -11970,10 +12145,24 @@ def admin_disbursements():
         if action == 'run_cycle':
             released = release_eligible_seller_earnings()
             seller_settlements = auto_disburse_released_seller_sales()
-            for withdrawal in snapshot['pending_withdrawals']:
+            # Read the payment rows here rather than reusing snapshot['...']. Those
+            # lists are capped for the page, and a cap on the list that queues real
+            # payments is a seller who does not get paid while the flash message says
+            # the cycle succeeded. This run is bounded too - a backlog is as long as
+            # it is, and one transaction cannot be unbounded - but it is bounded on
+            # purpose, oldest first, and it reports what it left behind.
+            withdrawal_batch = WithdrawalRequest.query.filter_by(
+                status='pending_review'
+            ).order_by(WithdrawalRequest.created_at.asc()).limit(DISBURSEMENT_CYCLE_BATCH).all()
+            salary_batch = AdminSalary.query.filter(
+                AdminSalary.status.in_(['pending', 'queued'])
+            ).order_by(AdminSalary.created_at.asc()).limit(DISBURSEMENT_CYCLE_BATCH).all()
+            skipped_for_balance = 0
+            for withdrawal in withdrawal_batch:
                 if seller_available_balance(withdrawal.user_id) < float(withdrawal.amount or 0):
                     withdrawal.status = 'insufficient_released_balance'
                     withdrawal.reviewed_at = utcnow()
+                    skipped_for_balance += 1
                     continue
                 db.session.add(Transaction(
                     user_id=withdrawal.user_id,
@@ -11987,7 +12176,7 @@ def admin_disbursements():
                 withdrawal.reviewed_at = utcnow()
                 created += 1
 
-            for salary in snapshot['pending_salaries']:
+            for salary in salary_batch:
                 db.session.add(Transaction(
                     user_id=salary.admin_id,
                     type='salary',
@@ -12011,7 +12200,26 @@ def admin_disbursements():
 
             db.session.commit()
             Setting.set('auto_disbursement_last_run_at', utcnow().isoformat())
-            flash(f'Disbursement automation released {released} seller earning(s), queued {seller_settlements} seller settlement(s), and queued {created} other payment ledger item(s).', 'success')
+            # Count the leftovers after the commit, so the number is what is genuinely
+            # still owed rather than what was owed before this run. Without this line a
+            # batched run and a run that cleared the whole backlog read identically,
+            # which is the one way a bounded payment cycle can mislead someone.
+            still_pending = WithdrawalRequest.query.filter_by(status='pending_review').count()
+            still_salaries = AdminSalary.query.filter(
+                AdminSalary.status.in_(['pending', 'queued'])).count()
+            message = (f'Disbursement automation released {released} seller earning(s), '
+                       f'queued {seller_settlements} seller settlement(s), and queued '
+                       f'{created} other payment ledger item(s).')
+            if skipped_for_balance:
+                message += (f' {skipped_for_balance} withdrawal(s) were held for an '
+                            f'insufficient released balance.')
+            if still_pending or still_salaries:
+                message += (f' {still_pending} withdrawal(s) and {still_salaries} '
+                            f'salary item(s) are still pending - run the cycle again '
+                            f'to continue.')
+                flash(message, 'warning')
+            else:
+                flash(message, 'success')
         return redirect(url_for('admin_disbursements'))
 
     if auto_disbursement_due():
@@ -17312,7 +17520,6 @@ def seller_ads():
         flash(eligibility_error, 'warning')
         return redirect(url_for('seller_apply'))
 
-    products = Product.query.filter_by(seller_id=current_user.id).all()
     ad_plan_prices = seller_ad_plan_prices()
     if request.method == 'POST':
         plan_key = request.form.get('plan', 'daily')
@@ -17369,7 +17576,29 @@ def seller_ads():
                 flash(stk_result.get('error') or f'Ad details saved, but the STK Push could not be sent. Try payment again from your ad list.', 'warning')
             db.session.commit()
         return redirect(url_for('seller_ads'))
-    campaigns = AdCampaign.query.filter_by(seller_id=current_user.id).order_by(AdCampaign.created_at.desc()).all()
+    # Below the POST branch, which always redirects: the dropdown is only ever read by
+    # the GET that renders the form, so building it above cost two queries on every
+    # submission and threw both away.
+    #
+    # Newest first and capped. A seller's catalogue grows without limit - bulk digital
+    # upload makes that thousands of rows in an afternoon - and every row here was an
+    # <option> in a select element.
+    product_q = Product.query.filter_by(seller_id=current_user.id)
+    product_total = product_q.count()
+    products = product_q.order_by(Product.created_at.desc()).limit(AD_PRODUCT_CHOICES).all()
+    # Paginated, not capped: the seller paid for each of these. joinedload on the
+    # product because the template prints ad.product.name and the relationship is
+    # lazy, so a page of rows was a page of extra queries. ad.seller stays lazy on
+    # purpose - every campaign here belongs to current_user, who is already in the
+    # session, so the identity map answers it without going to the database. That is
+    # only true on this page; admin_ads lists many sellers and would need the join.
+    ads_page = request.args.get('page', 1, type=int)
+    campaign_pages = AdCampaign.query.options(
+        joinedload(AdCampaign.product)
+    ).filter_by(seller_id=current_user.id).order_by(
+        AdCampaign.created_at.desc()
+    ).paginate(page=max(1, ads_page), per_page=SELLER_ADS_PER_PAGE, error_out=False)
+    campaigns = campaign_pages.items
     # Show the seller where each paid request got to, so "is it live yet?" is
     # answered on the page instead of by a message to support.
     posts_by_campaign = {}
@@ -17378,6 +17607,9 @@ def seller_ads():
         for post in SocialAdPost.query.filter(SocialAdPost.campaign_id.in_(campaign_ids)).all():
             posts_by_campaign[post.campaign_id] = post
     return render_template('seller_ads.html', products=products, campaigns=campaigns,
+                           campaign_pages=campaign_pages,
+                           product_total=product_total,
+                           product_choices=AD_PRODUCT_CHOICES,
                            payment_instructions=Setting.get('seller_ad_payment_instructions', ''),
                            ad_plan_prices=ad_plan_prices,
                            posts_by_campaign=posts_by_campaign,
@@ -17389,7 +17621,6 @@ def seller_ads():
 @login_required
 @admin_required
 def admin_ads():
-    products = Product.query.filter(Product.is_active == True).order_by(Product.created_at.desc()).all()
     if request.method == 'POST':
         product_id = request.form.get('product_id', type=int)
         platform = request.form.get('platform', 'SMARKAFRICA')
@@ -17422,8 +17653,20 @@ def admin_ads():
         db.session.commit()
         flash(f'{platform} campaign created. Admin/MVP platform charge: KSh {total_charged:,.2f}.', 'success')
         return redirect(url_for('admin_ads'))
-    campaigns = AdCampaign.query.order_by(AdCampaign.created_at.desc()).limit(100).all()
+    # Loaded here rather than at the top of the view: the POST branch above always
+    # redirects, so building the dropdown for it was a full product read that nothing
+    # rendered.
+    product_q = Product.query.filter(Product.is_active == True)
+    product_total = product_q.count()
+    products = product_q.order_by(Product.created_at.desc()).limit(AD_PRODUCT_CHOICES).all()
+    # joinedload because the table prints ad.product.name and the relationship is
+    # lazy - a hundred campaigns from a hundred different sellers was a hundred extra
+    # queries. Many-to-one, so this is a LEFT JOIN that cannot multiply rows.
+    campaigns = AdCampaign.query.options(joinedload(AdCampaign.product)).order_by(
+        AdCampaign.created_at.desc()).limit(100).all()
     return render_template('admin/ads.html', products=products, campaigns=campaigns,
+                           product_total=product_total,
+                           product_choices=AD_PRODUCT_CHOICES,
                            seller_ads_enabled=Setting.get('seller_ads_enabled', '0') == '1',
                            social_ads_manager_url=Setting.get('social_ads_manager_url', ''))
 
@@ -21836,6 +22079,20 @@ def phase_two_schema_spec():
         # orders indexes lead with a status column, so none of them can serve a window
         # that spans every status.
         ('ix_orders_created', 'orders', 'created_at', False),
+        # The two money lists that are now paginated rather than loaded whole. A
+        # paginated query still sorts before it slices, so without these the LIMIT
+        # only moved the cost off the page and onto the database - the seller ledger
+        # orders a seller's withdrawals by date, and the ad list orders one seller's
+        # campaigns the same way, and neither table had an index leading with the
+        # owner column.
+        ('ix_withdrawal_requests_user_created', 'withdrawal_requests', 'user_id, created_at', False),
+        ('ix_ad_campaigns_seller_created', 'ad_campaigns', 'seller_id, created_at', False),
+        # The disbursement desk asks for pending_review oldest-first, both to display
+        # and to decide what the next payment batch is. status leads because that is
+        # the filter; created_at follows so the ordering comes off the index instead
+        # of sorting every withdrawal ever made on each press of "run cycle".
+        ('ix_withdrawal_requests_status_created', 'withdrawal_requests', 'status, created_at', False),
+        ('ix_admin_salaries_status_created', 'admin_salaries', 'status, created_at', False),
     ]
     return columns, index_specs
 
@@ -22803,6 +23060,27 @@ background_scheduler = None
 @app.before_request
 def before_request():
     """Security headers"""
+    # Static files route through here too, and the only thing on that path that has
+    # any interest in who is asking is the private-upload guard. Everything else here
+    # fills a dict for a template, and a stylesheet renders no template - so reading
+    # current_user for a static file bought nothing and cost a user-load query per
+    # asset. A signed-in visitor opening a shop page carrying a dozen locally stored
+    # images paid a dozen of them. 'static' is already exempt from the rate limiter,
+    # so nothing else on this path needs the identity either.
+    #
+    # The guard is here and nowhere else. A paid download and an identity document are
+    # one URL away from anybody through the static route, and the ownership checks
+    # that guard them live on other URLs entirely. 404 rather than 403 on purpose: a
+    # 403 confirms the file is there, and for an ID document the existence of the file
+    # is itself worth not confirming. One call site, because two copies of a security
+    # check is how one of them drifts.
+    #
+    # Returning None, not a response: this skips the rest of the handler and lets the
+    # request continue to the static view.
+    if request.endpoint == 'static':
+        if guarded_upload_request():
+            abort(404)
+        return
     try:
         g.auth_user = {
             'is_authenticated': bool(current_user.is_authenticated),

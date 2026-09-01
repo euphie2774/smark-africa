@@ -4,9 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}SMARKAFRICA{% endblock %}</title>
-    <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='images/favicon.png', v='20260730') }}">
+    {# Every same-origin asset carries ?v=<mtime>. The favicon used to carry a
+       hand-typed v='20260730' and style.css carried nothing at all, which is the
+       wrong way round: the stylesheet is the file that actually changes. #}
+    <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='images/favicon.png', v=asset_version('images/favicon.png')) }}">
     <link rel="shortcut icon" href="{{ url_for('favicon') }}">
-    <link rel="apple-touch-icon" href="{{ url_for('static', filename='images/favicon.png', v='20260730') }}">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='images/favicon.png', v=asset_version('images/favicon.png')) }}">
     <link rel="manifest" href="{{ url_for('web_app_manifest') }}">
     {# Colours the phone's status bar to match the navbar below it. Same value as
        theme_color in the manifest; both have to agree or the bar changes colour
@@ -14,7 +17,7 @@
     <meta name="theme-color" content="#212529">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=asset_version('style.css')) }}">
     <meta name="description" content="{{ settings.get('site_description', 'shop smarter, live better') }}">
     <meta name="keywords" content="{{ settings.get('site_keywords', 'SmarkAfrica, African marketplace, M-Pesa shopping, digital products, physical products') }}">
     <meta name="csrf-token" content="{{ csrf_token() if csrf_token else '' }}">
@@ -31,7 +34,7 @@
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark sticky-top">
         <div class="container">
             <a class="navbar-brand fw-bold" href="{{ url_for('home') }}">
-                <img src="{{ url_for('static', filename='images/smarkafrica-logo.png') }}" alt="SMARKAFRICA" class="site-logo">
+                <img src="{{ url_for('static', filename='images/smarkafrica-logo.png', v=asset_version('images/smarkafrica-logo.png')) }}" alt="SMARKAFRICA" class="site-logo">
             </a>
             <button class="navbar-toggler" type="button" data-bs-toggle="offcanvas" data-bs-target="#navbarNav"
                     aria-controls="navbarNav" aria-label="Open the menu">
@@ -301,7 +304,7 @@
 
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="{{ url_for('static', filename='main.js') }}"></script>
+    <script src="{{ url_for('static', filename='main.js', v=asset_version('main.js')) }}"></script>
     {% if settings.get('google_analytics_id') %}
     <script async src="https://www.googletagmanager.com/gtag/js?id={{ settings.get('google_analytics_id') }}"></script>
     <script>

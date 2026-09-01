@@ -6,6 +6,16 @@ There are twenty-four of these now, spread between the repository root and tools
 they are the only evidence that any of the scaling work actually holds. Running them
 one at a time invites running only the ones you remember, which is how a regression
 in the fourteenth survives a green run of the first three.
+
+Two scripts are deliberately *not* in the list below, and both belong in the hands of
+whoever is already looking at the thing they test:
+
+  tools/concurrency_smoke.py   spawns real threads against a shared cache, so its
+                               result depends on machine load rather than on the code.
+                               Run it by hand after touching any cache.
+  tools/negative_controls.py   reintroduces a fixed bug, checks that the check catches
+                               it, and restores the file. A routine suite should never
+                               break the working tree, even for a few seconds.
 """
 
 import os

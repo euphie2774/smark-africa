@@ -48,9 +48,22 @@
                 </div>
             </div>
         </div>
-{# One nav for both ledgers. Each link carries the other list's current page, so
-   turning a page here leaves the list below exactly where the seller left it. #}
-{% macro ledger_pages(pager, arg, other_arg, other_page, label) -%}
+{# Every link carries both page numbers, so turning a page in one ledger leaves the
+   other exactly where the seller left it. The two url_for calls below are written
+   out with literal earnings_page= / withdrawals_page= keywords rather than collapsed
+   into one call taking **{...}: tools/wiring_smoke.py audits template links by
+   reading keyword names out of the source text, and a dict it would have to evaluate
+   is a link it cannot check. Six unaudited links on the page that shows a seller
+   their money is not where a blind spot belongs. #}
+{% macro ledger_url(page, other_page, earnings_first) -%}
+    {%- if earnings_first -%}
+        {{ url_for('seller_withdrawals', earnings_page=page, withdrawals_page=other_page) }}
+    {%- else -%}
+        {{ url_for('seller_withdrawals', earnings_page=other_page, withdrawals_page=page) }}
+    {%- endif -%}
+{%- endmacro %}
+
+{% macro ledger_pages(pager, other_page, earnings_first, label) -%}
 {%- if pager.pages > 1 %}
                     <nav class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3"
                          aria-label="{{ label }} pages">
@@ -59,19 +72,19 @@
                         </small>
                         <ul class="pagination pagination-sm mb-0 flex-wrap">
                             <li class="page-item{{ '' if pager.has_prev else ' disabled' }}">
-                                <a class="page-link" href="{{ url_for('seller_withdrawals', **{arg: pager.prev_num or 1, other_arg: other_page}) }}">Previous</a>
+                                <a class="page-link" href="{{ ledger_url(pager.prev_num or 1, other_page, earnings_first) }}">Previous</a>
                             </li>
                             {%- for p in pager.iter_pages() %}
                                 {%- if p %}
                             <li class="page-item{{ ' active' if p == pager.page else '' }}">
-                                <a class="page-link" href="{{ url_for('seller_withdrawals', **{arg: p, other_arg: other_page}) }}">{{ p }}</a>
+                                <a class="page-link" href="{{ ledger_url(p, other_page, earnings_first) }}">{{ p }}</a>
                             </li>
                                 {%- else %}
                             <li class="page-item disabled"><span class="page-link">&hellip;</span></li>
                                 {%- endif %}
                             {%- endfor %}
                             <li class="page-item{{ '' if pager.has_next else ' disabled' }}">
-                                <a class="page-link" href="{{ url_for('seller_withdrawals', **{arg: pager.next_num or pager.pages, other_arg: other_page}) }}">Next</a>
+                                <a class="page-link" href="{{ ledger_url(pager.next_num or pager.pages, other_page, earnings_first) }}">Next</a>
                             </li>
                         </ul>
                     </nav>
@@ -89,7 +102,7 @@
                     {% else %}
                     <p class="text-muted">No earnings yet.</p>
                     {% endfor %}
-                    {{ ledger_pages(earnings, 'earnings_page', 'withdrawals_page', withdrawals.page, 'Earnings') }}
+                    {{ ledger_pages(earnings, withdrawals.page, true, 'Earnings') }}
                 </div>
             </div>
             <div class="card border-0 shadow-sm">
@@ -103,7 +116,7 @@
                     {% else %}
                     <p class="text-muted">No withdrawals requested.</p>
                     {% endfor %}
-                    {{ ledger_pages(withdrawals, 'withdrawals_page', 'earnings_page', earnings.page, 'Withdrawal') }}
+                    {{ ledger_pages(withdrawals, earnings.page, false, 'Withdrawal') }}
                 </div>
             </div>
         </div>

@@ -18,6 +18,13 @@
                             <option value="">Choose the product to advertise</option>
                             {% for product in products %}<option value="{{ product.id }}">{{ product.name }}</option>{% endfor %}
                         </select>
+                        {% if product_total and product_total > products|length %}
+                        {# Said out loud, because a truncated dropdown and a missing
+                           listing look identical from here. #}
+                        <div class="form-text mb-3">
+                            Showing your {{ products|length }} newest listings of {{ product_total }}.
+                        </div>
+                        {% endif %}
                         <label class="form-label">Campaign Channel</label>
                         <select name="platform" class="form-select mb-3">
                             <option>SMARKAFRICA Homepage</option><option>SMARKAFRICA Category Page</option><option>Facebook / Instagram</option><option>TikTok</option><option>Google Display</option><option>SMARKAFRICA Managed Outreach</option>
@@ -112,6 +119,32 @@
                     {% else %}
                     <p class="text-muted">No campaigns yet.</p>
                     {% endfor %}
+                    {% if campaign_pages and campaign_pages.pages > 1 %}
+                    <nav class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3"
+                         aria-label="Campaign pages">
+                        <small class="text-muted">
+                            Page {{ campaign_pages.page }} of {{ campaign_pages.pages }}
+                            &middot; {{ campaign_pages.total }} campaign(s) in total
+                        </small>
+                        <ul class="pagination pagination-sm mb-0 flex-wrap">
+                            <li class="page-item{{ '' if campaign_pages.has_prev else ' disabled' }}">
+                                <a class="page-link" href="{{ url_for('seller_ads', page=campaign_pages.prev_num or 1) }}">Previous</a>
+                            </li>
+                            {%- for p in campaign_pages.iter_pages() %}
+                                {%- if p %}
+                            <li class="page-item{{ ' active' if p == campaign_pages.page else '' }}">
+                                <a class="page-link" href="{{ url_for('seller_ads', page=p) }}">{{ p }}</a>
+                            </li>
+                                {%- else %}
+                            <li class="page-item disabled"><span class="page-link">&hellip;</span></li>
+                                {%- endif %}
+                            {%- endfor %}
+                            <li class="page-item{{ '' if campaign_pages.has_next else ' disabled' }}">
+                                <a class="page-link" href="{{ url_for('seller_ads', page=campaign_pages.next_num or campaign_pages.pages) }}">Next</a>
+                            </li>
+                        </ul>
+                    </nav>
+                    {% endif %}
                 </div>
             </div>
         </div>

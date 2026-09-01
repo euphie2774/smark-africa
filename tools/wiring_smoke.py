@@ -715,6 +715,10 @@ def every_ttl_cache_read_is_guarded():
         '_service_duty_cache', '_service_catalogue_cache', # service flight
         '_nav_category_cache', '_trusted_seller_cache',    # render flight
         '_service_live_keys_cache',                        # render flight
+        # Render flight too, not the search one: the key space is a single key
+        # rather than one per distinct query, so an expiry costs the admin polls in
+        # flight at that moment, not every caller of one page.
+        '_market_facts_cache',                             # render flight
         '_search_expansion_cache',                         # its own pool
         '_sitemap_entry_cache',                            # its own pool
     }
@@ -727,7 +731,7 @@ def every_ttl_cache_read_is_guarded():
     }
     source = pathlib.Path(main.__file__).read_text(encoding='utf-8')
     found = set(re.findall(r'^(_\w+)\s*=\s*TTLCache\(', source, re.M))
-    assert len(found) >= 11, f'expected to find the caches, found {sorted(found)}'
+    assert len(found) >= 12, f'expected to find the caches, found {sorted(found)}'
     unclassified = sorted(found - FLIGHTED - set(EXEMPT))
     assert not unclassified, (
         f'new cached read path(s) with no decision recorded about the cold case: '
@@ -1404,6 +1408,190 @@ def the_nav_drawer_outranks_its_own_backdrop():
 check('the nav drawer outranks its own backdrop', the_nav_drawer_outranks_its_own_backdrop)
 
 
+# Properties that make an element a containing block for its position: fixed
+# descendants. transform and filter are the two everyone knows; backdrop-filter,
+# perspective and contain: paint|layout|strict|content do it too, and will-change
+# naming any of them does it pre-emptively.
+CONTAINING_BLOCK_PROPS = re.compile(
+    r'(?<![\w-])(?:transform|filter|backdrop-filter|perspective)\s*:\s*(?!none\b)'
+    r'|(?<![\w-])will-change\s*:[^;]*(?<![\w-])(?:transform|filter|perspective)(?![\w-])'
+    r'|(?<![\w-])contain\s*:[^;]*(?<![\w-])(?:paint|layout|strict|content)(?![\w-])')
+
+# Everything the nav drawer is nested inside: body > nav.navbar.sticky-top >
+# .container > #navbarNav. Bootstrap positions the drawer with position: fixed,
+# which resolves against the viewport - unless one of these becomes a containing
+# block, and then it resolves against that instead.
+DRAWER_ANCESTORS = {
+    'html', 'body', 'main', 'nav', '.navbar', '.navbar.sticky-top', '.sticky-top',
+    '.container', '.container-fluid', '.navbar > .container', '.navbar .container',
+}
+
+
+def selector_parts(selector):
+    """Split a selector list on top-level commas only.
+
+    ``:where(img:not([width]), video:not([width]))`` is one selector that contains
+    a comma, so a plain split cuts it in half and neither half parses.
+    """
+    parts, depth, buf = [], 0, ''
+    for ch in selector:
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        if ch == ',' and not depth:
+            parts.append(buf)
+            buf = ''
+        else:
+            buf += ch
+    parts.append(buf)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def css_rules(css):
+    """Yield (order, selector, declarations) for the innermost rules in a sheet.
+
+    The pattern cannot cross a brace, so an @media wrapper never matches as a
+    selector and its contents are yielded on their own. That loses the breakpoint,
+    which is deliberate: a containing block on .navbar is a bug in every media
+    query, so knowing which one it was written under would not change the answer.
+    """
+    css = re.sub(r'/\*.*?\*/', '', css, flags=re.S)
+    for order, match in enumerate(re.finditer(r'([^{}]+)\{([^{}]*)\}', css)):
+        yield order, ' '.join(match.group(1).split()), match.group(2)
+
+
+def specificity(selector):
+    """(ids, classes, elements) for one selector, per Selectors 4.
+
+    ``:where()`` contributes nothing whatsoever, which is the entire reason the
+    image reset is wrapped in it. ``:is()``, ``:not()`` and ``:has()`` contribute
+    their own argument's weight, so unwrapping them to bare text counts the same.
+    """
+    sel = selector.strip()
+    while True:
+        start = sel.lower().find(':where(')
+        if start < 0:
+            break
+        depth, i = 0, start + len(':where')
+        while i < len(sel):
+            if sel[i] == '(':
+                depth += 1
+            elif sel[i] == ')':
+                depth -= 1
+                if not depth:
+                    break
+            i += 1
+        sel = sel[:start] + sel[i + 1:]
+    sel = re.sub(r':(?:is|not|has|matches)\(', ' ', sel, flags=re.I).replace(')', ' ')
+    ids = len(re.findall(r'#[\w-]+', sel))
+    rest = re.sub(r'#[\w-]+', ' ', sel)
+    classes = (len(re.findall(r'\.[\w-]+', rest))
+               + len(re.findall(r'\[[^\]]*\]', rest))
+               + len(re.findall(r'(?<!:):(?!:)[\w-]+', rest)))
+    bare = re.sub(r'\.[\w-]+|\[[^\]]*\]|::?[\w-]+', ' ', rest)
+    elements = len(re.findall(r'(?<![\w-])[a-zA-Z][\w-]*', bare))
+    return ids, classes, elements
+
+
+def the_drawer_resolves_against_the_viewport():
+    """The white gap and the dead-looking hamburger, from one declaration.
+
+    .navbar carried ``backdrop-filter: blur(10px)``. A backdrop-filter other than
+    none makes an element a containing block for its position: fixed descendants,
+    and the drawer is one: below 992px Bootstrap gives #navbarNav position: fixed
+    with top/right/bottom 0, a 300px width, and translateX(100%) while it is shut.
+    Resolved against the navbar instead of the viewport that is three bugs at once:
+
+      - shut, translateX(100%) parks it 300px past the navbar's right edge, so the
+        document is 300px wider than the screen. The phone scrolls sideways into
+        bare canvas - a shut drawer is visibility: hidden, so nothing paints out
+        there, which is why the gap was blank white rather than dark like the
+        drawer that was causing it.
+      - open, top: 0 and bottom: 0 resolved to the navbar's own height, so the
+        drawer was a 300px-wide sliver inside the bar rather than a full-height
+        sheet. Tapping the toggle read as nothing happening.
+      - and the stretched navbar container is what sat the brand logo wrong.
+
+    Nothing was gained for it: the navbar's own background is 95% opaque, so the
+    blur behind it could not be seen, and it cost a per-frame GPU blur of
+    everything scrolling under a sticky bar on mid-range Android hardware.
+    """
+    css = pathlib.Path(ROOT, 'static', 'style.css').read_text(encoding='utf-8',
+                                                              errors='replace')
+    offenders = []
+    for _order, selector, body in css_rules(css):
+        found = CONTAINING_BLOCK_PROPS.search(body)
+        if not found:
+            continue
+        for part in selector_parts(selector):
+            if part in DRAWER_ANCESTORS:
+                offenders.append(f'{part} sets {found.group(0).split(":")[0].strip()}')
+    assert not offenders, (
+        'a containing block on an ancestor of the position: fixed nav drawer '
+        're-resolves the drawer against that element instead of the viewport, '
+        'which hangs it off the right edge of the document: '
+        + '; '.join(sorted(set(offenders))))
+
+
+check('the nav drawer resolves against the viewport',
+      the_drawer_resolves_against_the_viewport)
+
+
+def no_reset_outranks_a_sized_image():
+    """The messy home page: every card image had silently lost its crop height.
+
+    The image reset at the end of the sheet is a reset, so it has to lose every
+    argument it has with a component rule. Spelt the obvious way,
+    ``img:not([width])`` is (0,1,1) - which outranked .site-logo at (0,1,0)
+    outright and tied seven ``.thing img`` rules, and being last in the file it won
+    every tie. Those heights are exactly what crops a card image to a uniform box,
+    so the grid rendered as cards no two of which were the same height, and the
+    navbar brand scaled to whatever max-width made of the logo's real proportions.
+
+    Compared by computed specificity rather than by looking for ``:where(``, so a
+    future reset that reintroduces the inversion is caught however it is spelt.
+    """
+    css = pathlib.Path(ROOT, 'static', 'style.css').read_text(encoding='utf-8',
+                                                              errors='replace')
+    resets, sized = [], []
+    for order, selector, body in css_rules(css):
+        # min-height and max-height are a different question and are left alone;
+        # the lookbehind is what keeps them out.
+        height = re.search(r'(?<![\w-])height\s*:\s*([^;!}]+)', body)
+        if not height:
+            continue
+        value = height.group(1).strip().lower()
+        parts = selector_parts(selector)
+        generic = all(
+            re.fullmatch(r'(?:img|video|canvas)(?::not\([^)]*\))?', p, re.I)
+            or ':where(' in p.lower()
+            for p in parts)
+        entry = (specificity(selector), order, selector, value)
+        if generic and value in ('auto', 'inherit', 'initial', 'revert', 'unset'):
+            resets.append(entry)
+        elif (any(re.search(r'(?:img|video)$', p, re.I) for p in parts)
+              or 'logo' in selector.lower()):
+            sized.append(entry)
+    assert resets, 'the image height reset is gone; max-width: 100% alone squashes an image'
+    beaten = []
+    for spec, order, selector, value in sized:
+        for rspec, rorder, rsel, _v in resets:
+            if rspec > spec or (rspec == spec and rorder > order):
+                beaten.append(f'{selector} (height: {value}) loses to {rsel}')
+    assert not beaten, (
+        'the image height reset outranks a component that sets an explicit height, '
+        'so that image renders at its natural aspect instead of its crop: '
+        + '; '.join(sorted(set(beaten))))
+    assert any('site-logo' in s for _sp, _o, s, _v in sized), (
+        '.site-logo sets no height any more, so the navbar brand is sized only by '
+        'max-width and scales to whatever proportions the logo file has')
+
+
+check('no image reset outranks a component that sizes an image',
+      no_reset_outranks_a_sized_image)
+
+
 def nothing_widens_the_page_past_the_viewport():
     """The sideways scroll into blank space, asserted at its two causes.
 
@@ -1444,6 +1632,230 @@ def nothing_widens_the_page_past_the_viewport():
 
 check('nothing widens the page past the viewport',
       nothing_widens_the_page_past_the_viewport)
+
+
+def first_party_assets_are_cache_busted():
+    """Every same-origin asset base.html loads carries a version in its URL.
+
+    Nothing sets SEND_FILE_MAX_AGE_DEFAULT, so Flask serves static files with no
+    explicit Cache-Control and the browser reuses what it has for as long as its own
+    heuristics allow. That made the phone layout fixes in style.css unable to reach a
+    device that had already installed the app with the broken copy - and static/sw.js
+    caches nothing, so the service worker was never what held the old file. Only a
+    changed URL moves the plain HTTP cache.
+
+    This is asserted against the rendered page rather than the template source
+    because that is the thing the browser sees; a helper that silently returned an
+    empty string would still leave a version= in the template and would still ship a
+    naked URL. Uploads are skipped: their filenames already carry a content hash, and
+    they are not what a release changes.
+
+    sw.js is intentionally absent from this - it is served by a route, not from
+    static/, and it must stay unversioned. A changed worker URL registers a second
+    worker rather than updating the one already installed, and browsers already
+    bypass the HTTP cache for the worker script itself.
+    """
+    html = app.test_client().get('/').get_data(as_text=True)
+    naked = []
+    for url in set(re.findall(r'(?:href|src)="(/static/[^"]+)"', html)):
+        if url.startswith('/static/uploads/'):
+            continue
+        if '?v=' not in url:
+            naked.append(url)
+    assert not naked, (
+        f'these first-party assets ship no version: {sorted(naked)}; a browser that '
+        f'already holds one keeps it, so a CSS fix cannot reach an installed app')
+
+    # And the token has to actually vary with the file, or it is decoration. Two
+    # different files must not share a version.
+    stamps = {u.split('?v=')[0]: u.split('?v=')[1]
+              for u in re.findall(r'(?:href|src)="(/static/[^"]+\?v=[^"]+)"', html)
+              if not u.startswith('/static/uploads/')}
+    css = stamps.get('/static/style.css')
+    js = stamps.get('/static/main.js')
+    assert css and js and css != js, (
+        f'style.css and main.js report the same version ({css!r}); the token is not '
+        f'derived from the file, so editing one will not bust the other')
+
+
+check('first-party assets are cache-busted', first_party_assets_are_cache_busted)
+
+
+def the_payment_run_does_not_iterate_a_capped_list():
+    """The disbursement cycle must read its own rows, not the page's display list.
+
+    disbursement_snapshot() returns pending_withdrawals and pending_salaries capped at
+    DISBURSEMENT_LIST_LIMIT so the desk can render at a million users. The run_cycle
+    action used to loop over those same two lists to queue the actual payments, which
+    means the moment the display grew a cap the payment run silently inherited it: the
+    hundred-and-first seller does not get paid, no row records that, and the flash
+    message still reads as success. Underpaying quietly is the worst failure this
+    codebase can have, so it gets an assertion rather than a comment.
+
+    Checked at the source level because there is no runtime signal to check - a run
+    that paid a capped batch and a run that paid everything look identical unless the
+    backlog is bigger than the cap, which is exactly the case a test fixture does not
+    have by default.
+    """
+    source = pathlib.Path(main.__file__).read_text(encoding='utf-8')
+    start = source.index('def admin_disbursements')
+    end = source.index('\ndef ', start + 1)
+    body = source[start:end]
+
+    cycle = body.index("action == 'run_cycle'")
+    nxt = body.find('\n        if action ==', cycle + 1)
+    cycle_body = body[cycle:nxt if nxt != -1 else len(body)]
+
+    for capped in ("snapshot['pending_withdrawals']", "snapshot['pending_salaries']"):
+        assert capped not in cycle_body, (
+            f'run_cycle iterates {capped}, which disbursement_snapshot caps at '
+            f'DISBURSEMENT_LIST_LIMIT for display; every row past the cap is a '
+            f'payment that is never queued and never reported')
+
+    assert 'DISBURSEMENT_CYCLE_BATCH' in cycle_body, (
+        'run_cycle reads payment rows without DISBURSEMENT_CYCLE_BATCH; a payment '
+        'run over an unbounded .all() is the thing the cap was meant to avoid')
+
+    # A bounded run has to say what it left, or it is indistinguishable from a run
+    # that cleared the backlog.
+    assert 'still_pending' in cycle_body, (
+        'run_cycle does not count what remains after it commits; a batched run that '
+        'reports plain success reads exactly like one that finished the queue')
+
+    # And the display side has to carry its true totals, or the cap hides a payable.
+    snap_start = source.index('def disbursement_snapshot')
+    snap_end = source.index('\ndef ', snap_start + 1)
+    snap = source[snap_start:snap_end]
+    assert 'DISBURSEMENT_LIST_LIMIT' in snap, 'disbursement_snapshot is unbounded again'
+    for key in ('pending_withdrawal_count', 'pending_salary_count'):
+        assert key in snap, (
+            f'disbursement_snapshot caps a list without returning {key}; a capped '
+            f'queue with no total tells nobody there is more owed')
+
+
+check('the payment run does not iterate a capped list',
+      the_payment_run_does_not_iterate_a_capped_list)
+
+
+def typing_in_a_search_box_does_not_navigate():
+    """No key event may submit a form.
+
+    main.js used to bind `keyup` on the first `[name="search"]` input on the page and
+    call `this.form.submit()` behind a 500ms debounce. On a desktop that reads as a
+    live search. On a phone it is not: a navigation closes the keyboard, so typing on
+    the home page meant three letters, a pause, and the keyboard dropping while the
+    page reloaded underneath you. It also fired on arrow keys and Tab, and the
+    selector matched the filter boxes on admin/users.html and admin/promo_codes.html
+    as readily as the real search field.
+
+    The scaling half matters as much: each of those navigations ran the full product
+    search - the most expensive query on the site - for a term nobody had finished
+    typing, so one deliberate search cost three or four of them.
+
+    Asserted at the source level and against key events specifically, because
+    `onchange="this.form.submit()"` on the sort dropdown in shop.html is the correct
+    use of the same call: a select fires change once, when the choice is made. What
+    must never come back is a *keystroke* turning into a page load.
+    """
+    js = pathlib.Path(ROOT, 'static', 'main.js').read_text(encoding='utf-8',
+                                                           errors='replace')
+    # Strip comments first, or the paragraph in main.js explaining why this was
+    # removed would itself fail the check that it was removed.
+    stripped = re.sub(r'/\*.*?\*/', '', js, flags=re.S)
+    stripped = re.sub(r'^\s*//.*$', '', stripped, flags=re.M)
+
+    for event in ('keyup', 'keydown', 'keypress', 'input'):
+        for hit in re.finditer(r'addEventListener\(\s*[\'"]%s[\'"]' % event, stripped):
+            # The handler body, bounded generously - a submit anywhere in the next
+            # few lines of a key handler is the thing being ruled out.
+            window = stripped[hit.end():hit.end() + 400]
+            assert '.submit()' not in window, (
+                f'a {event} handler in static/main.js calls .submit(); a keystroke '
+                f'that navigates closes the keyboard on a phone and runs the product '
+                f'search for a half-typed term')
+
+    # And the templates must not do it inline either.
+    for path in sorted(pathlib.Path(ROOT, 'templates').rglob('*.html')):
+        body = path.read_text(encoding='utf-8', errors='replace')
+        for attr in ('onkeyup', 'onkeydown', 'onkeypress', 'oninput'):
+            hits = [m for m in re.finditer(attr + r'="([^"]*)"', body)
+                    if 'submit()' in m.group(1)]
+            assert not hits, (
+                f'{path.relative_to(pathlib.Path(ROOT, "templates")).as_posix()} '
+                f'submits a form from {attr}; same problem, spelt inline')
+
+
+check('typing in a search box does not navigate',
+      typing_in_a_search_box_does_not_navigate)
+
+
+def the_static_route_does_not_hand_out_private_uploads():
+    """A paid file and an identity document are not downloadable by URL alone.
+
+    Flask serves the whole static/ tree, so static/uploads/digital held paid files at
+    a public URL while download_digital's login and order-ownership checks sat on a
+    different one and never saw the request. Same for the identity folders: seller_docs
+    holds ID photographs and liveness selfies, phone_docs holds IMEI photographs and
+    receipts.
+
+    Asserted against the running app rather than the constant, because the constant is
+    not what serves the file. The public folders are asserted in the same check on
+    purpose - a guard that also blocked product photos would pass a
+    "private things are blocked" test while breaking every image on the site, and that
+    failure would show up as a green suite and a blank shop page.
+    """
+    client = app.test_client()
+
+    uploads = pathlib.Path(main.app.config['UPLOAD_FOLDER'])
+
+    def first_file(folder):
+        d = uploads / folder
+        if not d.is_dir():
+            return None
+        for item in sorted(d.iterdir()):
+            if item.is_file():
+                return item.name
+        return None
+
+    # Blocked, and blocked as 404 - a 403 would confirm the file exists, which for an
+    # ID document is itself the thing not to confirm.
+    for folder in ('digital', 'seller_docs', 'kyc', 'phone_docs'):
+        name = first_file(folder) or 'probe-that-need-not-exist.bin'
+        got = client.get(f'/static/uploads/{folder}/{name}')
+        assert got.status_code == 404, (
+            f'/static/uploads/{folder}/{name} answered {got.status_code}; that URL '
+            f'reaches the file without passing the ownership check that guards it')
+
+    # And the public folders still work, or the fix is worse than the bug.
+    for folder in ('products', 'banners', 'services', 'inspo'):
+        name = first_file(folder)
+        if not name:
+            continue
+        got = client.get(f'/static/uploads/{folder}/{name}')
+        assert got.status_code == 200, (
+            f'/static/uploads/{folder}/{name} answered {got.status_code}; the upload '
+            f'guard is blocking a public folder and every image on the site with it')
+
+    # Nothing else under static/ is affected.
+    assert client.get('/static/style.css').status_code == 200, (
+        'the stylesheet stopped being served; the guard is matching more than '
+        'uploads/')
+
+    # The rule table itself, because the admin-visible half cannot be exercised here -
+    # this script signs nobody in - and "admin only" silently becoming "nobody" would
+    # blind the phone-evidence reviewer with no other symptom.
+    assert main.GUARDED_UPLOAD_FOLDERS.get('digital') == 'nobody', (
+        'digital must be closed to everyone; the paid route reads the folder from '
+        'disk and needs no URL')
+    for folder in ('seller_docs', 'kyc', 'phone_docs'):
+        assert main.GUARDED_UPLOAD_FOLDERS.get(folder) == 'admin', (
+            f'{folder} must stay admin-readable; admin/phone_evidence.html renders '
+            f'these as <img src> and a reviewer who cannot see the document cannot '
+            f'review it')
+
+
+check('the static route does not hand out private uploads',
+      the_static_route_does_not_hand_out_private_uploads)
 
 
 print()

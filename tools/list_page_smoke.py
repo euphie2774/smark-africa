@@ -29,6 +29,14 @@ once. That page is also where a cap is most dangerous - three moderation queues 
 one screen, and every headline number on it used to be the length of the list
 below it, which after a cap would report the cap. So what it displays is checked
 too, not only what it costs.
+
+The seller's earnings page is the one with two independent lists on it, and it is
+checked for a third thing the others cannot go wrong at: that paging one ledger keeps
+the other's place. A single page argument shared between them looks correct on every
+first render and only misbehaves once a seller is deep in one list, which is not a
+state anyone reaches by hand. Its balance is asserted against the whole ledger too,
+because a balance that starts agreeing with the visible rows has stopped being an
+aggregate - and on a money page that is worse than being slow.
 """
 
 import contextlib
@@ -49,11 +57,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import event
 
 import main as app_module
-from main import (ADMIN_DASHBOARD_LIST_LIMIT, ADMIN_REVIEWS_PER_PAGE, ORDERS_PER_PAGE,
-                  REVIEWS_PER_PAGE, SELLER_PRODUCTS_PER_PAGE, app, db,
+from main import (ADMIN_DASHBOARD_LIST_LIMIT, ADMIN_REVIEWS_PER_PAGE, LEDGER_PER_PAGE,
+                  ORDERS_PER_PAGE, REVIEWS_PER_PAGE, SELLER_PRODUCTS_PER_PAGE, app, db,
                   flush_product_views)
 from models import (BusinessStorefront, Category, CustomerFeedback, Order, OrderItem,
-                    PaymentClaim, Product, Review, SellerVerification, User)
+                    PaymentClaim, Product, Review, SellerVerification, Transaction, User,
+                    WithdrawalRequest)
 from scale import CounterBuffer
 
 FAILURES = []
@@ -158,6 +167,12 @@ def teardown():
     for model, clause in ((PaymentClaim, PaymentClaim.claimant_id.in_(user_ids)),
                           (SellerVerification, SellerVerification.user_id.in_(user_ids)),
                           (CustomerFeedback, CustomerFeedback.user_id.in_(user_ids)),
+                          # Money rows before the users that own them. Both carry a
+                          # foreign key to users.id, so leaving them behind does not
+                          # merely litter - Postgres refuses the User delete outright
+                          # and the whole teardown rolls back.
+                          (Transaction, Transaction.user_id.in_(user_ids)),
+                          (WithdrawalRequest, WithdrawalRequest.user_id.in_(user_ids)),
                           (OrderItem, OrderItem.order_id.in_(order_ids)),
                           (Order, Order.id.in_(order_ids)),
                           (Review, Review.product_id.in_(product_ids)),
@@ -275,6 +290,24 @@ def add_protection_rows(count, start=0):
         db.session.add(CustomerFeedback(user_id=actor.id, experience_rating=3,
                                         satisfaction_rating=3,
                                         improvement_text=f'{TAG} feedback {i}'))
+    db.session.commit()
+
+
+def add_ledger_rows(user_id, count, start=0):
+    """Released seller earnings and withdrawal requests, for the money ledgers.
+
+    Both tables only ever grow, and they grow fastest for the sellers who earn most -
+    the accounts a marketplace can least afford to make wait. Earnings are written as
+    'released' so seller_available_balance counts them, which keeps the page's headline
+    balance a real number rather than zero while the lists below it are long.
+    """
+    for i in range(start, start + count):
+        db.session.add(Transaction(
+            user_id=user_id, type='seller_earning', amount=120.0 + i,
+            description=f'{TAG} earning {i}', status='released'))
+        db.session.add(WithdrawalRequest(
+            user_id=user_id, amount=10.0, method='mpesa',
+            destination=f'2547{i:08d}', status='paid'))
     db.session.commit()
 
 
@@ -432,6 +465,55 @@ def run():
         page_two, _ = count_page(client, '/orders?page=2')
         check('page two renders too', page_two.status_code == 200, page_two.status_code)
         check('and shows different orders', page_two.data != second.data)
+
+    print("the seller's money ledgers are pages, and both keep their place")
+    ledger_seller_id = make_user('ledger', seller=True).id
+    add_ledger_rows(ledger_seller_id, 3)
+    with as_user(ledger_seller_id) as client:
+        first, before = count_page(client, '/seller/withdrawals')
+        check('/seller/withdrawals renders', first.status_code == 200, first.status_code)
+    add_ledger_rows(ledger_seller_id, LEDGER_PER_PAGE * 2 + 3, start=100)
+    with as_user(ledger_seller_id) as client:
+        second, after = count_page(client, '/seller/withdrawals')
+        check('still renders with a long ledger', second.status_code == 200,
+              second.status_code)
+        check_no_growth('the query count did not grow with the ledger',
+                        before, after, '/seller/withdrawals')
+        # Two independent pagers on one page, so both caps are asserted separately -
+        # a single count could be satisfied by one ledger paginating and the other
+        # rendering whole.
+        check(f'at most {LEDGER_PER_PAGE} earnings rendered',
+              second.data.count(b'listsmoke earning') <= LEDGER_PER_PAGE,
+              second.data.count(b'listsmoke earning'))
+        check(f'at most {LEDGER_PER_PAGE} withdrawals rendered',
+              second.data.count(b'mpesa to 2547') <= LEDGER_PER_PAGE,
+              second.data.count(b'mpesa to 2547'))
+        check('and the rest are reachable', b'earnings_page=2' in second.data
+              and b'withdrawals_page=2' in second.data)
+
+        # The reason both page numbers are on every link: turning one ledger's page
+        # must not silently reset the other. This is the whole point of the
+        # ledger_url macro in the template, and it is the kind of thing that looks
+        # fine on a page with one list and quietly breaks on a page with two.
+        both = client.get('/seller/withdrawals?earnings_page=2&withdrawals_page=2')
+        check('both ledgers can be on page two at once', both.status_code == 200,
+              both.status_code)
+        check('and page two of each shows different rows', both.data != second.data)
+        check('a link from page two of one carries the other along',
+              b'earnings_page=2' in both.data and b'withdrawals_page=2' in both.data)
+
+        # A balance is the one number on this page that must never be a page total.
+        # It is computed with SUM over every released earning, so it has to survive
+        # the lists being capped - if it ever starts agreeing with the visible rows,
+        # the aggregate has been replaced by something that counts what is on screen.
+        page_sum = sum(120.0 + i for i in list(range(3)) + list(range(100, 100 + LEDGER_PER_PAGE * 2 + 3)))
+        paid_out = 10.0 * (LEDGER_PER_PAGE * 2 + 6)
+        expected = round(max(0.0, page_sum - paid_out), 2)
+        shown = re.search(rb'Available for withdrawal: <strong>KSh ([\d,\.]+)</strong>',
+                          second.data)
+        check('the available balance is the whole ledger, not the visible page',
+              bool(shown) and float(shown.group(1).replace(b',', b'')) == expected,
+              f'{shown.group(1).decode() if shown else "not found"} vs {expected}')
 
     print('a listing with many reviews costs what a listing with few costs')
     client_ctx = app.app_context()
