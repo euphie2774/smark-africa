@@ -6,8 +6,9 @@
   Two things are deliberate here. The catalogue tiles come from
   ServiceCatalogueItem rather than a DISTINCT over the listings table, so adding
   the nineteenth service is an admin edit and not a deploy. And no card carries a
-  phone number: a client reaches a provider through an admin, so the only call to
-  action on a card is "View details".
+  phone number: a client reaches a provider through an admin, so the call to action
+  on a card is "View details" - or "Get tickets" on the one profile that needs no
+  introduction, only a price.
 #}
 {% block title %}Services - {{ super() }}{% endblock %}
 
@@ -103,24 +104,37 @@
                     {% endif %}
 
                     <div class="d-flex flex-wrap justify-content-between align-items-center gap-1 mt-auto">
-                        <span class="fw-bold text-success">
-                            {% if service.price %}KSh {{ "{:,.0f}".format(service.price) }}
-                            {% else %}Price on request{% endif %}
-                        </span>
+                        <span class="fw-bold text-success">{{ service_price_display(service) }}</span>
                         {% if service.orders_completed %}
                         <span class="text-muted small">
                             <i class="fas fa-check-circle me-1"></i>{{ service.orders_completed }} done
                         </span>
                         {% endif %}
                     </div>
+                    {#
+                      offer_display, not pickup_display. This line used to be the
+                      pickup sentence unconditionally, which is how a concert ticket
+                      came to tell its buyer "No pickup offered". Each profile
+                      answers in its own terms here, and a profile with nothing to
+                      say prints no line at all rather than a negative.
+
+                      The icon comes off the profile too. It was a pickup truck for
+                      everything that was not a ticket, so a haircut and a rented
+                      room were both illustrated with a collection van - and the class
+                      name itself put the word "pickup" back into the markup of a page
+                      that has no pickup on it.
+                    #}
+                    {% if service.offer_display %}
                     <div class="small text-muted mt-1">
-                        <i class="fas fa-truck-pickup me-1"></i>{{ service.pickup_display }}
+                        <i class="fas {{ service.profile_spec.icon }} me-1"></i>{{ service.offer_display }}
                     </div>
+                    {% endif %}
                 </div>
                 <div class="card-footer bg-white border-0 pt-0">
                     <a href="{{ url_for('service_detail', service_id=service.id) }}"
-                       class="btn btn-outline-primary btn-sm w-100">
-                        View details
+                       class="btn btn-sm w-100 {{ 'btn-success' if service.profile == 'ticket' else 'btn-outline-primary' }}">
+                        {% if service.profile == 'ticket' %}<i class="fas fa-ticket me-1"></i>Get tickets
+                        {% else %}View details{% endif %}
                     </a>
                 </div>
             </div>
@@ -158,15 +172,6 @@
             {% endfor %}
         </ul>
     </nav>
-    {% endif %}
-
-    {% if not requests_enabled or not duty_active %}
-    <div class="alert alert-light border small mt-4 mb-0">
-        <i class="fab fa-whatsapp text-success me-1"></i>
-        Our linking desk is quiet right now.
-        <a href="{{ whatsapp_url }}" target="_blank" rel="noopener">Message us on WhatsApp</a>
-        and we will sort you out straight away.
-    </div>
     {% endif %}
 </div>
 {% endblock %}

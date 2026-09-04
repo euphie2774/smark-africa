@@ -26,7 +26,7 @@
                     </div>
                     <p class="text-muted small mb-2">Worth <strong class="text-warning">KSh {{ "%.0f"|format(raffle.product_value) }}</strong></p>
                     <div class="mb-3">
-                        {% set buyer_count = raffle.tickets|map(attribute='user_id')|unique|list|length %}
+                        {% set buyer_count = buyer_counts.get(raffle.id, 0) %}
                         {% set minimum_buyers = raffle.min_participants or raffle.total_tickets %}
                         <div class="d-flex justify-content-between small mb-1">
                             <span>{{ buyer_count }}/{{ minimum_buyers }} buyers joined</span>
@@ -55,6 +55,9 @@
         </div>
         {% endfor %}
     </div>
+    {% if active_total and active_total > active_raffles|length %}
+    <p class="text-muted small mb-5">Showing {{ active_raffles|length }} of {{ active_total }} open raffles, the ones closing soonest first.</p>
+    {% endif %}
     {% else %}
     <div class="text-center py-5 mb-5">
         <i class="fas fa-hourglass-half fa-3x text-muted mb-3"></i>

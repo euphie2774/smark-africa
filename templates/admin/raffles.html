@@ -30,7 +30,7 @@
                     <td>KSh {{ "%.0f"|format(raffle.product_value) }}</td>
                     <td>KSh {{ "%.0f"|format(raffle.ticket_price) }}</td>
                     <td>
-                        {% set buyer_count = raffle.tickets|map(attribute='user_id')|unique|list|length %}
+                        {% set buyer_count = buyer_counts.get(raffle.id, 0) %}
                         {{ raffle.tickets_sold }} tickets / {{ buyer_count }} of {{ raffle.min_participants or raffle.total_tickets }} users
                         <div class="progress mt-1" style="height:4px;">
                             <div class="progress-bar bg-warning" style="width:{{ (buyer_count / (raffle.min_participants or raffle.total_tickets) * 100)|int if (raffle.min_participants or raffle.total_tickets) else 0 }}%"></div>

@@ -208,6 +208,10 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# A commit message staged for `git commit -F`. Ignored because the command that uses
+# it is `git add -A`, which would otherwise commit the message describing the commit.
+COMMIT_DRAFT.txt
+
 # Ruff stuff:
 .ruff_cache/
 
@@ -226,9 +230,12 @@ __marimo__/
 # second-hand phone ownership evidence, seller_docs holds identity captures, and
 # digital holds the files buyers have paid for - committing any of them hands them
 # to everyone with repo access, and git keeps them after the file is deleted.
-# These rules only stop new ones: seller_docs/ and digital/ already have tracked
-# files from before this, which need `git rm --cached` plus a history rewrite to
-# remove properly.
+# These rules only stop new ones. seller_docs/ was cleared in b20109c ("Untrack the
+# two seller identity captures"); digital/ still has tracked files from before this,
+# and they are not simply removable - one product's three files back real completed
+# sales, so `git rm --cached` breaks those buyers' downloads on the next deploy. That
+# decision is the repository owner's. Either way the bytes stay in history until a
+# rewrite, so treat everything already pushed as disclosed.
 static/uploads/phone_docs/
 static/uploads/seller_docs/
 static/uploads/digital/

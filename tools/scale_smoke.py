@@ -164,8 +164,21 @@ def main():
         calls = []
         runtime.register_sender('smoke', lambda message: calls.append(message.recipient) or True)
         queued = runtime.enqueue('smoke', recipient='+254700000000', body='hi')
-        sent, failed, requeued = runtime.drain_outbound(limit=10)
-        check('drain delivered the queued job', sent >= 1, (sent, failed, requeued))
+        # Sized to whatever is already waiting, and asserted on our own row rather
+        # than on the (sent, failed, requeued) totals. drain_outbound drains the whole
+        # queue by design - it has no channel filter, and should not - so a fixed
+        # limit of 10 was really an assumption that nothing else in the suite had
+        # queued anything. When run_all_checks ran a script that left pending rows
+        # behind, that assumption made these three checks fail on a queue that was
+        # working correctly.
+        waiting = OutboundMessage.query.filter(
+            OutboundMessage.status == 'queued').count()
+        sent, failed, requeued = runtime.drain_outbound(limit=waiting + 5)
+        db.session.expire_all()
+        ours = db.session.get(OutboundMessage, queued.id)
+        check('drain delivered the queued job',
+              ours is not None and ours.status == 'sent',
+              (ours.status if ours else None, sent, failed, requeued))
         check('sender actually ran', '+254700000000' in calls, calls)
         OutboundMessage.query.filter_by(channel='smoke').delete()
         db.session.commit()
@@ -181,8 +194,13 @@ def main():
         claim_b = runtime.claim_batch(limit=10)
         overlap = {row.id for row in claim_a} & {row.id for row in claim_b}
         check('two claims never hand over the same row', not overlap, overlap)
-        check('between them they claim all four', len(claim_a) + len(claim_b) == 4,
-              (len(claim_a), len(claim_b)))
+        # Counted on our own channel for the same reason: claim_batch takes the next
+        # due rows whatever they are, so a foreign pending row would land in one of
+        # these batches and be read as a fifth ticket of ours.
+        mine_a = [row for row in claim_a if row.channel == 'smoke']
+        mine_b = [row for row in claim_b if row.channel == 'smoke']
+        check('between them they claim all four', len(mine_a) + len(mine_b) == 4,
+              (len(mine_a), len(mine_b), len(claim_a), len(claim_b)))
         OutboundMessage.query.filter_by(channel='smoke').delete()
         db.session.commit()
 

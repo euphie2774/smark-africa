@@ -10,6 +10,17 @@
   `options` is already filtered by the view - sellers receive only the catalogue
   rows an admin marked seller_listable, admins receive everything. This template
   does no filtering of its own, so there is one place that decides.
+
+  The form asks different questions per service, driven by the chosen category's
+  fulfilment profile: a ticketed event is asked for a date, a venue and its price
+  bands and is never asked about pickup; a laundry is asked about pickup and never
+  about a venue. Each group is marked data-field="<name>" and shown when the
+  selected profile's whitelist carries that name.
+
+  With JavaScript off, every group is visible - and that is safe rather than merely
+  tolerable, because apply_service_profile_fields() reads the same whitelist on the
+  server and refuses to read a field the profile does not have. The switching here
+  is what the provider sees; the whitelist there is what is true.
 #}
 {% block title %}Offer a Service - {{ super() }}{% endblock %}
 
@@ -45,13 +56,13 @@
                             <select class="form-select" id="service_key" name="service_key" required>
                                 <option value="">Choose a service…</option>
                                 {% for row in options %}
-                                <option value="{{ row.key }}"
+                                <option value="{{ row.key }}" data-profile="{{ row.profile }}"
                                         {{ 'selected' if form.get('service_key') == row.key }}>
                                     {% if row.emoji %}{{ row.emoji }} {% endif %}{{ row.label }}
                                 </option>
                                 {% endfor %}
                             </select>
-                            <div class="form-text">
+                            <div class="form-text" id="profileBlurb">
                                 Not on the list? Ask an admin to add it — they can, without a deploy.
                             </div>
                         </div>
@@ -69,7 +80,14 @@
                                       placeholder="What the client gets, how long it takes, anything they should bring.">{{ form.get('description', '') }}</textarea>
                         </div>
 
-                        <div class="row g-3">
+                        {#
+                          The single price, for the five profiles that have one. A
+                          ticketed event does not: its price is the lowest of its
+                          bands, written by the server, so this whole row is hidden
+                          for that flow rather than asking a question whose answer
+                          would be overwritten.
+                        #}
+                        <div class="row g-3" data-flow="request">
                             <div class="col-12 col-sm-4">
                                 <label class="form-label" for="price">Price (KSh)</label>
                                 <input type="number" class="form-control" id="price" name="price"
@@ -94,6 +112,87 @@
                                 <div class="form-text">0 for same day.</div>
                             </div>
                         </div>
+
+                        <div class="mt-3" data-field="rate_unit">
+                            <label class="form-label" for="rate_unit">That price is per…</label>
+                            <select class="form-select" id="rate_unit" name="rate_unit">
+                                {% for value, label in [('hour', 'Hour'), ('session', 'Session'),
+                                                        ('day', 'Day'), ('week', 'Week'),
+                                                        ('month', 'Month'), ('task', 'Task')] %}
+                                <option value="{{ value }}"
+                                        {{ 'selected' if form.get('rate_unit') == value }}>{{ label }}</option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text">
+                                Clients see “KSh 500 per hour” rather than a bare number.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                {# --- Ticketed events -------------------------------------- #}
+                <div class="card border-0 shadow-sm mb-3" data-field="tiers">
+                    <div class="card-body">
+                        <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                            <i class="fas fa-ticket me-1"></i>The event and its tickets
+                        </h6>
+                        <div class="row g-2 mb-3">
+                            <div class="col-12 col-sm-6">
+                                <label class="form-label small mb-1" for="event_starts_at">Starts</label>
+                                <input type="datetime-local" class="form-control" id="event_starts_at"
+                                       name="event_starts_at" value="{{ form.get('event_starts_at', '') }}">
+                            </div>
+                            <div class="col-12 col-sm-6">
+                                <label class="form-label small mb-1" for="event_venue">Venue</label>
+                                <input class="form-control" id="event_venue" name="event_venue"
+                                       maxlength="200" value="{{ form.get('event_venue', '') }}"
+                                       placeholder="e.g. KICC, Nairobi">
+                            </div>
+                        </div>
+
+                        <p class="small text-muted mb-2">
+                            One row per price band. Regular, VIP, VVIP — whatever you sell, at
+                            whatever price. Buyers pay on the platform and get a ticket code;
+                            nobody has to call you. Leave a row blank to skip it.
+                        </p>
+                        {% set tier_names = form.getlist('tier_name') if form.getlist is defined else [] %}
+                        {% set tier_prices = form.getlist('tier_price') if form.getlist is defined else [] %}
+                        {% set tier_totals = form.getlist('tier_quantity') if form.getlist is defined else [] %}
+                        {% set tier_caps = form.getlist('tier_max') if form.getlist is defined else [] %}
+                        <div id="tierRows">
+                            {% for index in range([tier_names|length, 3]|max) %}
+                            <div class="row g-2 mb-2 tier-row">
+                                <div class="col-12 col-sm-4">
+                                    <input class="form-control form-control-sm" name="tier_name"
+                                           maxlength="60" placeholder="Band name (e.g. VIP)"
+                                           aria-label="Band name"
+                                           value="{{ tier_names[index] if index < tier_names|length else '' }}">
+                                </div>
+                                <div class="col-4 col-sm-3">
+                                    <input type="number" class="form-control form-control-sm" name="tier_price"
+                                           min="1" step="10" placeholder="Price" aria-label="Price"
+                                           value="{{ tier_prices[index] if index < tier_prices|length else '' }}">
+                                </div>
+                                <div class="col-4 col-sm-3">
+                                    <input type="number" class="form-control form-control-sm" name="tier_quantity"
+                                           min="0" step="1" placeholder="Seats" aria-label="Seats on sale"
+                                           value="{{ tier_totals[index] if index < tier_totals|length else '' }}">
+                                </div>
+                                <div class="col-4 col-sm-2">
+                                    <input type="number" class="form-control form-control-sm" name="tier_max"
+                                           min="1" max="50" step="1" placeholder="Max" aria-label="Max per order"
+                                           value="{{ tier_caps[index] if index < tier_caps|length else '' }}">
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="addTierRow">
+                            <i class="fas fa-plus me-1"></i>Add another band
+                        </button>
+                        <div class="form-text">
+                            <strong>Seats</strong> — leave blank or 0 for unlimited.
+                            <strong>Max</strong> — how many one buyer may take at once (5 if blank).
+                        </div>
                     </div>
                 </div>
 
@@ -113,7 +212,8 @@
                     </div>
                 </div>
 
-                <div class="card border-0 shadow-sm mb-3">
+                {# --- Where and when --------------------------------------- #}
+                <div class="card border-0 shadow-sm mb-3" data-field="location">
                     <div class="card-body">
                         <h6 class="text-uppercase text-muted small fw-bold mb-2">
                             <i class="fas fa-location-dot me-1"></i>Where are you?
@@ -146,7 +246,138 @@
                     </div>
                 </div>
 
-                <div class="card border-0 shadow-sm mb-3">
+                <div class="card border-0 shadow-sm mb-3" data-field="opening_hours">
+                    <div class="card-body">
+                        <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                            <i class="fas fa-clock me-1"></i>When are you open?
+                        </h6>
+                        <input class="form-control" name="opening_hours" maxlength="120"
+                               value="{{ form.get('opening_hours', '') }}"
+                               placeholder="Mon–Sat 8am–7pm, closed Sunday" aria-label="Opening hours">
+                        <div class="form-text">Free text, exactly as you would tell a client.</div>
+                    </div>
+                </div>
+
+                <div class="card border-0 shadow-sm mb-3" data-field="serves_at">
+                    <div class="card-body">
+                        <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                            <i class="fas fa-person-walking me-1"></i>Where does it happen?
+                        </h6>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" value="1"
+                                   name="serves_at_provider" id="serves_at_provider"
+                                   {{ 'checked' if form.get('serves_at_provider') or not form }}>
+                            <label class="form-check-label" for="serves_at_provider">
+                                At my premises
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" value="1"
+                                   name="serves_at_client" id="serves_at_client"
+                                   {{ 'checked' if form.get('serves_at_client') }}>
+                            <label class="form-check-label" for="serves_at_client">
+                                I go to the client
+                            </label>
+                        </div>
+                        <div class="form-text">
+                            Tick both if you do both — that is what most mobile providers answer.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card border-0 shadow-sm mb-3" data-field="appointment_required">
+                    <div class="card-body">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" value="1"
+                                   name="appointment_required" id="appointment_required"
+                                   {{ 'checked' if form.get('appointment_required') }}>
+                            <label class="form-check-label" for="appointment_required">
+                                Clients must book before coming
+                            </label>
+                        </div>
+                        <div class="form-text">
+                            Off means walk-ins are welcome, and that is what the listing will say.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card border-0 shadow-sm mb-3" data-field="service_area">
+                    <div class="card-body">
+                        <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                            <i class="fas fa-map me-1"></i>Where do you cover?
+                        </h6>
+                        <input class="form-control" name="service_area" maxlength="200"
+                               value="{{ form.get('service_area', '') }}"
+                               placeholder="e.g. Juja, Thika Road, Ruiru" aria-label="Coverage area">
+                    </div>
+                </div>
+
+                <div class="card border-0 shadow-sm mb-3" data-field="delivery_fee">
+                    <div class="card-body">
+                        <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                            <i class="fas fa-motorcycle me-1"></i>Delivery
+                        </h6>
+                        <div class="row g-2">
+                            <div class="col-12 col-sm-6">
+                                <label class="form-label small mb-1" for="delivery_fee">Delivery fee (KSh)</label>
+                                <input type="number" class="form-control" id="delivery_fee"
+                                       name="delivery_fee" min="0" step="10"
+                                       value="{{ form.get('delivery_fee', '') }}">
+                            </div>
+                            <div class="col-12 col-sm-6">
+                                <label class="form-label small mb-1" for="min_order_amount">
+                                    Minimum order (KSh)
+                                </label>
+                                <input type="number" class="form-control" id="min_order_amount"
+                                       name="min_order_amount" min="0" step="10"
+                                       value="{{ form.get('min_order_amount', '') }}">
+                            </div>
+                        </div>
+                        <div class="form-text">
+                            The client pays up front on this kind of service, so the fee is charged
+                            with the order rather than argued about at the door.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card border-0 shadow-sm mb-3" data-field="turnaround_note">
+                    <div class="card-body">
+                        <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                            <i class="fas fa-hourglass-half me-1"></i>How long does it take?
+                        </h6>
+                        <input class="form-control" name="turnaround_note" maxlength="120"
+                               value="{{ form.get('turnaround_note', '') }}"
+                               placeholder="e.g. Same day if dropped before noon"
+                               aria-label="Turnaround">
+                    </div>
+                </div>
+
+                <div class="card border-0 shadow-sm mb-3" data-field="deposit_amount">
+                    <div class="card-body">
+                        <h6 class="text-uppercase text-muted small fw-bold mb-2">
+                            <i class="fas fa-key me-1"></i>Deposit and availability
+                        </h6>
+                        <div class="row g-2">
+                            <div class="col-12 col-sm-6">
+                                <label class="form-label small mb-1" for="deposit_amount">Deposit (KSh)</label>
+                                <input type="number" class="form-control" id="deposit_amount"
+                                       name="deposit_amount" min="0" step="500"
+                                       value="{{ form.get('deposit_amount', '') }}">
+                            </div>
+                            <div class="col-12 col-sm-6" data-field="available_from">
+                                <label class="form-label small mb-1" for="available_from">Available from</label>
+                                <input type="date" class="form-control" id="available_from"
+                                       name="available_from" value="{{ form.get('available_from', '') }}">
+                            </div>
+                        </div>
+                        <div class="form-text">
+                            Rent and deposit are paid to you directly, at or after the viewing —
+                            the platform does not hold them.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card border-0 shadow-sm mb-3" data-field="pickup">
                     <div class="card-body">
                         <h6 class="text-uppercase text-muted small fw-bold mb-2">
                             <i class="fas fa-truck-pickup me-1"></i>Pickup
@@ -212,6 +443,11 @@
                     </div>
                 </div>
 
+                <div class="alert alert-light border small d-none" id="payNote">
+                    <i class="fas fa-money-bill-transfer me-1"></i>
+                    <span id="payNoteText"></span>
+                </div>
+
                 {% if fee %}
                 <div class="alert alert-warning small">
                     <i class="fas fa-receipt me-1"></i>
@@ -232,37 +468,104 @@
 
 {% block scripts %}
 <script>
-document.getElementById('pickup_required')?.addEventListener('change', function () {
-    document.getElementById('pickupFields')?.classList.toggle('d-none', !this.checked);
-});
+(function () {
+    // The six profiles as plain data, so switching field sets costs no round trip
+    // and there is one definition of the whitelist rather than a copy per template.
+    var PROFILES = {{ profiles|tojson }};
+    var picker = document.getElementById('service_key');
+    var blurb = document.getElementById('profileBlurb');
+    var payNote = document.getElementById('payNote');
+    var payNoteText = document.getElementById('payNoteText');
+    var DEFAULT_BLURB = blurb ? blurb.innerHTML : '';
 
-document.getElementById('pickup_is_free')?.addEventListener('change', function () {
-    var cost = document.getElementById('pickup_cost');
-    if (!cost) { return; }
-    cost.disabled = this.checked;
-    if (this.checked) { cost.value = ''; }
-});
-
-document.getElementById('useMyLocation')?.addEventListener('click', function () {
-    if (!navigator.geolocation) {
-        alert('This browser cannot share a location. Type the address instead.');
-        return;
+    function chosenProfile() {
+        if (!picker) { return null; }
+        var option = picker.options[picker.selectedIndex];
+        var name = option ? option.getAttribute('data-profile') : '';
+        return (name && PROFILES[name]) ? name : null;
     }
-    var button = this;
-    button.disabled = true;
-    navigator.geolocation.getCurrentPosition(
-        function (pos) {
-            document.querySelector('[name="location_lat"]').value = pos.coords.latitude.toFixed(6);
-            document.querySelector('[name="location_lng"]').value = pos.coords.longitude.toFixed(6);
-            button.disabled = false;
-            button.innerHTML = '<i class="fas fa-check me-1"></i>Location captured';
-        },
-        function () {
-            alert('Could not read your location. Type the address instead.');
-            button.disabled = false;
-        },
-        { enableHighAccuracy: true, timeout: 10000 }
-    );
-});
+
+    function applyProfile() {
+        var name = chosenProfile();
+        var spec = name ? PROFILES[name] : null;
+        // Nothing chosen yet: show everything rather than an empty form, so a
+        // provider can read what they are about to be asked.
+        var fields = spec ? spec.fields : null;
+
+        document.querySelectorAll('[data-field]').forEach(function (group) {
+            var wanted = group.getAttribute('data-field');
+            group.classList.toggle('d-none', !!fields && fields.indexOf(wanted) === -1);
+        });
+        document.querySelectorAll('[data-flow]').forEach(function (group) {
+            var wanted = group.getAttribute('data-flow');
+            group.classList.toggle('d-none', !!spec && spec.flow !== wanted);
+        });
+
+        if (blurb) {
+            blurb.innerHTML = spec ? ('<strong>' + spec.label + '.</strong> ' + spec.blurb)
+                                   : DEFAULT_BLURB;
+        }
+        if (payNote && payNoteText) {
+            if (!spec) {
+                payNote.classList.add('d-none');
+            } else {
+                payNote.classList.remove('d-none');
+                payNoteText.textContent = spec.pay_to === 'provider'
+                    ? 'Clients pay you directly, ' +
+                      (spec.pay_when === 'upfront' ? 'before' : 'after') +
+                      ' the service. The platform introduces you and takes no money.'
+                    : 'Clients pay on the platform, ' +
+                      (spec.pay_when === 'upfront' ? 'up front' : 'once the work is done') +
+                      ', and you are paid out from there.';
+            }
+        }
+    }
+
+    if (picker) {
+        picker.addEventListener('change', applyProfile);
+        applyProfile();
+    }
+
+    document.getElementById('addTierRow')?.addEventListener('click', function () {
+        var rows = document.getElementById('tierRows');
+        if (!rows || !rows.lastElementChild) { return; }
+        var copy = rows.lastElementChild.cloneNode(true);
+        copy.querySelectorAll('input').forEach(function (input) { input.value = ''; });
+        rows.appendChild(copy);
+    });
+
+    document.getElementById('pickup_required')?.addEventListener('change', function () {
+        document.getElementById('pickupFields')?.classList.toggle('d-none', !this.checked);
+    });
+
+    document.getElementById('pickup_is_free')?.addEventListener('change', function () {
+        var cost = document.getElementById('pickup_cost');
+        if (!cost) { return; }
+        cost.disabled = this.checked;
+        if (this.checked) { cost.value = ''; }
+    });
+
+    document.getElementById('useMyLocation')?.addEventListener('click', function () {
+        if (!navigator.geolocation) {
+            alert('This browser cannot share a location. Type the address instead.');
+            return;
+        }
+        var button = this;
+        button.disabled = true;
+        navigator.geolocation.getCurrentPosition(
+            function (pos) {
+                document.querySelector('[name="location_lat"]').value = pos.coords.latitude.toFixed(6);
+                document.querySelector('[name="location_lng"]').value = pos.coords.longitude.toFixed(6);
+                button.disabled = false;
+                button.innerHTML = '<i class="fas fa-check me-1"></i>Location captured';
+            },
+            function () {
+                alert('Could not read your location. Type the address instead.');
+                button.disabled = false;
+            },
+            { enableHighAccuracy: true, timeout: 10000 }
+        );
+    });
+})();
 </script>
 {% endblock %}

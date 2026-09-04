@@ -1,31 +1,43 @@
-"""Smoke check for the services category: admin-brokered linking and the chatbot.
+"""Smoke check for the services category: fulfilment profiles, linking, tickets.
 
 Run with: python tools/services_smoke.py
 
-A service is not sold the way a product is. The client never receives the
-provider's number: they press "Contact admin", an on-duty admin sees the request
-together with the phone, and the admin introduces the two. When nobody is on duty
-the client gets one exact sentence and a WhatsApp button.
+A service is not sold the way a product is, and the eighteen services are not sold
+the same way as each other. Each category carries a fulfilment profile - ticket,
+dropoff, errand, visit, session, tenancy - and the profile decides which questions a
+provider is asked, which facts a client is shown, and where the money goes. A ticket
+is bought outright at a tier price; a laundry drop-off is paid on the platform; a
+barber is paid in the chair.
 
 The model is only as good as its guards, so these are asserted rather than trusted
 to review:
 
   * provider_phone reaches admins and the provider themselves, and nobody else -
     not the client, not an anonymous visitor, not the listing page
-  * an admin on duty produces an on-platform thread the client can read; no admin
-    on duty produces the MVP's busy sentence, character for character
+  * a field a profile does not have does not appear as a negative. A ticket page
+    contains no occurrence of the word "pickup" at all - not "no pickup offered",
+    which is the exact complaint the profiles were built to answer
+  * the client's answer to "contact admin" is byte-identical with an admin on duty
+    and with the desk empty, so nobody can tell from the reply whether anyone was
+    working. That is the whole of "a customer will not know"
+  * an empty desk still records the request, still hands it to the support WhatsApp
+    line, and still notifies the provider - with no button pressed and nothing to
+    monitor - and notifying twice sends once
   * a seller may only list services the admin enabled; an admin may list any
-  * a seller with no approved storefront is redirected, not refused
   * a blank address falls back to the device's coordinates; a typed address wins
+  * money: a ticket purchase creates a pending order with a Daraja checkout id and
+    no revenue, the callback is the only thing that marks it paid, a replayed
+    callback changes nothing, and a directly-paid profile creates no order at all
   * the chatbot's provider list matches the format the MVP wrote out, and claims
     "near you" only when a county is actually held
   * the menu it offers holds services somebody is listed under, so a button cannot
     hand the client back the same "nobody is listed under that yet" reply
   * the listing fee is charged only while direct contact is switched on
 
-What is NOT covered from here: the WhatsApp hand-off itself, which is one link to a
-third party, and the linking desk templates beyond a status code. The invariant
-worth this much scaffolding is who can see the number.
+What is NOT covered from here: the live STK push, which needs a public HTTPS
+callback and real Daraja credentials - stk_push is faked and the callback is driven
+directly, and this file says so rather than implying otherwise. Nor the WhatsApp
+hand-off itself, which is one link to a third party.
 
 Two things are forced rather than read, because this runs against a real operator
 database and both would otherwise decide the result: every feature flag it depends
@@ -42,22 +54,29 @@ import contextlib
 import os
 import re
 import sys
+from datetime import datetime, timedelta
 
 os.environ.setdefault('DISABLE_BACKGROUND_JOBS', '1')
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 from flask import session
 
 import main as app_module
-from main import (SERVICE_BUSY_MESSAGE, app, cached_service_ids, db,
+from main import (SERVICE_CLIENT_WELCOME_MESSAGE,
+                  SERVICE_PROVIDER_INTEREST_MESSAGE, app, cached_service_ids, db,
                   invalidate_service_caches, match_service_key,
-                  match_service_key_scored, paginate_cached_ids,
-                  pick_service_admin, service_catalogue, service_chatbot_reply,
-                  service_duty_active, service_listing_fee, service_provider_line,
+                  match_service_key_scored, notify_service_provider,
+                  paginate_cached_ids, pick_service_admin, seed_profile_for,
+                  service_catalogue, service_chatbot_reply, service_duty_active,
+                  service_listing_fee, service_order_for_checkout_id,
+                  service_price_display, service_provider_line,
                   support_whatsapp_url)
-from models import (BusinessStorefront, CustomerNotification, PlatformRevenue,
+from models import (SERVICE_FULFILMENT_PROFILES, SERVICE_PROFILE_BY_KEY,
+                    BusinessStorefront, CustomerNotification, PlatformRevenue,
                     ServiceCatalogueItem, ServiceLinkMessage, ServiceLinkRequest,
-                    ServiceListing, ServiceOrder, Setting, User)
+                    ServiceListing, ServiceOrder, ServicePriceTier, Setting, User,
+                    service_profile_spec)
 
 # CSRF off for the same reason the four existing POST-exercising smoke scripts turn
 # it off: the token is a browser concern, and every POST below would otherwise fail
@@ -93,7 +112,20 @@ LAUNDRY_KEY = f'{TAG}_laundry'
 # Its own key so the paging check can seed more providers than fit on a page without
 # pushing every other check's assertions onto page two.
 PAGING_KEY = f'{TAG}_paging'
+# One key per profile whose shape is asserted. Ours rather than the seeded
+# events_tickets / barber_beauty rows for the same reason as the others: those are
+# the operator's configuration, and a test that lists providers under them leaves
+# the real services page holding smoke-test listings if a teardown is ever missed.
+TICKET_KEY = f'{TAG}_tickets'
+VISIT_KEY = f'{TAG}_visit'
+SESSION_KEY = f'{TAG}_session'
+TENANCY_KEY = f'{TAG}_tenancy'
 CREATED_CATALOGUE_KEYS = []
+
+# A fake Daraja response, so the money checks can run with no credentials and no
+# network. stk_push is replaced for the duration; the callback is then driven
+# directly against this id, which is exactly how far a local run can honestly go.
+FAKE_CHECKOUT_ID = f'ws_CO_{TAG}_0001'
 
 
 def ascii_safe(value):
@@ -235,6 +267,11 @@ def teardown():
         ServiceLinkRequest.id.in_(request_ids)).delete(synchronize_session=False)
     ServiceOrder.query.filter(
         ServiceOrder.service_id.in_(service_ids)).delete(synchronize_session=False)
+    # Before the listings, and by service_id rather than through the cascade: the
+    # listing delete below is a bulk query, and a bulk delete does not run
+    # delete-orphan.
+    ServicePriceTier.query.filter(
+        ServicePriceTier.service_id.in_(service_ids)).delete(synchronize_session=False)
     ServiceListing.query.filter(
         ServiceListing.id.in_(service_ids)).delete(synchronize_session=False)
     BusinessStorefront.query.filter(
@@ -265,13 +302,14 @@ def make_user(suffix, **fields):
     return user
 
 
-def make_catalogue(key, label, seller_listable=True, sort_order=100):
+def make_catalogue(key, label, seller_listable=True, sort_order=100,
+                   profile='dropoff'):
     row = ServiceCatalogueItem.query.filter_by(key=key).first()
     if row:
         return row
     row = ServiceCatalogueItem(key=key, label=label, emoji='',
                               seller_listable=seller_listable, is_active=True,
-                              sort_order=sort_order)
+                              sort_order=sort_order, fulfilment_profile=profile)
     db.session.add(row)
     db.session.commit()
     CREATED_CATALOGUE_KEYS.append(key)
@@ -280,6 +318,19 @@ def make_catalogue(key, label, seller_listable=True, sort_order=100):
 
 
 def make_listing(provider_id, title, price, key, label, orders, **fields):
+    # The profile is copied onto the listing rather than read through the catalogue,
+    # which is what the app itself does - so a fixture that set only the catalogue
+    # row would be testing a shape no real listing has.
+    fields.setdefault('fulfilment_profile',
+                      (ServiceCatalogueItem.query.filter_by(key=key).first()
+                       or ServiceCatalogueItem()).fulfilment_profile or 'dropoff')
+    # create_service writes pay_to/pay_when from the profile spec at insert time
+    # (main.py:20834). Leaving them on the column defaults here would give a
+    # barber's listing pay_to='platform' and make the direct-pay checks below
+    # assert against a shape the real route never produces.
+    spec = service_profile_spec(fields['fulfilment_profile'])
+    fields.setdefault('pay_to', spec['pay_to'])
+    fields.setdefault('pay_when', spec['pay_when'])
     service = ServiceListing(
         provider_id=provider_id, title=title, price=price, category=label,
         service_key=key, description=f'{TAG} listing', is_active=True,
@@ -289,6 +340,101 @@ def make_listing(provider_id, title, price, key, label, orders, **fields):
     db.session.commit()
     invalidate_service_caches()
     return service
+
+
+def make_tier(service, name, price, total=0, sold=0, max_per_order=5,
+              sort_order=100):
+    """One price band, and the listing's denormalised 'from' price kept true.
+
+    ServiceListing.price is maintained as the lowest active tier so the grid can
+    print "from KES x" without a query per card. A fixture that skipped that would
+    make the price checks pass against a number no route ever writes.
+
+    `sold` is settable because quantity_total=0 means unlimited, by design
+    (models.py:2211) - so the only way to build a band with nothing left is to sell
+    out a band that had a capacity, which is also the only way it happens in life.
+    """
+    tier = ServicePriceTier(service_id=service.id, name=name, price=price,
+                            quantity_total=total, quantity_sold=sold,
+                            max_per_order=max_per_order, is_active=True,
+                            sort_order=sort_order)
+    db.session.add(tier)
+    if not service.price or price < service.price:
+        service.price = price
+    db.session.commit()
+    invalidate_service_caches()
+    return tier
+
+
+@contextlib.contextmanager
+def fake_stk_push():
+    """Answer every STK push with one fixed checkout id, and record the calls.
+
+    Nothing else in the payment path is stubbed: the order row, the checkout id it
+    stores, the callback lookup and finalize_paid_service_order are all the real
+    code. Only Safaricom is absent.
+    """
+    calls = []
+    original = app_module.stk_push
+
+    def stub(phone, amount, reference, *args, **kwargs):
+        calls.append({'phone': phone, 'amount': amount, 'reference': reference})
+        return {'success': True, 'checkout_request_id': FAKE_CHECKOUT_ID,
+                'merchant_request_id': f'{TAG}-merchant'}
+
+    app_module.stk_push = stub
+    try:
+        yield calls
+    finally:
+        app_module.stk_push = original
+
+
+@contextlib.contextmanager
+def record_outbound():
+    """Capture WhatsApp and SMS sends instead of making them.
+
+    Both helpers return False when their keys are absent, so on a machine with no
+    WhatsApp token every delivery assertion would pass for the wrong reason - "we
+    never even tried" is indistinguishable from "it was refused". Recording the
+    arguments makes the check real without configuring anything.
+    """
+    sent = {'whatsapp': [], 'sms': []}
+    original_whatsapp = app_module.send_whatsapp_message
+    original_sms = app_module.send_sms_notification
+
+    def whatsapp(number, body, *args, **kwargs):
+        sent['whatsapp'].append({'to': number, 'body': body})
+        return True
+
+    def sms(number, body, *args, **kwargs):
+        sent['sms'].append({'to': number, 'body': body})
+        return True
+
+    app_module.send_whatsapp_message = whatsapp
+    app_module.send_sms_notification = sms
+    try:
+        yield sent
+    finally:
+        app_module.send_whatsapp_message = original_whatsapp
+        app_module.send_sms_notification = original_sms
+
+
+def mpesa_callback_payload(checkout_id, result_code=0, receipt='SMK1TEST01',
+                           amount=0):
+    """The Daraja callback body, in the shape mpesa_callback actually parses."""
+    body = {'Body': {'stkCallback': {
+        'MerchantRequestID': f'{TAG}-merchant',
+        'CheckoutRequestID': checkout_id,
+        'ResultCode': result_code,
+        'ResultDesc': 'The service request is processed successfully.'
+        if result_code == 0 else 'Request cancelled by user',
+    }}}
+    if result_code == 0:
+        body['Body']['stkCallback']['CallbackMetadata'] = {'Item': [
+            {'Name': 'Amount', 'Value': amount},
+            {'Name': 'MpesaReceiptNumber', 'Value': receipt},
+        ]}
+    return body
 
 
 def create_post(client, **overrides):
@@ -301,16 +447,109 @@ def create_post(client, **overrides):
 
 # --- the checks ------------------------------------------------------------
 
-def check_busy_sentence():
-    print('the busy sentence is the wording the MVP specified')
-    expected = ('All our agents are currently busy, please reach out via whatsapp '
-                'for immediate action.')
-    check('SERVICE_BUSY_MESSAGE matches character for character',
-          SERVICE_BUSY_MESSAGE == expected, SERVICE_BUSY_MESSAGE)
+def source_files():
+    """main.py and every template, as text, for the checks that read the source.
+
+    Read from disk rather than asserted through a rendered page: the sentence has to
+    be gone from the places it could be rendered *from*, and a page that happens not
+    to hit the branch today would let it sit there waiting for the branch that does.
+    """
+    paths = [os.path.join(ROOT, 'main.py')]
+    for folder, _dirs, names in os.walk(os.path.join(ROOT, 'templates')):
+        paths.extend(os.path.join(folder, name) for name in names
+                     if name.endswith('.html'))
+    for path in paths:
+        with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+            yield os.path.relpath(path, ROOT).replace('\\', '/'), handle.read()
+
+
+def check_client_never_sees_a_busy_message():
+    print('the client is never told about our staffing, and the two messages are exact')
+    # The sentence this replaced. Asserting the *absence* of a specific string is the
+    # only honest form of this check: the old check compared the constant to its own
+    # wording, which stayed green whether or not a client ever saw it, and a check
+    # that cannot fail is worse than one that was deleted.
+    gone = ('All our agents are currently busy, please reach out via whatsapp '
+            'for immediate action.')
+    offenders = [name for name, text in source_files()
+                 if gone in text or 'SERVICE_BUSY_MESSAGE' in text
+                 or 'linking desk is quiet' in text]
+    check('the busy sentence is not in main.py or any template', not offenders,
+          ', '.join(offenders))
+
+    welcome = ('Thank you for showing interest in our services. Please wait as we '
+               'link you with the provider. To avoid fraudulent activities, never '
+               'pay directly to the provider before receiving the service.')
+    check('the client welcome message matches character for character',
+          SERVICE_CLIENT_WELCOME_MESSAGE == welcome, SERVICE_CLIENT_WELCOME_MESSAGE)
+    interest = ('A client is interested in the service you listed. Quality service '
+                'increases your rating. Thank you for making SMARKAFRICA a '
+                'trustworthy platform.')
+    check('the provider interest message matches character for character',
+          SERVICE_PROVIDER_INTEREST_MESSAGE == interest,
+          SERVICE_PROVIDER_INTEREST_MESSAGE)
+    # Still asserted, because an empty desk hands the request to this number and the
+    # client is promised a reply on the strength of it.
     url = support_whatsapp_url('Hi')
     check('the support number resolves to a wa.me link in international form',
           url.startswith('https://wa.me/254'), url)
     check('and a prefilled message is carried on it', 'text=' in url, url)
+
+
+def check_profile_map():
+    print('every seeded service has exactly one shape, and it is the right one')
+    expected_by_profile = {
+        'ticket': {'events_tickets'},
+        'dropoff': {'laundry', 'printing', 'device_repair', 'cyber_services',
+                    'books_stationery'},
+        'errand': {'food_delivery', 'grocery', 'parcel_courier', 'campus_errands'},
+        'visit': {'barber_beauty', 'fitness', 'health_wellness', 'cleaning'},
+        'session': {'tutoring', 'career', 'student_gigs'},
+        'tenancy': {'accommodation'},
+    }
+    # Written out here rather than derived from SERVICE_PROFILE_BY_KEY: deriving it
+    # would compare the mapping to itself and pass whatever it said. This is the
+    # table from the specification, and the mapping has to match it.
+    check('the six profiles are the six that exist',
+          set(SERVICE_FULFILMENT_PROFILES) == set(expected_by_profile),
+          sorted(set(SERVICE_FULFILMENT_PROFILES) ^ set(expected_by_profile)))
+    grouped = {}
+    for key, profile in SERVICE_PROFILE_BY_KEY.items():
+        grouped.setdefault(profile, set()).add(key)
+    check('all eighteen seeded services are mapped',
+          len(SERVICE_PROFILE_BY_KEY) == 18, len(SERVICE_PROFILE_BY_KEY))
+    for profile, keys in expected_by_profile.items():
+        check(f'{profile} holds exactly the services it should',
+              grouped.get(profile) == keys,
+              sorted((grouped.get(profile) or set()) ^ keys))
+    for profile, spec in SERVICE_FULFILMENT_PROFILES.items():
+        # A profile that says "paid on the platform after the work" and offers no
+        # flow to reach the provider would be a shape nobody can buy.
+        check(f'{profile} declares a flow, a payee and a moment',
+              spec.get('flow') in ('buy', 'request')
+              and spec.get('pay_to') in ('platform', 'provider')
+              and spec.get('pay_when') in ('upfront', 'after'),
+              f"{spec.get('flow')}/{spec.get('pay_to')}/{spec.get('pay_when')}")
+    # The complaint that started this, stated as a property of the table rather than
+    # of one page: pickup is a field on exactly the two profiles that have the idea.
+    with_pickup = {name for name, spec in SERVICE_FULFILMENT_PROFILES.items()
+                   if 'pickup' in spec['fields']}
+    check('pickup is a field on drop-off and errands, and on nothing else',
+          with_pickup == {'dropoff', 'errand'}, sorted(with_pickup))
+    check('a ticket is bought, not requested',
+          SERVICE_FULFILMENT_PROFILES['ticket']['flow'] == 'buy')
+    check('and it is the only profile that is',
+          [name for name, spec in SERVICE_FULFILMENT_PROFILES.items()
+           if spec['flow'] == 'buy'] == ['ticket'])
+    check('the two directly-paid profiles are the visit and the tenancy',
+          {name for name, spec in SERVICE_FULFILMENT_PROFILES.items()
+           if spec['pay_to'] == 'provider'} == {'visit', 'tenancy'})
+    check('seed_profile_for reads the table for a known key',
+          seed_profile_for('accommodation') == 'tenancy',
+          seed_profile_for('accommodation'))
+    check('and falls back rather than raising for one it has never seen',
+          seed_profile_for(f'{TAG}_not_a_service') == 'dropoff',
+          seed_profile_for(f'{TAG}_not_a_service'))
 
 
 def check_catalogue_filter():
@@ -380,33 +619,44 @@ def check_phone_visibility(customer_id, provider_id, admin_id, service_id):
 
 
 def check_contact_admin(customer_id, stranger_id, provider_id, admin_id, service_id):
-    print('contact admin: a thread when someone is on duty, the sentence when not')
+    print('contact admin: the same answer whether or not anyone is at the desk')
     with rate_limits_off(), settings(service_requests_enabled='1',
                                      service_direct_contact_enabled='0'):
+        # The empty-desk press is made as the stranger, not the customer. Both presses
+        # have to be a fresh create for the comparison to mean anything, and an open
+        # row from the first would send the second down the "you already have a
+        # thread" branch - which would compare two different code paths and call the
+        # difference a pass.
         with only_on_duty(None):
             check('duty state reads as nobody at the desk',
                   not service_duty_active() and pick_service_admin() is None)
-            with as_user(customer_id) as client:
+            with as_user(stranger_id) as client:
                 response = client.post(f'/services/{service_id}/contact-admin',
-                                       data={'note': 'Need this today',
+                                       data={'note': 'Anybody there?',
                                              'phone': CLIENT_PHONE})
-                payload = response.get_json() or {}
+                empty_desk = response.get_json() or {}
                 check('the request is answered, not refused',
                       response.status_code == 200, response.status_code)
-                check('the mode is the WhatsApp hand-off',
-                      payload.get('mode') == 'whatsapp', payload.get('mode'))
-                check('and the reply is the exact busy sentence',
-                      payload.get('reply') == SERVICE_BUSY_MESSAGE,
-                      payload.get('reply'))
-                check('with a WhatsApp link to press',
-                      (payload.get('whatsapp_url') or '').startswith('https://wa.me/'),
-                      payload.get('whatsapp_url'))
-                check('and no provider phone anywhere in the payload',
+                empty_desk_status = response.status_code
+                check('and the reply is the client welcome message, word for word',
+                      empty_desk.get('reply') == SERVICE_CLIENT_WELCOME_MESSAGE,
+                      empty_desk.get('reply'))
+                check('no provider phone anywhere in the payload',
                       PROVIDER_PHONE not in response.get_data(as_text=True))
-            recorded = ServiceLinkRequest.query.filter_by(
-                service_id=service_id, status='whatsapp_redirected').count()
-            check('the hand-off is still recorded so the MVP can count it',
-                  recorded >= 1, recorded)
+            # The row is still written. Not as a refusal and not as a hand-off state:
+            # 'open' with channel 'whatsapp', so the desk still lists it and "how
+            # often was nobody there" stays answerable from the table.
+            row = ServiceLinkRequest.query.filter_by(
+                service_id=service_id, client_id=stranger_id).first()
+            check('a desk row is written even with nobody to claim it',
+                  row is not None and row.status == 'open',
+                  row.status if row else None)
+            check('and the channel records that it went to WhatsApp',
+                  row is not None and row.channel == 'whatsapp',
+                  row.channel if row else None)
+            check('with no admin assigned, rather than one who is not working',
+                  row is not None and row.assigned_admin_id is None,
+                  row.assigned_admin_id if row else None)
 
         with only_on_duty(admin_id):
             check('duty state reads as somebody at the desk', service_duty_active())
@@ -416,13 +666,32 @@ def check_contact_admin(customer_id, stranger_id, provider_id, admin_id, service
                 response = client.post(f'/services/{service_id}/contact-admin',
                                        data={'note': 'Need this today',
                                              'phone': CLIENT_PHONE})
-                payload = response.get_json() or {}
-                check('the mode is the on-platform thread',
-                      payload.get('mode') == 'platform', payload.get('mode'))
-                request_id = payload.get('request_id')
+                staffed = response.get_json() or {}
+                request_id = staffed.get('request_id')
                 check('and a request id comes back', bool(request_id), request_id)
                 check('no provider phone in this payload either',
                       PROVIDER_PHONE not in response.get_data(as_text=True))
+
+                # The whole of "a customer will not know if there was an active admin
+                # or not". Everything but the row id, which is a counter and says
+                # nothing about staffing - and the id is compared for shape instead,
+                # because a payload that dropped it on one path would differ in a way
+                # the client could read.
+                check('the empty desk and the staffed desk return the same status',
+                      empty_desk_status == response.status_code,
+                      f'{empty_desk_status} vs {response.status_code}')
+                check('the same fields, with none added or missing',
+                      set(empty_desk) == set(staffed),
+                      sorted(set(empty_desk) ^ set(staffed)))
+                differing = sorted(key for key in set(empty_desk) | set(staffed)
+                                   if key != 'request_id'
+                                   and empty_desk.get(key) != staffed.get(key))
+                check('and the same value in every one of them except the row id',
+                      not differing, differing)
+                check('the row id is a real id on both, not zero on one of them',
+                      isinstance(empty_desk.get('request_id'), int)
+                      and empty_desk.get('request_id') > 0 and bool(request_id),
+                      f'{empty_desk.get("request_id")} vs {request_id}')
 
                 again = client.post(f'/services/{service_id}/contact-admin',
                                     data={'note': 'Still need this'})
@@ -430,6 +699,9 @@ def check_contact_admin(customer_id, stranger_id, provider_id, admin_id, service
                 check('pressing it twice reuses the open request',
                       repeat.get('existing') is True
                       and repeat.get('request_id') == request_id, repeat)
+                check('and says the same words again',
+                      repeat.get('reply') == SERVICE_CLIENT_WELCOME_MESSAGE,
+                      repeat.get('reply'))
 
                 thread = client.get(f'/services/requests/{request_id}/thread')
                 body = thread.get_json() or {}
@@ -440,6 +712,12 @@ def check_contact_admin(customer_id, stranger_id, provider_id, admin_id, service
                       any('Need this today' in (msg.get('body') or '')
                           for msg in body.get('messages') or []),
                       body.get('messages'))
+                # Rendered from the constant rather than stored as a row: with nobody
+                # on duty there is no admin to attribute it to, and a stored copy
+                # would double on re-read.
+                check('the welcome message is carried on the thread itself',
+                      body.get('welcome') == SERVICE_CLIENT_WELCOME_MESSAGE,
+                      body.get('welcome'))
                 check('the thread carries no provider phone',
                       PROVIDER_PHONE not in thread.get_data(as_text=True))
 
@@ -468,14 +746,478 @@ def check_contact_admin(customer_id, stranger_id, provider_id, admin_id, service
             check('the on-duty admin was notified of the request', notified >= 1,
                   notified)
 
+        # The kill switch is "nobody is answering", not "no". A client who presses the
+        # button while it is off is not told the platform has switched something off -
+        # they get the same words, a row, and a provider who hears about it.
         with only_on_duty(admin_id), settings(service_requests_enabled='0'):
-            with as_user(customer_id) as client:
-                response = client.post(f'/services/{service_id}/contact-admin')
+            with as_user(stranger_id) as client:
+                ServiceLinkRequest.query.filter_by(
+                    service_id=service_id, client_id=stranger_id).update(
+                        {'status': 'closed'}, synchronize_session=False)
+                db.session.commit()
+                response = client.post(f'/services/{service_id}/contact-admin',
+                                       data={'note': 'Switched off?'})
                 payload = response.get_json() or {}
-                check('the kill switch sends everyone to WhatsApp even so',
-                      payload.get('mode') == 'whatsapp'
-                      and payload.get('reply') == SERVICE_BUSY_MESSAGE,
-                      payload.get('mode'))
+                check('the kill switch reads as an empty desk, not as a refusal',
+                      response.status_code == 200
+                      and payload.get('reply') == SERVICE_CLIENT_WELCOME_MESSAGE,
+                      f'{response.status_code} {payload.get("reply")}')
+                check('and it still returns the same fields as a staffed desk',
+                      set(payload) == set(staffed), sorted(set(payload) ^ set(staffed)))
+                fresh = ServiceLinkRequest.query.filter_by(
+                    service_id=service_id, client_id=stranger_id,
+                    status='open').count()
+                check('with a row written for the desk to find later', fresh == 1,
+                      fresh)
+
+
+def check_no_negative_fields(customer_id, provider_id, admin_id, listings):
+    """A field a profile does not have does not appear as a negative.
+
+    Asserted as the absence of the word "pickup" from the whole rendered page, not
+    the absence of one sentence. The complaint was that a concert ticket announced
+    "No pickup offered" - and any wording of that idea is the same bug, including the
+    pickup-truck icon class that used to be printed on everything but a ticket.
+    """
+    print('a profile without pickup has no pickup on it, in any wording')
+    with settings(service_direct_contact_enabled='0'):
+        for profile, service in listings.items():
+            expect_pickup = profile in ('dropoff', 'errand')
+            # Three viewers, because the word crept back in through the owner's own
+            # card once already: it promised every provider we show clients their
+            # "pickup terms".
+            viewers = {'an anonymous visitor': as_anonymous(),
+                       'a signed-in client': as_user(customer_id),
+                       'the provider themselves': as_user(provider_id)}
+            for who, ctx in viewers.items():
+                with ctx as client:
+                    response = client.get(f'/services/{service.id}')
+                    page = response.get_data(as_text=True).lower()
+                    check(f'the {profile} page renders for {who}',
+                          response.status_code == 200, response.status_code)
+                    if expect_pickup:
+                        check(f'and {profile} does talk about pickup, so the check '
+                              f'above can fail', 'pickup' in page)
+                    else:
+                        where = [line.strip()[:90] for line in page.split('\n')
+                                 if 'pickup' in line][:2]
+                        check(f'{profile} says nothing about pickup to {who}',
+                              'pickup' not in page, where)
+            # The grid, filtered to this key so a neighbouring drop-off card cannot
+            # supply the word and make a passing page look like a passing grid.
+            with as_anonymous() as client:
+                grid = client.get(f'/services?service={service.service_key}')
+                page = grid.get_data(as_text=True).lower()
+                check(f'the {profile} card renders on the grid',
+                      grid.status_code == 200 and service.title.lower() in page,
+                      grid.status_code)
+                if not expect_pickup:
+                    check(f'and the {profile} card says nothing about pickup either',
+                          'pickup' not in page,
+                          [line.strip()[:90] for line in page.split('\n')
+                           if 'pickup' in line][:2])
+
+    ticket = listings['ticket']
+    check('pickup_display is None on a profile with no pickup concept, not a sentence',
+          ticket.pickup_display is None, ticket.pickup_display)
+    check('and offer_display is what the page prints in its place',
+          bool(ticket.offer_display), ticket.offer_display)
+    dropoff = listings['dropoff']
+    check('a drop-off does carry a pickup sentence',
+          bool(dropoff.pickup_display), dropoff.pickup_display)
+    check('has_field reads the whitelist, so a ticket has no pickup field at all',
+          not ticket.has_field('pickup') and dropoff.has_field('pickup'))
+    check('and a ticket carries the fields it does have',
+          ticket.has_field('event_venue') and ticket.has_field('tiers'))
+
+
+def check_empty_desk_notifies_the_provider(client_id, provider_id, admin_id,
+                                           service_id):
+    """Nobody at the desk: the provider hears about it with no button pressed.
+
+    Takes a client of its own rather than reusing check_contact_admin's. A client
+    who already has an open request gets the existing one handed back - which is
+    correct behaviour, and would make every assertion below check a send that had
+    already happened before record_outbound started listening.
+    """
+    print('an unattended request notifies the provider by itself')
+    with rate_limits_off(), settings(service_requests_enabled='1',
+                                     service_direct_contact_enabled='0'):
+        with only_on_duty(None), record_outbound() as sent:
+            with as_user(client_id) as client:
+                response = client.post(f'/services/{service_id}/contact-admin',
+                                       data={'note': 'Tomorrow morning please',
+                                             'phone': CLIENT_PHONE})
+                payload = response.get_json() or {}
+            check('the client still gets the welcome message',
+                  payload.get('reply') == SERVICE_CLIENT_WELCOME_MESSAGE,
+                  payload.get('reply'))
+            check('and this is a fresh request, not one handed back',
+                  not payload.get('existing'), payload)
+            row = db.session.get(ServiceLinkRequest, payload.get('request_id') or 0)
+            check('the request is on the desk for whoever comes in next',
+                  row is not None and row.status == 'open',
+                  row.status if row else None)
+            check('the provider was notified without anyone pressing anything',
+                  row is not None and row.provider_notified_at is not None,
+                  row.provider_notified_at if row else None)
+
+            provider_texts = [item['body'] for item in sent['whatsapp']
+                              if item['to'] == PROVIDER_PHONE]
+            check('the interest message went to the provider on WhatsApp',
+                  len(provider_texts) == 1, len(provider_texts))
+            check('and it opens with the exact words the MVP wrote',
+                  bool(provider_texts)
+                  and provider_texts[0].startswith(SERVICE_PROVIDER_INTEREST_MESSAGE),
+                  provider_texts[0][:60] if provider_texts else '')
+            check('and carries the service description with it, not just the sentence',
+                  bool(provider_texts) and len(provider_texts[0]) >
+                  len(SERVICE_PROVIDER_INTEREST_MESSAGE),
+                  len(provider_texts[0]) if provider_texts else 0)
+            check('an SMS went out as well, which lands without WhatsApp installed',
+                  any(item['body'].startswith(SERVICE_PROVIDER_INTEREST_MESSAGE)
+                      for item in sent['sms']),
+                  [item['to'] for item in sent['sms']])
+            inbox = CustomerNotification.query.filter_by(
+                user_id=provider_id, notification_type='service').count()
+            check('and it is in the provider\'s platform inbox too', inbox >= 1, inbox)
+            # The other half of "the message lands to whatsapp immediately": the
+            # request itself goes to the support line, so an admin coming back to a
+            # phone rather than to the desk still sees it.
+            support = [item for item in sent['whatsapp']
+                       if item['to'] != PROVIDER_PHONE]
+            check('the request was pushed to the support WhatsApp line as well',
+                  len(support) == 1, len(support))
+            check('and that message says nobody was on the desk, to us and not to the client',
+                  bool(support) and 'nobody was on the linking desk' in support[0]['body'],
+                  support[0]['body'][:70] if support else '')
+
+            # Idempotent. The automatic send and the desk button can both run on one
+            # request, and a provider who gets the same sentence twice reads it as the
+            # platform being broken.
+            before = len(sent['whatsapp'])
+            first_stamp = row.provider_notified_at
+            again = notify_service_provider(row)
+            check('notifying a second time sends nothing',
+                  len(sent['whatsapp']) == before, len(sent['whatsapp']) - before)
+            check('and says so rather than reporting a success it did not have',
+                  again.get('already') is True and not again.get('sms'), again)
+            check('but the wa.me link is still handed back, so the desk button works '
+                  'on an already-notified request',
+                  (again.get('share_url') or '').startswith('https://wa.me/'),
+                  again.get('share_url'))
+            db.session.refresh(row)
+            check('and the first timestamp is not overwritten',
+                  row.provider_notified_at == first_stamp,
+                  f'{first_stamp} -> {row.provider_notified_at}')
+    return row.id if row else 0
+
+
+def check_provider_whatsapp_button(customer_id, admin_id, service_id, request_id):
+    """The desk's two provider buttons, and who can see the number behind them."""
+    print('the desk can open a WhatsApp conversation; a client cannot')
+    with rate_limits_off():
+        with as_user(admin_id) as client:
+            desk = client.get('/admin/services/requests')
+            page = desk.get_data(as_text=True)
+            check('the linking desk renders', desk.status_code == 200,
+                  desk.status_code)
+            # Deliberately not asserting a wa.me link in the markup: there is none,
+            # and there should not be. A bare deep link would open the conversation
+            # without ever sending the interest message, so both buttons POST to
+            # admin_service_notify_provider and only the redirect carries wa.me -
+            # which is asserted below, on the redirect itself.
+            check('the desk shows the number to the admin, as a link they can press',
+                  f'tel:{PROVIDER_PHONE}' in page, PROVIDER_PHONE in page)
+            check('and both provider buttons post to the notify-provider route',
+                  page.count(f'/admin/services/requests/{request_id}/notify-provider')
+                  == 2,
+                  page.count(f'/admin/services/requests/{request_id}/notify-provider'))
+            check('the WhatsApp one distinguished by open_whatsapp, so one button can '
+                  'serve both',
+                  'name="open_whatsapp"' in page)
+
+            # The button, exercised. open_whatsapp is what separates the two: both
+            # send, and only this one hands the browser the deep link.
+            with record_outbound():
+                opened = client.post(
+                    f'/admin/services/requests/{request_id}/notify-provider',
+                    data={'open_whatsapp': '1'})
+            check('pressing "WhatsApp provider" redirects to the conversation itself',
+                  opened.status_code == 302
+                  and (opened.headers.get('Location') or '').startswith(
+                      'https://wa.me/'),
+                  opened.headers.get('Location'))
+            check('and the link carries the interest message prefilled',
+                  'text=' in (opened.headers.get('Location') or ''),
+                  opened.headers.get('Location'))
+            with record_outbound():
+                stayed = client.post(
+                    f'/admin/services/requests/{request_id}/notify-provider')
+            check('while "Notify provider" stays on the desk',
+                  stayed.status_code == 302
+                  and 'wa.me' not in (stayed.headers.get('Location') or ''),
+                  stayed.headers.get('Location'))
+
+        with as_user(customer_id) as client:
+            refused = client.post(
+                f'/admin/services/requests/{request_id}/notify-provider')
+            check('a client cannot press it', refused.status_code in (302, 403, 404),
+                  refused.status_code)
+            with settings(service_direct_contact_enabled='0'):
+                detail = client.get(f'/services/{service_id}')
+                page = detail.get_data(as_text=True)
+            check("and the client's own page carries neither the link nor the number",
+                  f'wa.me/254{PROVIDER_PHONE[1:]}' not in page
+                  and PROVIDER_PHONE not in page)
+
+
+def check_ticket_money(customer_id, provider_id, service):
+    """A ticket is bought, and nothing is earned until Safaricom says so."""
+    print('tickets: pending until paid, paid once, and never oversold')
+    service_id = service.id
+    regular = make_tier(service, 'Regular', 500.0, total=2, max_per_order=2,
+                        sort_order=10)
+    vip = make_tier(service, 'VIP', 2500.0, total=1, max_per_order=1, sort_order=20)
+    # Sold out by having been sold, not by being created empty: quantity_total=0 is
+    # unlimited on purpose, so a band created with no capacity is the opposite of
+    # this one. Both are asserted, because getting them the wrong way round is how a
+    # free-entry event would refuse everyone.
+    exhausted = make_tier(service, 'VVIP Table', 9000.0, total=1, sold=1,
+                          sort_order=30)
+    unlimited = make_tier(service, 'Standing', 3000.0, total=0, sort_order=40)
+    check('the listing prints the lowest band, so the grid needs no tier query',
+          service.price == 500.0, service.price)
+    check('and the price display says "from" rather than one flat number',
+          service_price_display(service).lower().startswith('from'),
+          service_price_display(service))
+    check('a band with nothing left knows it', exhausted.seats_left == 0,
+          exhausted.seats_left)
+    check('and a band nobody gave a capacity is unlimited, not sold out',
+          unlimited.seats_left is None and not unlimited.sold_out,
+          f'{unlimited.seats_left} / {unlimited.sold_out}')
+
+    revenue_before = PlatformRevenue.query.filter_by(
+        reference_id=str(service_id)).count()
+    completed_before = service.orders_completed or 0
+
+    with rate_limits_off(), fake_stk_push() as pushes:
+        with as_user(customer_id) as client:
+            # The linking desk is not on offer for a ticket at all, at any hour.
+            refused = client.post(f'/services/{service_id}/contact-admin')
+            check('a ticket cannot be requested through the desk',
+                  refused.status_code == 400, refused.status_code)
+            check('and the reason is the service, not our staffing',
+                  'bought straight from this page'
+                  in (refused.get_json() or {}).get('error', ''),
+                  (refused.get_json() or {}).get('error'))
+
+            bought = client.post(f'/services/{service_id}/buy',
+                                 data={'tier_id': regular.id, 'quantity': '2',
+                                       'phone': CLIENT_PHONE})
+            check('buying redirects back to the listing', bought.status_code == 302,
+                  bought.status_code)
+
+    order = ServiceOrder.query.filter_by(service_id=service_id,
+                                         client_id=customer_id).first()
+    check('an order exists', order is not None)
+    check('and it is pending, not paid', order is not None
+          and order.payment_status == 'pending', order.payment_status if order else None)
+    check('priced at the band times the quantity, not the listing price',
+          order is not None and order.amount == 1000.0,
+          order.amount if order else None)
+    check('with the Daraja checkout id stored, which is all the callback arrives with',
+          order is not None and order.checkout_request_id == FAKE_CHECKOUT_ID,
+          order.checkout_request_id if order else None)
+    check('one STK push was fired, for that amount',
+          len(pushes) == 1 and pushes[0]['amount'] == 1000.0, pushes)
+    check('no ticket code is minted before payment', order is not None
+          and not order.ticket_code, order.ticket_code if order else None)
+    check('no seat is taken off the band by an unpaid prompt',
+          regular.quantity_sold == 0, regular.quantity_sold)
+    check('no revenue is recorded for an unpaid order',
+          PlatformRevenue.query.filter_by(reference_id=str(service_id)).count()
+          == revenue_before,
+          PlatformRevenue.query.filter_by(reference_id=str(service_id)).count())
+    check('and the job count has not moved either',
+          (service.orders_completed or 0) == completed_before,
+          service.orders_completed)
+
+    check('the callback can find the order by checkout id alone',
+          service_order_for_checkout_id(FAKE_CHECKOUT_ID) is not None)
+    check('and that resolver is separate from the product one, which still finds nothing',
+          app_module.order_for_checkout_id(FAKE_CHECKOUT_ID) is None)
+
+    with as_anonymous() as client:
+        callback = client.post('/mpesa/callback',
+                               json=mpesa_callback_payload(FAKE_CHECKOUT_ID,
+                                                           amount=1000.0))
+        check('Safaricom gets an acknowledgement', callback.status_code == 200,
+              callback.status_code)
+    db.session.expire_all()
+    order = db.session.get(ServiceOrder, order.id)
+    regular = db.session.get(ServicePriceTier, regular.id)
+    service = db.session.get(ServiceListing, service_id)
+    check('the order is paid', order.payment_status == 'paid', order.payment_status)
+    check('the receipt is stored', order.mpesa_receipt == 'SMK1TEST01',
+          order.mpesa_receipt)
+    check('a ticket code is minted', bool(order.ticket_code), order.ticket_code)
+    check('both seats come off the band', regular.quantity_sold == 2,
+          regular.quantity_sold)
+    check('the job count moves now, and only now',
+          (service.orders_completed or 0) == completed_before + 1,
+          service.orders_completed)
+    paid_revenue = PlatformRevenue.query.filter_by(
+        reference_id=str(service_id)).count()
+    check('and the commission is recorded exactly once',
+          paid_revenue == revenue_before + 1, paid_revenue)
+
+    code = order.ticket_code
+    with as_anonymous() as client:
+        replay = client.post('/mpesa/callback',
+                             json=mpesa_callback_payload(FAKE_CHECKOUT_ID,
+                                                         amount=1000.0))
+        check('a replayed callback is accepted', replay.status_code == 200,
+              replay.status_code)
+    db.session.expire_all()
+    order = db.session.get(ServiceOrder, order.id)
+    regular = db.session.get(ServicePriceTier, regular.id)
+    check('and changes nothing: no second seat',
+          db.session.get(ServicePriceTier, regular.id).quantity_sold == 2,
+          regular.quantity_sold)
+    check('no second commission',
+          PlatformRevenue.query.filter_by(reference_id=str(service_id)).count()
+          == paid_revenue)
+    check('and the same ticket code', order.ticket_code == code, order.ticket_code)
+
+    check('the band is now sold out', regular.seats_left == 0, regular.seats_left)
+    with rate_limits_off(), fake_stk_push() as pushes:
+        with as_user(customer_id) as client:
+            client.post(f'/services/{service_id}/buy',
+                        data={'tier_id': regular.id, 'quantity': '1',
+                              'phone': CLIENT_PHONE})
+            check('a sold-out band is refused at the till, with no push fired',
+                  not pushes, pushes)
+            client.post(f'/services/{service_id}/buy',
+                        data={'tier_id': exhausted.id, 'quantity': '1'})
+            check('and so is one that was already sold out when we arrived',
+                  not pushes, pushes)
+            client.post(f'/services/{service_id}/buy',
+                        data={'tier_id': vip.id, 'quantity': '4'})
+            check('asking for more than the per-order cap is refused too', not pushes,
+                  pushes)
+    orders_now = ServiceOrder.query.filter_by(service_id=service_id).count()
+    check('none of the three refusals left an order behind', orders_now == 1,
+          orders_now)
+
+    # The other side of the same rule: an uncapped band sells. Asserted because
+    # 0-means-unlimited is a decision, and a later "fix" reading it as zero seats
+    # would silently close the till on every free-entry event.
+    with rate_limits_off(), fake_stk_push() as pushes:
+        with as_user(customer_id) as client:
+            client.post(f'/services/{service_id}/buy',
+                        data={'tier_id': unlimited.id, 'quantity': '3',
+                              'phone': CLIENT_PHONE})
+    check('an uncapped band still sells, at its own price',
+          len(pushes) == 1 and pushes[0]['amount'] == 9000.0, pushes)
+    check('and that is the second order, still pending',
+          ServiceOrder.query.filter_by(service_id=service_id,
+                                       payment_status='pending').count() == 1,
+          ServiceOrder.query.filter_by(service_id=service_id).count())
+
+    with as_user(provider_id) as client:
+        own = client.post(f'/services/{service_id}/buy',
+                          data={'tier_id': vip.id, 'quantity': '1'})
+        check('a provider cannot buy their own tickets', own.status_code == 302,
+              own.status_code)
+    check('and that left no order of its own', ServiceOrder.query.filter_by(
+        service_id=service_id).count() == 2)
+
+
+def check_direct_pay_creates_no_order(customer_id, service):
+    """visit and tenancy: paid in the chair, so there is nothing to charge for."""
+    print('a directly-paid profile takes no money on the platform')
+    revenue_before = PlatformRevenue.query.filter_by(
+        reference_id=str(service.id)).count()
+    check('the profile says the provider is paid directly',
+          service.pays_provider_direct, service.pay_to)
+    with rate_limits_off():
+        with as_user(customer_id) as client:
+            response = client.post(f'/services/{service.id}/order',
+                                   data={'requirements': 'Saturday if you can'})
+            check('the order button redirects rather than charging',
+                  response.status_code == 302, response.status_code)
+    orders = ServiceOrder.query.filter_by(service_id=service.id).count()
+    check('no order row is created at all', orders == 0, orders)
+    check('and no revenue row either',
+          PlatformRevenue.query.filter_by(reference_id=str(service.id)).count()
+          == revenue_before)
+
+
+def check_thread_after_linking(customer_id, provider_id, stranger_id, admin_id,
+                               service_id):
+    """The provider joins the conversation when an admin links it, and not before."""
+    print('the provider is on the thread after linking, and the admin always is')
+    with rate_limits_off(), settings(service_requests_enabled='1'):
+        with only_on_duty(admin_id):
+            with as_user(customer_id) as client:
+                created = client.post(f'/services/{service_id}/contact-admin',
+                                      data={'note': 'Is Thursday possible?'})
+                request_id = (created.get_json() or {}).get('request_id')
+            check('a request to work with exists', bool(request_id), request_id)
+
+            with as_user(provider_id) as client:
+                early = client.get(f'/services/requests/{request_id}/thread')
+                check('the provider cannot read it before it is linked',
+                      early.status_code == 403, early.status_code)
+                posted = client.post(f'/services/requests/{request_id}/thread',
+                                     data={'body': 'I can do Thursday.'})
+                check('nor write to it', posted.status_code == 403,
+                      posted.status_code)
+
+            with as_user(admin_id) as client:
+                reading = client.get(f'/services/requests/{request_id}/thread')
+                check('an admin can read it at this status',
+                      reading.status_code == 200, reading.status_code)
+                linked = client.post(
+                    f'/admin/services/requests/{request_id}/link')
+                check('and can mark it linked', linked.status_code == 302,
+                      linked.status_code)
+            row = db.session.get(ServiceLinkRequest, request_id)
+            check('which is what the row now says', row.status == 'linked',
+                  row.status)
+
+            with as_user(provider_id) as client:
+                now = client.post(f'/services/requests/{request_id}/thread',
+                                  data={'body': 'Thursday at ten works.'})
+                body = now.get_json() or {}
+                check('now the provider can post', now.status_code == 200,
+                      now.status_code)
+                check('and the message is marked as theirs, not the desk\'s',
+                      any(msg.get('from_provider') and not msg.get('from_admin')
+                          for msg in body.get('messages') or []),
+                      [(msg.get('from_admin'), msg.get('from_provider'))
+                       for msg in body.get('messages') or []])
+
+            with as_user(admin_id) as client:
+                watching = client.get(f'/services/requests/{request_id}/thread')
+                body = watching.get_json() or {}
+                # "The admin can see the conversation in real time as they are
+                # texting" - the desk polls this same endpoint, so what matters is
+                # that a linked thread is still fully readable by an admin.
+                check('the admin can still read every message on a linked thread',
+                      watching.status_code == 200
+                      and any('Thursday at ten' in (msg.get('body') or '')
+                              for msg in body.get('messages') or []),
+                      len(body.get('messages') or []))
+                check('and is told the provider is on it',
+                      body.get('provider_on_thread') is True,
+                      body.get('provider_on_thread'))
+
+            with as_user(stranger_id) as client:
+                nosy = client.get(f'/services/requests/{request_id}/thread')
+                check('an unrelated client is still refused', nosy.status_code == 403,
+                      nosy.status_code)
 
 
 def check_listing_gate(seller_id, plain_id, admin_id):
@@ -673,8 +1415,11 @@ def check_chatbot_format(admin_id, provider_id):
                   PROVIDER_PHONE not in str(payload))
             check('on duty, the client is pointed at contact admin',
                   payload.get('action') == 'contact_admin', payload.get('action'))
-            check('and the busy sentence is not used',
-                  payload.get('follow_up') != SERVICE_BUSY_MESSAGE)
+            follow_up = payload.get('follow_up')
+            check('and the follow-up tells them what to press, nothing about staffing',
+                  follow_up == ('Open the one you want and press Contact admin '
+                                f'{DASH} we will connect you with the provider.'),
+                  follow_up)
 
             # A county held: "near you" is earned.
             with app.test_request_context('/support'):
@@ -688,18 +1433,26 @@ def check_chatbot_format(admin_id, provider_id):
 
         with only_on_duty(None):
             with app.test_request_context('/support'):
-                payload = service_chatbot_reply('I need laundry') or {}
-            check('off duty, the action is the WhatsApp hand-off',
-                  payload.get('action') == 'whatsapp', payload.get('action'))
-            check('and the follow-up is the exact busy sentence',
-                  payload.get('follow_up') == SERVICE_BUSY_MESSAGE,
-                  payload.get('follow_up'))
-            check('with the link beside it',
-                  (payload.get('whatsapp_url') or '').startswith('https://wa.me/'),
-                  payload.get('whatsapp_url'))
+                session.pop('delivery_location', None)
+                empty_desk = service_chatbot_reply('I need laundry') or {}
+            # The chatbot no longer consults duty at all, so this is not "the off-duty
+            # shape is correct" - it is "there is no off-duty shape". Compared field by
+            # field against the on-duty payload above, because a single asserted key
+            # would let a new one be added later that gives the game away.
+            with only_on_duty(admin_id):
+                with app.test_request_context('/support'):
+                    session.pop('delivery_location', None)
+                    staffed = service_chatbot_reply('I need laundry') or {}
+            check('the chatbot answers identically with the desk empty',
+                  empty_desk == staffed,
+                  sorted(key for key in set(empty_desk) | set(staffed)
+                         if empty_desk.get(key) != staffed.get(key)))
+            check('which means the action is still contact admin, not a hand-off',
+                  empty_desk.get('action') == 'contact_admin',
+                  empty_desk.get('action'))
             check('and the provider list is still given, not withheld',
-                  len(payload.get('providers') or []) == 3,
-                  len(payload.get('providers') or []))
+                  len(empty_desk.get('providers') or []) == 3,
+                  len(empty_desk.get('providers') or []))
 
     print('and it asks before it lists')
     make_catalogue(EMPTY_KEY, 'Smoketest Emptylisting', seller_listable=True,
@@ -869,7 +1622,8 @@ def check_services_pagination(provider_id):
 
 
 def run():
-    check_busy_sentence()
+    check_client_never_sees_a_busy_message()
+    check_profile_map()
     check_catalogue_filter()
 
     provider = make_user('provider', seller_status='verified',
@@ -887,7 +1641,58 @@ def run():
     service_id = service.id
 
     check_phone_visibility(customer_id, provider_id, admin_id, service_id)
+
+    # One listing per profile whose shape is asserted, on catalogue keys of our own.
+    # The seeded events_tickets and barber_beauty rows are the operator's
+    # configuration; listing under them would leave the real services page holding
+    # smoke-test rows if a teardown were ever missed.
+    make_catalogue(TICKET_KEY, 'Smoketest Tickets', sort_order=903, profile='ticket')
+    make_catalogue(VISIT_KEY, 'Smoketest Visit', sort_order=904, profile='visit')
+    make_catalogue(SESSION_KEY, 'Smoketest Session', sort_order=905,
+                   profile='session')
+    make_catalogue(TENANCY_KEY, 'Smoketest Tenancy', sort_order=906,
+                   profile='tenancy')
+    starts = datetime.utcnow() + timedelta(days=21)
+    listings = {
+        # The drop-off is the listing every other check already uses, and it is the
+        # positive control: if the word "pickup" is missing from this one too, the
+        # absence checks below are passing for the wrong reason.
+        'dropoff': service,
+        'ticket': make_listing(provider_id, f'{TAG} Gala Night', 500.0, TICKET_KEY,
+                               'Smoketest Tickets', 0, event_starts_at=starts,
+                               event_venue='KICC Grounds'),
+        'visit': make_listing(provider_id, f'{TAG} Home Barber', 700.0, VISIT_KEY,
+                              'Smoketest Visit', 0, serves_at_client=True,
+                              appointment_required=True,
+                              location_label='Kilimani', location_county='Nairobi',
+                              opening_hours='Mon-Sat 9am-7pm'),
+        'session': make_listing(provider_id, f'{TAG} Maths Tuition', 800.0,
+                                SESSION_KEY, 'Smoketest Session', 0,
+                                rate_unit='hour', serves_at_client=True,
+                                turnaround_note='Two sessions a week'),
+        'tenancy': make_listing(provider_id, f'{TAG} Bedsitter', 9000.0, TENANCY_KEY,
+                                'Smoketest Tenancy', 0, rate_unit='month',
+                                deposit_amount=9000.0, appointment_required=True,
+                                available_from=starts,
+                                location_label='Juja', location_county='Kiambu'),
+    }
+    check_no_negative_fields(customer_id, provider_id, admin_id, listings)
+
     check_contact_admin(customer_id, stranger_id, provider_id, admin_id, service_id)
+    # Its own client, because contact-admin hands an existing open request back
+    # rather than opening a second one - correct behaviour that would have made the
+    # empty-desk assertions inspect a send that happened before we were listening.
+    lonely = make_user('lonely', phone=CLIENT_PHONE)
+    notified_id = check_empty_desk_notifies_the_provider(lonely.id, provider_id,
+                                                         admin_id, service_id)
+    # Reuses the request that check above created, because the desk's two buttons are
+    # meant to be safe on a request the automatic path already notified.
+    check_provider_whatsapp_button(customer_id, admin_id, service_id, notified_id)
+    check_thread_after_linking(customer_id, provider_id, stranger_id, admin_id,
+                               listings['session'].id)
+    check_ticket_money(customer_id, provider_id, listings['ticket'])
+    check_direct_pay_creates_no_order(customer_id, listings['visit'])
+
     check_listing_gate(seller_id, plain_id, admin_id)
     check_location_rules(admin_id)
     check_listing_fee(seller_id, admin_id)

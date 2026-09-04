@@ -1866,6 +1866,123 @@ class FeaturedPlacementBid(db.Model):
     product = db.relationship('Product', lazy=True)
 
 
+# How a service is offered, and therefore which fields it has and who takes the
+# money. Six shapes rather than one, because the single shape this table started
+# with was designed for a laundry: it asked every listing whether pickup was
+# offered, so an event ticket told its buyer "No pickup offered, take to the
+# location as directed".
+#
+# `fields` is a whitelist, not documentation. A field absent from a profile is
+# absent from the form and absent from the page - not rendered as a negative, not
+# hidden with CSS. That is the whole point of the table.
+#
+# Defined here rather than in main.py because pickup_display below has to agree
+# with it, and a second copy over there is how the two would drift.
+SERVICE_FULFILMENT_PROFILES = {
+    'ticket': {
+        'label': 'Ticketed event',
+        # No contact step at all: a ticket needs no introduction, only a price.
+        'flow': 'buy',
+        'fields': ('event_starts_at', 'event_venue', 'tiers'),
+        'pay_to': 'platform',
+        'pay_when': 'upfront',
+        'icon': 'fa-calendar-day',
+        'blurb': 'Buyers pick a tier and pay on the platform. No linking desk.',
+    },
+    'dropoff': {
+        'label': 'Drop off / collect',
+        'flow': 'request',
+        'fields': ('location', 'opening_hours', 'turnaround_note', 'pickup'),
+        'pay_to': 'platform',
+        'pay_when': 'after',
+        'icon': 'fa-truck-pickup',
+        'blurb': 'The client brings the work to you, or you collect it.',
+    },
+    'errand': {
+        'label': 'Delivery / errand',
+        'flow': 'request',
+        'fields': ('location', 'service_area', 'delivery_fee',
+                   'min_order_amount', 'pickup'),
+        'pay_to': 'platform',
+        'pay_when': 'upfront',
+        'icon': 'fa-motorcycle',
+        'blurb': 'Paid up front on the platform, goods and fee together.',
+    },
+    'visit': {
+        'label': 'Appointment / visit',
+        'flow': 'request',
+        'fields': ('location', 'serves_at', 'opening_hours',
+                   'appointment_required'),
+        'pay_to': 'provider',
+        'pay_when': 'after',
+        'icon': 'fa-person-walking',
+        'blurb': 'Paid directly to the provider after the service.',
+    },
+    'session': {
+        'label': 'Session / hourly',
+        'flow': 'request',
+        'fields': ('rate_unit', 'serves_at', 'turnaround_note'),
+        'pay_to': 'platform',
+        'pay_when': 'after',
+        'icon': 'fa-clock',
+        'blurb': 'Scope is agreed in the thread, then paid on the platform.',
+    },
+    'tenancy': {
+        'label': 'Rental / tenancy',
+        'flow': 'request',
+        'fields': ('location', 'deposit_amount', 'available_from', 'rate_unit',
+                   'appointment_required'),
+        'pay_to': 'provider',
+        'pay_when': 'after',
+        'icon': 'fa-key',
+        'blurb': 'Viewing first; rent and deposit are paid to the landlord.',
+    },
+}
+
+DEFAULT_SERVICE_PROFILE = 'dropoff'
+
+# The eighteen seeded categories mapped to a shape. Read once at seed time and by
+# the admin catalogue page; after that the catalogue row is the truth, so an admin
+# who retags a category is not overwritten on the next boot.
+SERVICE_PROFILE_BY_KEY = {
+    'events_tickets': 'ticket',
+    'laundry': 'dropoff',
+    'printing': 'dropoff',
+    'device_repair': 'dropoff',
+    'cyber_services': 'dropoff',
+    'books_stationery': 'dropoff',
+    'food_delivery': 'errand',
+    'grocery': 'errand',
+    'parcel_courier': 'errand',
+    'campus_errands': 'errand',
+    'barber_beauty': 'visit',
+    'fitness': 'visit',
+    'health_wellness': 'visit',
+    'cleaning': 'visit',
+    'tutoring': 'session',
+    'career': 'session',
+    'student_gigs': 'session',
+    'accommodation': 'tenancy',
+}
+
+
+def service_profile_spec(profile):
+    """The profile record for a name, falling back rather than raising.
+
+    A listing written before this column existed, or one whose catalogue row an
+    admin deleted, still has to render. Falling back to dropoff shows one field
+    too many; raising shows a 500.
+    """
+    return SERVICE_FULFILMENT_PROFILES.get(
+        (profile or '').strip().lower(),
+        SERVICE_FULFILMENT_PROFILES[DEFAULT_SERVICE_PROFILE])
+
+
+def profile_has_field(profile, field):
+    """Whether a profile carries a field at all. The whitelist, read one way."""
+    return field in service_profile_spec(profile)['fields']
+
+
 class ServiceListing(db.Model):
     """A service someone offers - laundry, printing, repairs, tutoring.
 
@@ -1878,6 +1995,13 @@ class ServiceListing(db.Model):
     ``service_direct_contact_enabled`` is the switch that changes the model later:
     with it on, clients contact providers themselves and listing stops being free,
     which is what ``listing_fee_*`` is for.
+
+    ``fulfilment_profile`` decides which of the columns below exist for a given
+    listing - see SERVICE_FULFILMENT_PROFILES above. It is copied onto the row
+    rather than read through the catalogue every time, for two reasons: an admin
+    retagging a category must not silently reshape listings their providers have
+    already written, and the grid filters on it, which wants one indexed column
+    and not a join.
     """
     __tablename__ = 'service_listings'
     id = db.Column(db.Integer, primary_key=True)
@@ -1924,9 +2048,66 @@ class ServiceListing(db.Model):
     # Listed by the MVP or an admin, so exempt from the seller_listable filter.
     is_admin_listing = db.Column(db.Boolean, default=False)
 
+    # --- how this one is offered and paid ---------------------------------
+    # Blank on rows written before the profiles existed; `profile` below resolves
+    # that to the default rather than making every reader remember to.
+    fulfilment_profile = db.Column(db.String(20), index=True)
+    # Defaulted from the profile at save time, then overridable per listing: a
+    # barber who wants the platform to hold the money is allowed to say so, and a
+    # profile default is a default rather than a rule.
+    pay_to = db.Column(db.String(20), default='platform')      # platform | provider
+    pay_when = db.Column(db.String(20), default='after')       # upfront | after
+
+    opening_hours = db.Column(db.String(120))       # dropoff, visit
+    turnaround_note = db.Column(db.String(120))     # dropoff, session
+    service_area = db.Column(db.String(200))        # errand, visit
+    delivery_fee = db.Column(db.Float, default=0.0)      # errand
+    min_order_amount = db.Column(db.Float, default=0.0)  # errand
+    # visit and session: at their place, at the client's, or both. Two booleans
+    # rather than one enum because "both" is the common answer for a mobile barber.
+    serves_at_provider = db.Column(db.Boolean, default=True)
+    serves_at_client = db.Column(db.Boolean, default=False)
+    appointment_required = db.Column(db.Boolean, default=False)  # visit, tenancy
+    rate_unit = db.Column(db.String(20))            # hour|session|week|task|month
+    deposit_amount = db.Column(db.Float, default=0.0)   # tenancy
+    available_from = db.Column(db.DateTime)             # tenancy
+    event_starts_at = db.Column(db.DateTime)            # ticket
+    event_venue = db.Column(db.String(200))             # ticket
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     provider = db.relationship('User', lazy=True)
+    # Ordered here so no caller has to remember to, and so the "from KES x" price
+    # and the picker agree about which tier comes first.
+    tiers = db.relationship('ServicePriceTier', lazy=True, cascade='all, delete-orphan',
+                            order_by='ServicePriceTier.sort_order,ServicePriceTier.price')
+
+    @property
+    def profile(self):
+        """This listing's profile name, resolved, never blank."""
+        name = (self.fulfilment_profile or '').strip().lower()
+        return name if name in SERVICE_FULFILMENT_PROFILES else DEFAULT_SERVICE_PROFILE
+
+    @property
+    def profile_spec(self):
+        return service_profile_spec(self.profile)
+
+    def has_field(self, field):
+        """Whether this listing's profile carries a field at all.
+
+        The one question every services template asks. `service.has_field('pickup')`
+        rather than `service.profile in ('dropoff', 'errand')` so adding a profile
+        is one edit to the table above and none to the templates.
+        """
+        return profile_has_field(self.profile, field)
+
+    @property
+    def pays_provider_direct(self):
+        return (self.pay_to or self.profile_spec['pay_to']) == 'provider'
+
+    @property
+    def pays_upfront(self):
+        return (self.pay_when or self.profile_spec['pay_when']) == 'upfront'
 
     @property
     def location_display(self):
@@ -1944,13 +2125,22 @@ class ServiceListing(db.Model):
 
     @property
     def pickup_display(self):
-        """The pickup half of a provider line, in the provider's own terms.
+        """The pickup half of a provider line, or None where pickup is not a thing.
+
+        None - not "no pickup" - for the four profiles that have no pickup concept.
+        A ticket, a haircut, a tutoring hour and a rented room cannot be collected,
+        and telling a ticket buyer "No pickup offered, take to the location as
+        directed" was the exact complaint that produced the profiles. Every caller
+        checks the return value, so an absent answer renders nothing at all rather
+        than a negative one.
 
         One property rather than the same three-branch conditional in the detail
         page, the card and the chatbot formatter - three copies would drift, and a
         client told "pickup today" by one and "no pickup" by another has no way to
         know which is true.
         """
+        if not self.has_field('pickup'):
+            return None
         if not self.pickup_required:
             return 'No pickup offered, take to the location as directed'
         when = (self.pickup_eta or '').strip()
@@ -1960,10 +2150,116 @@ class ServiceListing(db.Model):
             return f'pickup {when} (KES {self.pickup_cost:,.0f})'.replace('  ', ' ').strip()
         return f'pickup {when}'.strip() if when else 'pickup available'
 
+    @property
+    def offer_display(self):
+        """The one line that says how this service is offered, per profile.
+
+        Replaces pickup_display on the cards and in the chatbot for the profiles
+        that have no pickup, so every listing still says something useful about how
+        it works - a ticket says when and where, a barber says whether they come to
+        you - instead of the pickup line or a blank.
+        """
+        profile = self.profile
+        if profile == 'ticket':
+            when = self.event_starts_at.strftime('%d %b, %H:%M') if self.event_starts_at else None
+            where = (self.event_venue or '').strip() or self.location_display
+            return ' · '.join(part for part in (when, where) if part) or 'Tickets on sale'
+        if profile == 'visit':
+            if self.serves_at_client and self.serves_at_provider:
+                return 'At their place or yours'
+            if self.serves_at_client:
+                return 'Comes to you'
+            return f'At {self.location_display}' if self.location_display else 'At their premises'
+        if profile == 'session':
+            unit = (self.rate_unit or 'session').strip()
+            where = 'online or in person' if self.serves_at_client else 'in person'
+            return f'Per {unit}, {where}'
+        if profile == 'tenancy':
+            unit = (self.rate_unit or 'month').strip()
+            extra = 'viewing first' if self.appointment_required else 'available now'
+            return f'Per {unit}, {extra}'
+        if profile == 'errand':
+            area = (self.service_area or '').strip() or self.location_display
+            if self.delivery_fee:
+                fee = f'delivery KES {self.delivery_fee:,.0f}'
+                return f'{area} · {fee}' if area else fee
+            return area or 'Delivered to you'
+        return self.pickup_display or 'Take to the location as directed'
+
+
+class ServicePriceTier(db.Model):
+    """One price band on a ticketed service - Regular, VIP, VVIP.
+
+    Its own table rather than columns on the listing because the MVP asked for
+    "different prices for the same" service and the number of bands is the
+    provider's choice, not ours. ``name`` is free text so "VVIP table of four"
+    works as well as "VIP".
+
+    ``quantity_sold`` is incremented in the M-Pesa callback and nowhere else. It is
+    the seat count, so the only moment it may move is the moment money arrives -
+    incrementing it when the STK push is *sent* would let an abandoned prompt hold
+    a seat forever.
+    """
+    __tablename__ = 'service_price_tiers'
+    __table_args__ = (
+        db.Index('ix_service_tiers_service_order', 'service_id', 'sort_order'),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.Integer, db.ForeignKey('service_listings.id'), nullable=False)
+    name = db.Column(db.String(60), nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    # 0 means unlimited - a free-entry event with tiers for seating still needs a
+    # price band, and refusing to sell because nobody typed a capacity would be a
+    # worse default than not capping.
+    quantity_total = db.Column(db.Integer, default=0)
+    quantity_sold = db.Column(db.Integer, default=0)
+    max_per_order = db.Column(db.Integer, default=5)
+    is_active = db.Column(db.Boolean, default=True)
+    sort_order = db.Column(db.Integer, default=100)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    service = db.relationship('ServiceListing', lazy=True, overlaps='tiers')
+
+    @property
+    def is_unlimited(self):
+        return not self.quantity_total or self.quantity_total <= 0
+
+    @property
+    def seats_left(self):
+        """None when unlimited, so callers must distinguish it from zero."""
+        if self.is_unlimited:
+            return None
+        return max(0, (self.quantity_total or 0) - (self.quantity_sold or 0))
+
+    @property
+    def sold_out(self):
+        return self.seats_left == 0
+
+    def can_take(self, quantity):
+        """Whether this tier can still sell `quantity` seats."""
+        try:
+            wanted = int(quantity or 0)
+        except (TypeError, ValueError):
+            return False
+        if wanted < 1 or wanted > max(1, self.max_per_order or 5):
+            return False
+        left = self.seats_left
+        return left is None or wanted <= left
+
 
 class ServiceOrder(db.Model):
-    """Orders for freelance services."""
+    """Orders for freelance services.
+
+    ``payment_status`` and ``checkout_request_id`` exist because this table used to
+    record an order, platform revenue and a completed job with no payment behind any
+    of it. Now a row starts life 'pending' with the Daraja checkout id on it, and the
+    callback is the only thing that may mark it paid, take revenue or move a seat
+    count. See service_order_for_checkout_id in main.py.
+    """
     __tablename__ = 'service_orders'
+    __table_args__ = (
+        db.Index('ix_service_orders_client_created', 'client_id', 'created_at'),
+    )
     id = db.Column(db.Integer, primary_key=True)
     service_id = db.Column(db.Integer, db.ForeignKey('service_listings.id'), nullable=False)
     client_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
@@ -1978,9 +2274,27 @@ class ServiceOrder(db.Model):
     mpesa_receipt = db.Column(db.String(50))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+    # pending | paid | failed. Separate from `status`, which is the job's progress:
+    # a paid job can still be in progress, and an unpaid one is not a job yet.
+    payment_status = db.Column(db.String(20), default='pending')
+    # The only thing a Daraja callback arrives holding, so it is indexed.
+    checkout_request_id = db.Column(db.String(60), index=True)
+    paid_at = db.Column(db.DateTime)
+    # Copied off the listing at order time: a listing that later switches to
+    # direct-to-provider must not retroactively change how a paid order was settled.
+    pay_to = db.Column(db.String(20), default='platform')
+    tier_id = db.Column(db.Integer, db.ForeignKey('service_price_tiers.id'))
+    quantity = db.Column(db.Integer, default=1)
+    ticket_code = db.Column(db.String(24), index=True)
+
     service = db.relationship('ServiceListing', lazy=True)
     client = db.relationship('User', foreign_keys=[client_id], lazy=True)
     provider = db.relationship('User', foreign_keys=[provider_id], lazy=True)
+    tier = db.relationship('ServicePriceTier', lazy=True)
+
+    @property
+    def is_paid(self):
+        return (self.payment_status or '') == 'paid'
 
 
 class ServiceCatalogueItem(db.Model):
@@ -2007,6 +2321,11 @@ class ServiceCatalogueItem(db.Model):
     seller_listable = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
     sort_order = db.Column(db.Integer, default=100)
+    # Which shape a listing under this key takes - see SERVICE_FULFILMENT_PROFILES.
+    # On the catalogue row so a category the admin adds gets a shape at the moment
+    # they create it, with no deploy; copied onto each listing at save time so a
+    # later retag does not reshape listings that already exist.
+    fulfilment_profile = db.Column(db.String(20), default=DEFAULT_SERVICE_PROFILE)
     created_by_id = db.Column(db.Integer, db.ForeignKey('users.id'))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -2048,6 +2367,10 @@ class ServiceLinkRequest(db.Model):
     claimed_at = db.Column(db.DateTime)
     linked_at = db.Column(db.DateTime)
     closed_at = db.Column(db.DateTime)
+    # When the provider was told a client is interested. Stamped whether the send
+    # was automatic (nobody on duty) or an admin pressing the button, and checked
+    # before sending, so the interest message goes out exactly once per request.
+    provider_notified_at = db.Column(db.DateTime)
 
     service = db.relationship('ServiceListing', lazy=True)
     client = db.relationship('User', foreign_keys=[client_id], lazy=True)
@@ -2064,6 +2387,11 @@ class ServiceLinkMessage(db.Model):
     Purpose-built rather than reusing AdminMessage, which has no thread key: every
     reply there would mean scanning to reassemble a conversation, and this is a
     conversation a client refreshes while waiting.
+
+    Three parties once a request is linked - client, admin, provider - so the
+    sender's role is stored rather than derived. Deriving it means loading the
+    request and its listing on a thread that is polled every twelve seconds by
+    everyone watching it.
     """
     __tablename__ = 'service_link_messages'
     __table_args__ = (
@@ -2073,6 +2401,7 @@ class ServiceLinkMessage(db.Model):
     request_id = db.Column(db.Integer, db.ForeignKey('service_link_requests.id'), nullable=False)
     sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     from_admin = db.Column(db.Boolean, default=False)
+    from_provider = db.Column(db.Boolean, default=False)
     body = db.Column(db.Text, nullable=False)
     read_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)

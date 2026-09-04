@@ -135,7 +135,10 @@
 
                     {% if user_tickets %}
                     <hr class="border-warning">
-                    <h6 class="text-center mb-2">Your Tickets</h6>
+                    <h6 class="text-center mb-2">
+                        Your Tickets
+                        <span class="badge bg-dark border border-warning text-warning ms-1">{{ user_ticket_total }}</span>
+                    </h6>
                     <div class="d-flex flex-wrap justify-content-center gap-2">
                         {% for ticket in user_tickets %}
                         <span class="badge bg-warning text-dark fs-6 px-3 py-2">
@@ -146,6 +149,11 @@
                         </span>
                         {% endfor %}
                     </div>
+                    {% if user_ticket_total > user_tickets|length %}
+                    <p class="text-muted small text-center mt-2 mb-0">
+                        Showing your first {{ user_tickets|length }} of {{ user_ticket_total }} tickets. Every one of them is in the draw.
+                    </p>
+                    {% endif %}
                     {% endif %}
                 </div>
             </div>

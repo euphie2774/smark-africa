@@ -4,10 +4,16 @@
   shown, and it is shown next to the client's so that one admin can make one
   introduction from one screen.
 
-  The duty switch is at the top rather than buried in settings, because a client
-  who presses "Contact admin" while nobody is on duty is sent to WhatsApp with a
-  fixed sentence - so whether this switch is on is a decision with a visible
-  consequence, and it should be visible to the person making it.
+  The duty switch is at the top rather than buried in settings, but note what it no
+  longer does: a client who presses "Contact admin" gets the same answer either way
+  and never learns whether anyone was here. What the switch changes is who gets
+  woken - with nobody on duty the provider is messaged automatically the moment the
+  request lands, and a copy goes to the support WhatsApp number.
+
+  So this page is the record of that, not the gate on it. The buttons below re-send
+  nothing that was already sent: notify-provider is idempotent on
+  provider_notified_at, and "WhatsApp provider" opens the conversation on a request
+  the empty-desk path already handled.
 #}
 {% block title %}Service linking desk - {{ super() }}{% endblock %}
 
@@ -40,8 +46,10 @@
     {% if not on_duty_count %}
     <div class="alert alert-warning">
         <i class="fas fa-triangle-exclamation me-1"></i>
-        <strong>Nobody is on duty.</strong> Every client pressing “Contact admin” right now is
-        told our agents are busy and sent to WhatsApp.
+        <strong>Nobody is on duty.</strong> Clients can still ask, and they are not told the desk
+        is empty. Each request lands here anyway, the provider is messaged automatically, and a
+        copy goes to the support WhatsApp number — so nothing is lost, but nobody is watching the
+        conversation either.
     </div>
     {% endif %}
 
@@ -126,7 +134,25 @@
                                 <div class="text-muted">No number on the listing</div>
                                 {% endif %}
                                 {% if row.service %}
-                                <div class="text-muted">{{ row.service.pickup_display }}</div>
+                                {#
+                                  offer_display, not pickup_display: on four of the six
+                                  profiles there is no pickup to report, and a desk that
+                                  prints "No pickup offered" under a concert ticket is the
+                                  same bug the client used to see.
+                                #}
+                                {% if row.service.offer_display %}
+                                <div class="text-muted">{{ row.service.offer_display }}</div>
+                                {% endif %}
+                                {% if row.provider_notified_at %}
+                                <div class="text-success">
+                                    <i class="fas fa-paper-plane me-1"></i>Told
+                                    {{ row.provider_notified_at.strftime('%d %b %H:%M') }}
+                                </div>
+                                {% else %}
+                                <div class="text-warning-emphasis">
+                                    <i class="fas fa-bell-slash me-1"></i>Not told yet
+                                </div>
+                                {% endif %}
                                 {% endif %}
                             </div>
                         </div>
@@ -136,13 +162,33 @@
                     <div class="bg-light rounded p-2 small mb-2" style="white-space:pre-line">{{ row.client_note }}</div>
                     {% endif %}
 
-                    {% if row.service and row.service.has_location %}
+                    {% if row.service %}
+                    {#
+                      What shape of job this is, and who takes the money. An admin
+                      introducing a client to a barber and an admin selling a ticket are
+                      doing two different things, and the desk should say which before
+                      the call is made.
+                    #}
+                    <div class="small mb-2">
+                        <span class="badge bg-light text-dark border">
+                            {{ row.service.profile_spec.label }}
+                        </span>
+                        <span class="text-muted">
+                            {{ service_price_display(row.service) }} &middot;
+                            {% if row.service.pays_provider_direct %}
+                            paid to the provider
+                            {{ 'up front' if row.service.pays_upfront else 'after the service' }}
+                            {% else %}
+                            paid on the platform
+                            {{ 'up front' if row.service.pays_upfront else 'after the work' }}
+                            {% endif %}
+                        </span>
+                    </div>
+                    {% if row.service.has_location %}
                     <div class="small text-muted mb-2">
                         <i class="fas fa-location-dot me-1"></i>{{ row.service.location_display }}
-                        {% if row.service.price %}
-                        &middot; KSh {{ "{:,.0f}".format(row.service.price) }}
-                        {% endif %}
                     </div>
+                    {% endif %}
                     {% endif %}
 
                     <div class="small text-muted mb-2">
@@ -176,6 +222,41 @@
                     </div>
                     {% endif %}
 
+                    {#
+                      Both provider buttons post to the same route. The plain one sends
+                      the interest message and reports which channels actually delivered;
+                      the WhatsApp one sends the same thing and then hands this tab's
+                      opener a wa.me link, so the admin lands in the conversation instead
+                      of copying a number somewhere. Shown at every status, because a
+                      linked request whose provider went quiet still needs the nudge, and
+                      shown to admins only - this is the only page that knows the number.
+                    #}
+                    {% if row.service %}
+                    <div class="d-flex flex-wrap gap-2 mb-2">
+                        <form method="POST"
+                              action="{{ url_for('admin_service_notify_provider', request_id=row.id) }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-outline-success">
+                                <i class="fas fa-bell me-1"></i>Notify provider
+                            </button>
+                        </form>
+                        {% if row.service.provider_phone %}
+                        <form method="POST" target="_blank"
+                              action="{{ url_for('admin_service_notify_provider', request_id=row.id) }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input type="hidden" name="open_whatsapp" value="1">
+                            <button class="btn btn-sm btn-success">
+                                <i class="fab fa-whatsapp me-1"></i>WhatsApp provider
+                            </button>
+                        </form>
+                        <a class="btn btn-sm btn-outline-secondary"
+                           href="tel:{{ row.service.provider_phone }}">
+                            <i class="fas fa-phone me-1"></i>Call
+                        </a>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+
                     <button class="btn btn-sm btn-outline-primary w-100" type="button"
                             data-thread-toggle="{{ row.id }}">
                         <i class="fas fa-comments me-1"></i>Open the conversation
@@ -194,7 +275,8 @@
                             <button class="btn btn-sm btn-primary" type="submit">Send</button>
                         </form>
                         <div class="form-text">
-                            Replying claims the request if it is still unclaimed.
+                            Replying claims the request if it is still unclaimed. Once you mark the
+                            request linked the provider joins this same thread — you keep reading it.
                         </div>
                         {% endif %}
                     </div>
@@ -231,6 +313,13 @@
     // is 25 requests deep and grows, and 25 sets of handlers is 25 closures held
     // for a page an admin leaves open all day.
     var base = '{{ url_for("service_request_thread", request_id=0) }}';
+    // One timer for the page, not one per panel. It refreshes only the panels that
+    // are actually open, skips the work entirely while the tab is in the background,
+    // and stops once every panel is closed - which is what keeps "watch the
+    // conversation live" inside SERVICE_THREAD_RATE_LIMIT on a desk with several
+    // threads unfolded at once.
+    var POLL_MS = 15000;
+    var timer = null;
 
     function threadUrl(id) { return base.replace('/0/', '/' + id + '/'); }
 
@@ -240,30 +329,66 @@
         return holder.innerHTML;
     }
 
-    function render(id, rows) {
+    function render(id, data) {
         var body = document.querySelector('[data-thread-body="' + id + '"]');
         if (!body) { return; }
-        if (!rows || !rows.length) {
-            body.innerHTML = '<p class="text-muted small mb-0">Nothing said yet.</p>';
-            return;
-        }
+        var rows = data.messages || [];
+        // The welcome sentence the client was shown is rendered here from the same
+        // server constant rather than stored as a message, so an admin sees exactly
+        // what the client is looking at without a phantom row in the table.
         var html = '';
+        if (data.welcome) {
+            html += '<div class="alert alert-light border py-1 px-2 small mb-2 mt-0">' +
+                '<i class="fas fa-quote-left me-1"></i>' + escapeHtml(data.welcome) + '</div>';
+        }
+        if (!rows.length) {
+            html += '<p class="text-muted small mb-0">Nothing said yet.</p>';
+        }
+        var atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
         rows.forEach(function (row) {
             var mine = row.from_admin;
+            var who = row.from_admin ? '' : (row.from_provider ? 'Provider' : 'Client');
             html += '<div class="d-flex mb-2 ' + (mine ? 'justify-content-end' : '') + '">' +
                 '<div class="px-2 py-1 rounded small ' +
-                (mine ? 'bg-primary text-white' : 'bg-light border') +
-                '" style="max-width:85%">' + escapeHtml(row.body) + '</div></div>';
+                (mine ? 'bg-primary text-white'
+                      : (row.from_provider ? 'bg-success-subtle border border-success-subtle'
+                                           : 'bg-light border')) +
+                '" style="max-width:85%">' +
+                (who ? '<span class="d-block text-muted" style="font-size:10px">' + who + '</span>' : '') +
+                escapeHtml(row.body) + '</div></div>';
         });
         body.innerHTML = html;
-        body.scrollTop = body.scrollHeight;
+        // Only follow the conversation down if the admin was already at the bottom.
+        // Yanking the scroll mid-read every 15 seconds makes a long thread unreadable.
+        if (atBottom) { body.scrollTop = body.scrollHeight; }
     }
 
     function load(id) {
         fetch(threadUrl(id), {headers: {'Accept': 'application/json'}})
             .then(function (response) { return response.json(); })
-            .then(function (data) { if (data.success) { render(id, data.messages); } })
+            .then(function (data) { if (data.success) { render(id, data); } })
             .catch(function () { /* leave the panel as it is */ });
+    }
+
+    function openPanels() {
+        return Array.prototype.filter.call(
+            document.querySelectorAll('[data-thread-panel]'),
+            function (panel) { return !panel.classList.contains('d-none'); });
+    }
+
+    function tick() {
+        if (document.hidden) { return; }
+        var panels = openPanels();
+        if (!panels.length) {
+            clearInterval(timer);
+            timer = null;
+            return;
+        }
+        panels.forEach(function (panel) { load(panel.getAttribute('data-thread-panel')); });
+    }
+
+    function startPolling() {
+        if (!timer) { timer = setInterval(tick, POLL_MS); }
     }
 
     document.addEventListener('click', function (event) {
@@ -273,7 +398,10 @@
         var panel = document.querySelector('[data-thread-panel="' + id + '"]');
         if (!panel) { return; }
         panel.classList.toggle('d-none');
-        if (!panel.classList.contains('d-none')) { load(id); }
+        if (!panel.classList.contains('d-none')) {
+            load(id);
+            startPolling();
+        }
     });
 
     document.addEventListener('submit', function (event) {
@@ -286,12 +414,18 @@
             .then(function (data) {
                 if (data.success) {
                     form.reset();
-                    render(id, data.messages);
+                    render(id, data);
                 } else if (data.error) {
                     alert(data.error);
                 }
             })
             .catch(function () { alert('Could not send that. Try again.'); });
+    });
+
+    // Coming back to the tab should show the current state at once rather than
+    // after the next interval.
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden && openPanels().length) { tick(); }
     });
 })();
 </script>

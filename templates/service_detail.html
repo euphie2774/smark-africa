@@ -6,13 +6,19 @@
   press "Contact admin", an on-duty admin sees the request together with the
   number, and the admin makes the introduction.
 
-  So the number appears in three blocks and no others. Two of them read a variable
-  the view populates only for the viewer entitled to it - `provider_phone` for an
-  admin, `direct_phone` only while the MVP has direct contact switched on - and for
-  an ordinary client both are None, so no edit here can leak it: for that viewer the
-  number was never in the context. The third reads `service.provider_phone` straight
-  off the row and is therefore the one to be careful with; it sits inside the
-  `is_owner` branch, where the viewer is the provider and the number is their own.
+  So the number appears in four blocks and no others. Three read a variable the view
+  populates only for the viewer entitled to it - `provider_phone` and
+  `provider_whatsapp_url` for an admin, `direct_phone` only while the MVP has direct
+  contact switched on - and for an ordinary client all three are None, so no edit
+  here can leak it: for that viewer the number was never in the context. The fourth
+  reads `service.provider_phone` straight off the row and is therefore the one to be
+  careful with; it sits inside the `is_owner` branch, where the viewer is the
+  provider and the number is their own.
+
+  The other rule: every fact on this page is gated on `service.has_field(...)`, which
+  reads the profile's whitelist. A field the profile does not carry is absent, not
+  rendered as a negative - which is why a ticket no longer announces that no pickup
+  is offered. And no copy anywhere tells a client whether an admin is on duty.
 #}
 {% block title %}{{ service.title }} - {{ super() }}{% endblock %}
 
@@ -58,16 +64,33 @@
                     </p>
 
                     <div class="d-flex flex-wrap gap-3 align-items-baseline mb-3">
-                        <span class="h3 mb-0 text-success">
-                            {% if service.price %}KSh {{ "{:,.0f}".format(service.price) }}
-                            {% else %}Price on request{% endif %}
-                        </span>
-                        {% if service.price_type and service.price_type != 'fixed' %}
-                        <span class="badge bg-light text-dark">{{ service.price_type|title }}</span>
-                        {% endif %}
+                        <span class="h3 mb-0 text-success">{{ price_display|capitalize }}</span>
+                        <span class="badge bg-light text-dark">{{ spec.label }}</span>
                     </div>
 
+                    {#
+                      Every line below is gated on service.has_field(...), which reads
+                      the profile's own whitelist. A field this profile does not carry
+                      is not printed as a negative and not printed as a blank - it is
+                      not here. That is the whole reason the profiles exist: this list
+                      used to print the pickup sentence unconditionally, so a concert
+                      ticket told its buyer "No pickup offered, take to the location as
+                      directed".
+                    #}
                     <ul class="list-unstyled mb-0 small">
+                        {% if service.has_field('event_starts_at') and service.event_starts_at %}
+                        <li class="mb-2">
+                            <i class="fas fa-calendar-day text-primary me-2"></i>
+                            {{ service.event_starts_at.strftime('%A %d %B %Y, %H:%M') }}
+                        </li>
+                        {% endif %}
+                        {% if service.has_field('event_venue') and service.event_venue %}
+                        <li class="mb-2">
+                            <i class="fas fa-map-pin text-primary me-2"></i>
+                            {{ service.event_venue }}
+                        </li>
+                        {% endif %}
+                        {% if service.pickup_display %}
                         <li class="mb-2">
                             <i class="fas fa-truck-pickup text-primary me-2"></i>
                             {{ service.pickup_display }}
@@ -75,7 +98,8 @@
                             <span class="badge bg-info-subtle text-dark ms-1">Our courier collects</span>
                             {% endif %}
                         </li>
-                        {% if service.has_location %}
+                        {% endif %}
+                        {% if service.has_field('location') and service.has_location %}
                         <li class="mb-2">
                             <i class="fas fa-location-dot text-primary me-2"></i>
                             {{ service.location_display }}
@@ -87,9 +111,69 @@
                             {% endif %}
                         </li>
                         {% endif %}
-                        {% if service.delivery_days %}
+                        {% if service.has_field('serves_at') %}
+                        <li class="mb-2">
+                            <i class="fas fa-person-walking text-primary me-2"></i>
+                            {% if service.serves_at_provider and service.serves_at_client %}
+                            At their premises or yours — your choice
+                            {% elif service.serves_at_client %}
+                            They come to you
+                            {% else %}
+                            At their premises
+                            {% endif %}
+                        </li>
+                        {% endif %}
+                        {% if service.has_field('service_area') and service.service_area %}
+                        <li class="mb-2">
+                            <i class="fas fa-map text-primary me-2"></i>
+                            Covers {{ service.service_area }}
+                        </li>
+                        {% endif %}
+                        {% if service.has_field('opening_hours') and service.opening_hours %}
                         <li class="mb-2">
                             <i class="fas fa-clock text-primary me-2"></i>
+                            Open {{ service.opening_hours }}
+                        </li>
+                        {% endif %}
+                        {% if service.has_field('appointment_required') %}
+                        <li class="mb-2">
+                            <i class="fas fa-calendar-check text-primary me-2"></i>
+                            {% if service.appointment_required %}
+                            Book first — walk-ins are not taken
+                            {% else %}
+                            Walk-ins welcome
+                            {% endif %}
+                        </li>
+                        {% endif %}
+                        {% if service.has_field('delivery_fee') and service.delivery_fee %}
+                        <li class="mb-2">
+                            <i class="fas fa-motorcycle text-primary me-2"></i>
+                            Delivery KSh {{ "{:,.0f}".format(service.delivery_fee) }}
+                            {% if service.min_order_amount %}
+                            · minimum order KSh {{ "{:,.0f}".format(service.min_order_amount) }}
+                            {% endif %}
+                        </li>
+                        {% endif %}
+                        {% if service.has_field('deposit_amount') and service.deposit_amount %}
+                        <li class="mb-2">
+                            <i class="fas fa-piggy-bank text-primary me-2"></i>
+                            Deposit KSh {{ "{:,.0f}".format(service.deposit_amount) }}
+                        </li>
+                        {% endif %}
+                        {% if service.has_field('available_from') and service.available_from %}
+                        <li class="mb-2">
+                            <i class="fas fa-door-open text-primary me-2"></i>
+                            Available from {{ service.available_from.strftime('%d %b %Y') }}
+                        </li>
+                        {% endif %}
+                        {% if service.has_field('turnaround_note') and service.turnaround_note %}
+                        <li class="mb-2">
+                            <i class="fas fa-hourglass-half text-primary me-2"></i>
+                            {{ service.turnaround_note }}
+                        </li>
+                        {% elif service.delivery_days and service.profile != 'ticket' %}
+                        <li class="mb-2">
+                            <i class="fas fa-hourglass-half text-primary me-2"></i>
                             Usually done within {{ service.delivery_days }}
                             day{{ '' if service.delivery_days == 1 else 's' }}
                         </li>
@@ -114,8 +198,19 @@
                 <div class="card-body">
                     <h6 class="mb-2"><i class="fas fa-user-check me-1"></i>This is your listing</h6>
                     <p class="small text-muted mb-2">
-                        Clients reach you through an admin. We show them your price, location and
-                        pickup terms — never your number.
+                        {#
+                          Per profile, because this card used to promise every provider
+                          that we show clients their "pickup terms" - which a concert
+                          promoter does not have, and which is the same negative the
+                          profiles were built to stop printing.
+                        #}
+                        {% if spec.flow == 'buy' %}
+                        Buyers pay on the platform and get a ticket code. We show them your
+                        bands, the date and the venue — never your number.
+                        {% else %}
+                        Clients reach you through an admin. We show them your price, where you
+                        are and how you offer it — never your number.
+                        {% endif %}
                     </p>
                     {% if service.provider_phone %}
                     <p class="small mb-2">
@@ -130,6 +225,97 @@
                     {% endif %}
                 </div>
             </div>
+
+            {% endif %}
+
+            {#
+              The buy flow. A ticket needs no introduction and no linking desk - only
+              a price - so this profile replaces the "Contact admin" card entirely
+              rather than sitting beside it. The bands come from ServicePriceTier, one
+              form each: max_per_order and seats_left differ per band, so a single
+              shared quantity box could only ever be right for one of them, and both
+              limits are re-checked server-side in buy_service_ticket anyway.
+            #}
+            {% if spec.flow == 'buy' %}
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-header bg-white">
+                    <h6 class="mb-0"><i class="fas fa-ticket me-1"></i>
+                        {% if is_owner %}Your ticket bands{% else %}Get your ticket{% endif %}
+                    </h6>
+                </div>
+                <div class="card-body">
+                    {% if not tiers %}
+                    <p class="small text-muted mb-0">
+                        No tickets are on sale for this event yet.
+                    </p>
+                    {% elif not current_user.is_authenticated %}
+                    <ul class="list-unstyled small mb-3">
+                        {% for tier in tiers %}
+                        <li class="d-flex justify-content-between border-bottom py-1">
+                            <span>{{ tier.name }}</span>
+                            <span class="fw-bold text-success">KSh {{ "{:,.0f}".format(tier.price) }}</span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                    <a class="btn btn-success w-100"
+                       href="{{ url_for('login', next=url_for('service_detail', service_id=service.id)) }}">
+                        Sign in to buy
+                    </a>
+                    {% else %}
+                    {% for tier in tiers %}
+                    {% set left = tier.seats_left %}
+                    {% set cap = tier.max_per_order or 5 %}
+                    {% set cap = cap if left is none else [cap, left]|min %}
+                    <div class="border rounded p-2 mb-2">
+                        <div class="d-flex justify-content-between align-items-baseline">
+                            <div>
+                                <strong>{{ tier.name }}</strong>
+                                {% if left is not none %}
+                                <span class="badge {{ 'bg-danger' if left == 0 else ('bg-warning text-dark' if left < 10 else 'bg-light text-dark') }} ms-1">
+                                    {% if left == 0 %}Sold out{% else %}{{ left }} left{% endif %}
+                                </span>
+                                {% endif %}
+                            </div>
+                            <span class="fw-bold text-success">KSh {{ "{:,.0f}".format(tier.price) }}</span>
+                        </div>
+                        {% if is_owner %}
+                        <div class="small text-muted mt-1">
+                            {{ tier.quantity_sold or 0 }} sold{% if tier.quantity_total %} of {{ tier.quantity_total }}{% endif %}
+                        </div>
+                        {% elif cap > 0 %}
+                        <form method="POST" class="d-flex gap-2 mt-2"
+                              action="{{ url_for('buy_service_ticket', service_id=service.id) }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input type="hidden" name="tier_id" value="{{ tier.id }}"/>
+                            <select class="form-select form-select-sm" name="quantity"
+                                    aria-label="How many {{ tier.name }}" style="max-width:5.5rem">
+                                {% for n in range(1, cap + 1) %}
+                                <option value="{{ n }}">{{ n }}</option>
+                                {% endfor %}
+                            </select>
+                            <input class="form-control form-control-sm" name="phone" type="tel"
+                                   inputmode="numeric" maxlength="30" style="max-width:9rem"
+                                   value="{{ current_user.phone or '' }}" placeholder="07XXXXXXXX"
+                                   aria-label="M-Pesa number">
+                            <button class="btn btn-sm btn-success flex-grow-1" type="submit">
+                                Buy
+                            </button>
+                        </form>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                    {% if not is_owner %}
+                    <p class="small text-muted mb-0">
+                        You pay on the platform with M-Pesa and your ticket code appears here
+                        straight away. Nothing to arrange with anybody.
+                    </p>
+                    {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+
+            {% elif is_owner %}
+            {# The owner card above is the whole of this column for their own listing. #}
 
             {% elif direct_phone %}
             {#
@@ -156,11 +342,13 @@
                     <h6 class="mb-1"><i class="fas fa-headset me-1"></i>Request this service</h6>
                     <p class="small text-muted mb-3">
                         Tell us what you need and we will connect you with this provider.
-                        {% if duty_active and requests_enabled %}
-                        Someone is on the desk now.
-                        {% endif %}
                     </p>
-
+                    {#
+                      No "someone is on the desk now" here, and no duty-dependent copy
+                      anywhere a client can read. Whether an admin is on the desk is
+                      our staffing problem, not something for a client to work out
+                      from the page - the request is routed onward either way.
+                    #}
                     {% if not current_user.is_authenticated %}
                     <a class="btn btn-primary w-100"
                        href="{{ url_for('login', next=url_for('service_detail', service_id=service.id)) }}">
@@ -202,17 +390,12 @@
                     {% endif %}
 
                     <div class="alert mt-3 mb-0 d-none" id="contactMsg" role="status" aria-live="polite"></div>
-
-                    <a class="btn btn-outline-success w-100 mt-2 d-none" id="waBtn"
-                       href="{{ whatsapp_url }}" target="_blank" rel="noopener">
-                        <i class="fab fa-whatsapp me-1"></i>Continue on WhatsApp
-                    </a>
                 </div>
             </div>
 
             <div class="card border-0 shadow-sm mb-3 d-none" id="threadCard">
                 <div class="card-header bg-white">
-                    <h6 class="mb-0"><i class="fas fa-comments me-1"></i>Conversation with support</h6>
+                    <h6 class="mb-0"><i class="fas fa-comments me-1"></i>Your conversation</h6>
                 </div>
                 <div class="card-body">
                     <div id="threadBody" class="mb-2"
@@ -225,6 +408,10 @@
                                placeholder="Write a message…" aria-label="Message" required>
                         <button class="btn btn-sm btn-primary" type="submit">Send</button>
                     </form>
+                    <p class="small text-muted mt-2 mb-0">
+                        Support is on this thread, and the provider joins it once you are
+                        linked.
+                    </p>
                 </div>
             </div>
             {% endif %}
@@ -247,44 +434,170 @@
                         Never share this number with the client. Introduce them yourself.
                     </p>
                     <div class="d-grid gap-2">
+                        {% if provider_whatsapp_url %}
+                        {#
+                          A wa.me deep link, not digits to retype into a browser. It
+                          opens WhatsApp on the provider's number with the interest
+                          message already written. Admin-only because it is built from
+                          provider_phone, which is passed to nobody else.
+                        #}
+                        <a class="btn btn-sm btn-success" target="_blank" rel="noopener"
+                           href="{{ provider_whatsapp_url }}">
+                            <i class="fab fa-whatsapp me-1"></i>WhatsApp the provider
+                        </a>
+                        {% endif %}
                         <a class="btn btn-sm btn-outline-primary"
                            href="{{ url_for('admin_service_requests') }}">Open the linking desk</a>
                         <a class="btn btn-sm btn-outline-secondary"
                            href="{{ url_for('admin_service_catalogue') }}">Service catalogue</a>
                     </div>
+                    <p class="small text-muted mt-2 mb-0">
+                        Shape: <strong>{{ spec.label }}</strong> — paid
+                        {{ 'to the provider' if service.pays_provider_direct else 'on the platform' }},
+                        {{ 'up front' if service.pays_upfront else 'after the service' }}.
+                    </p>
                 </div>
             </div>
             {% endif %}
 
-            {% if direct_contact and current_user.is_authenticated and not is_owner and service.price %}
+            {#
+              Booking straight through, for the profiles where that is honest. Gated on
+              the profile as well as the setting: a barber and a landlord are paid in
+              person, and a ticket has its own card above, so for those three this
+              button could only ever flash a refusal from order_service. A button that
+              exists to say no is worse than no button.
+            #}
+            {% if direct_contact and current_user.is_authenticated and not is_owner
+                  and service.price and spec.flow != 'buy' and not service.pays_provider_direct %}
             <div class="card border-0 shadow-sm mb-3">
                 <div class="card-body">
                     <h6 class="mb-2"><i class="fas fa-shield-halved me-1"></i>Pay through the platform</h6>
                     <p class="small text-muted mb-2">
-                        Book the job here and we hold the payment until it is done.
+                        {% if service.pays_upfront %}
+                        Pay now and the provider starts straight away — we hold the money until
+                        it is delivered.
+                        {% else %}
+                        Book the job here and pay once it is done. We hold the payment either way.
+                        {% endif %}
                     </p>
                     <form method="POST" action="{{ url_for('order_service', service_id=service.id) }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                         <input class="form-control form-control-sm mb-2" name="requirements"
                                maxlength="500" placeholder="Anything the provider should know">
+                        {% if service.pays_upfront %}
+                        <input class="form-control form-control-sm mb-2" name="phone" type="tel"
+                               inputmode="numeric" maxlength="30" aria-label="M-Pesa number"
+                               value="{{ current_user.phone or '' }}" placeholder="M-Pesa 07XXXXXXXX">
+                        {% endif %}
                         <button class="btn btn-success btn-sm w-100">
-                            Book for KSh {{ "{:,.0f}".format(service.price) }}
+                            {% if service.pays_upfront %}Pay KSh
+                            {{ "{:,.0f}".format(service.price + (service.delivery_fee or 0)) }}
+                            {% else %}Book for KSh {{ "{:,.0f}".format(service.price) }}{% endif %}
                         </button>
                     </form>
                 </div>
             </div>
             {% endif %}
 
+            {#
+              The viewer's own orders on this listing. A paid ticket shows the code
+              somebody reads at the gate; an unpaid pay-after order shows the Pay
+              button. Nothing here for a visitor with no orders, and nothing at all
+              for the two profiles that never create an order.
+            #}
+            {% if my_orders %}
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-header bg-white">
+                    <h6 class="mb-0"><i class="fas fa-receipt me-1"></i>Your orders on this</h6>
+                </div>
+                <ul class="list-group list-group-flush small">
+                    {% for order in my_orders %}
+                    <li class="list-group-item">
+                        <div class="d-flex justify-content-between align-items-baseline">
+                            <span>
+                                {% if order.quantity and order.quantity > 1 %}{{ order.quantity }} × {% endif %}
+                                {{ order.created_at.strftime('%d %b %Y') if order.created_at else '' }}
+                            </span>
+                            <span class="fw-bold">KSh {{ "{:,.0f}".format(order.amount or 0) }}</span>
+                        </div>
+                        {% if order.is_paid %}
+                        <div class="mt-1">
+                            <span class="badge bg-success">Paid</span>
+                            {% if order.ticket_code %}
+                            <div class="mt-1">
+                                Ticket code:
+                                <code class="fs-6 user-select-all">{{ order.ticket_code }}</code>
+                                <div class="text-muted">Show this at the gate.</div>
+                            </div>
+                            {% endif %}
+                            {% if order.status == 'oversold_refund_due' %}
+                            <div class="alert alert-warning small mt-2 mb-0">
+                                This band filled before your payment landed. Your money is safe
+                                and a refund is being arranged — an admin will contact you.
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% elif order.payment_status == 'failed' %}
+                        <div class="mt-1">
+                            <span class="badge bg-danger">Payment failed</span>
+                            <form method="POST" class="d-flex gap-2 mt-2"
+                                  action="{{ url_for('pay_service_order', order_id=order.id) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                <input class="form-control form-control-sm" name="phone" type="tel"
+                                       inputmode="numeric" maxlength="30" aria-label="M-Pesa number"
+                                       value="{{ current_user.phone or '' }}" placeholder="07XXXXXXXX">
+                                <button class="btn btn-sm btn-outline-success" type="submit">Retry</button>
+                            </form>
+                        </div>
+                        {% else %}
+                        <div class="mt-1">
+                            <span class="badge bg-warning text-dark">Unpaid</span>
+                            <form method="POST" class="d-flex gap-2 mt-2"
+                                  action="{{ url_for('pay_service_order', order_id=order.id) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                <input class="form-control form-control-sm" name="phone" type="tel"
+                                       inputmode="numeric" maxlength="30" aria-label="M-Pesa number"
+                                       value="{{ current_user.phone or '' }}" placeholder="07XXXXXXXX">
+                                <button class="btn btn-sm btn-success" type="submit">Pay</button>
+                            </form>
+                        </div>
+                        {% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+
+            {#
+              The closing note, per profile. It used to end on "Take your items to the
+              location shown above" for anything without pickup, which is nonsense on a
+              ticket, a haircut and a rented room. spec.blurb is the profile's own
+              sentence, and the payment line after it is the anti-fraud rule stated in
+              the terms of the profile it actually applies to.
+            #}
             <div class="card border-0 bg-light">
                 <div class="card-body small text-muted">
                     <i class="fas fa-circle-info me-1"></i>
-                    {% if service.pickup_required and service.pickup_via_platform %}
+                    {#
+                      Gated on pickup_display, not on pickup_required alone: that column
+                      survives on a listing whose category was later retagged, and this
+                      is the one branch that would put the word "pickup" back on a page
+                      whose profile has no such idea.
+                    #}
+                    {% if service.pickup_display and service.pickup_required and service.pickup_via_platform %}
                     Our courier collects for this service and the provider pays that leg — you
                     are not charged for the collection.
-                    {% elif service.pickup_required %}
+                    {% elif service.pickup_display and service.pickup_required %}
                     Pickup is arranged by the provider.
                     {% else %}
-                    Take your items to the location shown above.
+                    {{ spec.blurb }}
+                    {% endif %}
+                    {% if service.pays_provider_direct %}
+                    <div class="mt-2 text-danger-emphasis">
+                        <i class="fas fa-triangle-exclamation me-1"></i>
+                        You pay this provider directly — never before you have received the
+                        service.
+                    </div>
                     {% endif %}
                 </div>
             </div>
@@ -299,7 +612,6 @@
     var form = document.getElementById('contactForm');
     var openBtn = document.getElementById('openThreadBtn');
     var message = document.getElementById('contactMsg');
-    var waButton = document.getElementById('waBtn');
     var threadCard = document.getElementById('threadCard');
     var threadBody = document.getElementById('threadBody');
     var threadForm = document.getElementById('threadForm');
@@ -326,19 +638,32 @@
         return holder.innerHTML;
     }
 
-    function renderMessages(rows) {
+    function renderMessages(rows, meta) {
+        // The welcome sentence is rendered from the server's copy of it as a header,
+        // never stored as a message row: there is then no "which admin sent it"
+        // problem when nobody is on the desk, no duplicate when the thread is
+        // re-read, and nothing for anyone to edit away.
+        var head = '';
+        if (meta && meta.welcome) {
+            head = '<div class="alert alert-light border small py-2 mb-2">' +
+                escapeHtml(meta.welcome) + '</div>';
+        }
         if (!rows.length) {
-            threadBody.innerHTML = '<p class="text-muted small mb-0">' +
-                'No replies yet. An admin will answer here.</p>';
+            threadBody.innerHTML = head +
+                '<p class="text-muted small mb-0">No replies yet — we will answer here.</p>';
             return;
         }
-        var html = '';
+        var html = head;
         rows.forEach(function (row) {
-            var mine = !row.from_admin;
+            var mine = !row.from_admin && !row.from_provider;
+            var who = row.from_provider ? 'Provider' : (row.from_admin ? 'Support' : '');
             html += '<div class="d-flex mb-2 ' + (mine ? 'justify-content-end' : '') + '">' +
                 '<div class="px-2 py-1 rounded small ' +
-                (mine ? 'bg-primary text-white' : 'bg-light border') +
-                '" style="max-width:85%">' + escapeHtml(row.body) + '</div></div>';
+                (mine ? 'bg-primary text-white'
+                      : (row.from_provider ? 'bg-success-subtle border' : 'bg-light border')) +
+                '" style="max-width:85%">' +
+                (who ? '<div class="fw-bold" style="font-size:.72rem">' + who + '</div>' : '') +
+                escapeHtml(row.body) + '</div></div>';
         });
         threadBody.innerHTML = html;
         threadBody.scrollTop = threadBody.scrollHeight;
@@ -349,7 +674,15 @@
         fetch(threadUrl(requestId), {headers: {'Accept': 'application/json'}})
             .then(function (response) { return response.json(); })
             .then(function (data) {
-                if (data.success) { renderMessages(data.messages || []); }
+                if (!data.success) { return; }
+                renderMessages(data.messages || [], data);
+                // A closed request will not change again, so stop asking. This is the
+                // difference between a phone left on this page costing nothing and
+                // costing a request every twelve seconds until the tab is shut.
+                if (data.status === 'closed' && poll) {
+                    clearInterval(poll);
+                    poll = null;
+                }
             })
             .catch(function () { /* a dropped poll is not worth an error banner */ });
     }
@@ -360,8 +693,23 @@
         loadThread();
         // 12s, not 2s: this is a human conversation with an admin, and a tighter
         // poll would multiply into real load once thousands of clients wait at once.
-        if (!poll) { poll = setInterval(loadThread, 12000); }
+        // The tick is skipped outright while the tab is hidden, so a phone in a
+        // pocket stops polling instead of running all afternoon.
+        if (!poll) {
+            poll = setInterval(function () {
+                if (!document.hidden) { loadThread(); }
+            }, 12000);
+        }
     }
+
+    // Returning to the tab should show what arrived while it was away, immediately
+    // rather than up to twelve seconds later.
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden && requestId && threadCard
+                && !threadCard.classList.contains('d-none')) {
+            loadThread();
+        }
+    });
 
     if (openBtn) {
         openBtn.addEventListener('click', function () { showThread(requestId); });
@@ -387,16 +735,11 @@
                         button.disabled = false;
                         return;
                     }
-                    if (data.mode === 'whatsapp') {
-                        // The exact sentence the server sent, shown verbatim.
-                        say(data.reply, 'warning');
-                        if (waButton) {
-                            waButton.classList.remove('d-none');
-                            if (data.whatsapp_url) { waButton.setAttribute('href', data.whatsapp_url); }
-                        }
-                        form.classList.add('d-none');
-                        return;
-                    }
+                    // One branch, because the server has one. There used to be a
+                    // `data.mode === 'whatsapp'` arm here that showed the client a
+                    // sentence about our agents being busy and a WhatsApp button; the
+                    // response is byte-identical now whether or not anyone is on the
+                    // desk, and the routing to WhatsApp happens behind the client.
                     say(data.reply || 'An admin will reply here shortly.', 'success');
                     form.classList.add('d-none');
                     if (data.request_id) { showThread(data.request_id); }
@@ -418,7 +761,7 @@
                 .then(function (payload) {
                     if (payload.success) {
                         threadForm.reset();
-                        renderMessages(payload.messages || []);
+                        renderMessages(payload.messages || [], payload);
                     }
                 })
                 .catch(function () { /* the message stays in the box to retry */ });

@@ -22,6 +22,7 @@ would raise DetachedInstanceError in Jinja fails here rather than in production.
 
 import os
 import sys
+from datetime import datetime, timedelta
 
 os.environ.setdefault('DISABLE_BACKGROUND_JOBS', '1')
 os.environ.setdefault('CACHE_TYPE', 'NullCache')
@@ -31,8 +32,8 @@ from sqlalchemy import event
 
 import main as app_module
 from main import app, db, invalidate_service_caches, nav_categories
-from models import (Category, Product, ServiceCatalogueItem, ServiceListing,
-                    User)
+from models import (Category, DeliveryAssignment, DriverProfile, Order, Product, Raffle,
+                    RaffleTicket, ServiceCatalogueItem, ServiceListing, Setting, User)
 
 FAILURES = []
 TAG = 'pagesmoke'
@@ -73,6 +74,26 @@ def teardown():
         ServiceCatalogueItem.query.filter(
             ServiceCatalogueItem.key.like(f'{TAG}%')).delete(
             synchronize_session=False)
+        # Delivery and raffle rows before the users, products and orders they point at:
+        # every one of these foreign keys is not-null, so clearing a parent first has
+        # Postgres refuse the delete and roll the whole cleanup back.
+        driver_ids = [row[0] for row in db.session.query(DriverProfile.id).join(
+            User, DriverProfile.user_id == User.id).filter(
+            User.username.like(f'{TAG}%')).all()] or [0]
+        order_ids = [row[0] for row in db.session.query(Order.id).filter(
+            Order.order_number.like(f'{TAG}%')).all()] or [0]
+        raffle_ids = [row[0] for row in db.session.query(Raffle.id).filter(
+            Raffle.title.like(f'{TAG}%')).all()] or [0]
+        DeliveryAssignment.query.filter(db.or_(
+            DeliveryAssignment.driver_id.in_(driver_ids),
+            DeliveryAssignment.order_id.in_(order_ids))).delete(
+            synchronize_session=False)
+        DriverProfile.query.filter(DriverProfile.id.in_(driver_ids)).delete(
+            synchronize_session=False)
+        Order.query.filter(Order.id.in_(order_ids)).delete(synchronize_session=False)
+        RaffleTicket.query.filter(RaffleTicket.raffle_id.in_(raffle_ids)).delete(
+            synchronize_session=False)
+        Raffle.query.filter(Raffle.id.in_(raffle_ids)).delete(synchronize_session=False)
         Product.query.filter(Product.slug.like(f'{TAG}%')).delete(
             synchronize_session=False)
         User.query.filter(User.username.like(f'{TAG}%')).delete(
@@ -164,6 +185,8 @@ def run():
     check_price_check()
     check_shop_cards()
     check_services_page()
+    check_ads_pages()
+    check_unrendered_pages()
 
 
 def check_shop_cards():
@@ -450,6 +473,167 @@ def check_price_check():
             limiter.enabled = was_enabled
         db.session.remove()
         admin_ctx.pop()
+
+
+def check_ads_pages():
+    """Render the two ad pages once each.
+
+    They are here for the dullest possible reason: both templates were edited and
+    neither was ever rendered afterwards, and nothing else in the suite loads them.
+    A Jinja typo or a renamed field on AdCampaign is a 500 on a page a seller pays
+    money through, and it would sit there unnoticed because every other check walks
+    past it.
+
+    Not a query-count check - these pages are not on the anonymous hot path. All it
+    asks is that they answer 200 and render their own content rather than an error
+    page Flask happens to return with a 200.
+    """
+    print('the ad pages still render')
+    seller = User(username=f'{TAG}_adseller', email=f'{TAG}_adseller@example.invalid',
+                  is_verified_seller=True, seller_status='verified', is_active=True)
+    seller.set_password('x')
+    admin = User(username=f'{TAG}_adadmin', email=f'{TAG}_adadmin@example.invalid',
+                 is_admin=True, admin_level='super_admin', is_active=True)
+    admin.set_password('x')
+    db.session.add_all([seller, admin])
+    db.session.commit()
+    seller_id, admin_id = seller.id, admin.id
+
+    was = Setting.get('seller_ads_enabled', None)
+    Setting.set('seller_ads_enabled', '1')
+    db.session.commit()
+    try:
+        for who, user_id, path, marker in (
+                ('a verified seller', seller_id, '/seller/ads', 'ad'),
+                ('an admin', admin_id, '/admin/ads', 'ad')):
+            # One app context per identity, for the reason check_price_check states:
+            # Flask-Login caches the loaded user on ``g``, so a reused context serves
+            # the previous identity and every assertion below measures a redirect.
+            ctx = app.app_context()
+            ctx.push()
+            try:
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session['_user_id'] = str(user_id)
+                        session['_fresh'] = True
+                    response = client.get(path, follow_redirects=False)
+                    body = response.get_data(as_text=True).lower()
+                check(f'{path} renders for {who}', response.status_code == 200,
+                      f'{response.status_code} -> {response.headers.get("Location")}')
+                check(f'and it is the {path} page, not an error body',
+                      marker in body and 'traceback' not in body,
+                      len(body))
+            finally:
+                db.session.remove()
+                ctx.pop()
+    finally:
+        # Put the switch back exactly as it was, including absent: leaving it on would
+        # change what the next script and the next developer see on /seller/ads.
+        if was is None:
+            Setting.query.filter_by(key='seller_ads_enabled').delete()
+        else:
+            Setting.set('seller_ads_enabled', was)
+        db.session.commit()
+
+
+def check_unrendered_pages():
+    """Render /admin/raffles and a driver console once each, with a row in the loop.
+
+    Both templates just had their buyer-count and job-count expressions changed, and
+    like the ad pages above, nothing in the suite loads either one. A fixture with an
+    empty list would not help: an error inside ``{% for %}`` never executes, so these
+    deliberately seed one raffle and one assignment so the loop body actually runs.
+
+    The driver console earns its place twice over - it is reached by a token rather
+    than a login, so it is the one page in the platform a 500 could hide on
+    indefinitely with no admin ever seeing it.
+    """
+    print('the raffle desk and the driver console still render')
+    seller = User(username=f'{TAG}_rseller', email=f'{TAG}_rseller@example.invalid',
+                  is_verified_seller=True, seller_status='verified', is_active=True)
+    seller.set_password('x')
+    admin = User(username=f'{TAG}_radmin', email=f'{TAG}_radmin@example.invalid',
+                 is_admin=True, admin_level='super_admin', is_active=True)
+    admin.set_password('x')
+    hand = User(username=f'{TAG}_rdriver', email=f'{TAG}_rdriver@example.invalid',
+                is_active=True)
+    hand.set_password('x')
+    db.session.add_all([seller, admin, hand])
+    db.session.commit()
+    seller_id, admin_id, hand_id = seller.id, admin.id, hand.id
+
+    product = Product(name=f'{TAG} raffle prize', slug=f'{TAG}-raffle-prize',
+                      description='A prize.', short_description='A prize',
+                      selling_price=5000.0, buying_price=4000.0, stock=1,
+                      seller_id=seller_id, commission_percent=15.0, is_active=True)
+    db.session.add(product)
+    db.session.commit()
+    raffle = Raffle(product_id=product.id, seller_id=seller_id,
+                    title=f'{TAG} desk raffle', product_value=5000.0,
+                    ticket_price=50.0, total_tickets=100, min_participants=10,
+                    status='active', ends_at=datetime.utcnow() + timedelta(days=5))
+    db.session.add(raffle)
+    order = Order(user_id=hand_id, amount_paid=100.0, order_number=f'{TAG}-DRV-1',
+                  payment_status='completed', status='processing')
+    driver = DriverProfile(user_id=hand_id, display_name=f'{TAG} rider',
+                           phone='+254700111222', is_active=True,
+                           tracking_token=f'{TAG}-token-1')
+    db.session.add_all([order, driver])
+    db.session.commit()
+    # One ticket, so the buyer count on the desk is a number somebody could get wrong
+    # rather than a zero that is right by accident.
+    db.session.add(RaffleTicket(raffle_id=raffle.id, user_id=hand_id, ticket_number=1))
+    db.session.add(DeliveryAssignment(order_id=order.id, driver_id=driver.id,
+                                      status='assigned',
+                                      destination_label=f'{TAG} destination'))
+    db.session.commit()
+    token = driver.tracking_token
+
+    # One app context per identity, same reason as check_ads_pages.
+    ctx = app.app_context()
+    ctx.push()
+    try:
+        with app.test_client() as client:
+            with client.session_transaction() as session:
+                session['_user_id'] = str(admin_id)
+                session['_fresh'] = True
+            response = client.get('/admin/raffles', follow_redirects=False)
+            body = response.get_data(as_text=True)
+        check('/admin/raffles renders for an admin', response.status_code == 200,
+              f'{response.status_code} -> {response.headers.get("Location")}')
+        check('and the raffle row is on it, so the loop body ran',
+              f'{TAG} desk raffle' in body, len(body))
+        flat = ' '.join(body.split())
+        # str.find returns -1 for absent, and flat[-1:] is a truthy single character, so
+        # `or` never reaches the fallback. Tested explicitly instead: this detail only
+        # prints when the check has already failed, which is the moment it has to be
+        # readable rather than one stray character of the page footer.
+        at = flat.find('tickets /')
+        check('with the buyer count the grouped query produced',
+              '1 of 10 users' in flat,
+              flat[at:at + 70] if at >= 0 else 'no "tickets /" anywhere on the page')
+    finally:
+        db.session.remove()
+        ctx.pop()
+
+    ctx = app.app_context()
+    ctx.push()
+    try:
+        with app.test_client() as anon:
+            response = anon.get(f'/driver/{token}', follow_redirects=False)
+            body = response.get_data(as_text=True)
+        check('a driver console renders from its token alone',
+              response.status_code == 200, response.status_code)
+        check('and the assignment is on it, so the loop body ran',
+              f'{TAG} destination' in body, len(body))
+        check('the job count is the real total, not the length of the visible list',
+              '<span class="badge bg-primary">1</span>' in body,
+              body[body.find('My deliveries'):body.find('My deliveries') + 120])
+        check('and a bad token is a 404, not a console',
+              anon.get('/driver/not-a-real-token').status_code == 404)
+    finally:
+        db.session.remove()
+        ctx.pop()
 
 
 def main():

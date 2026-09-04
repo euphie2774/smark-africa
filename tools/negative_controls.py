@@ -1,19 +1,25 @@
-"""Prove the newest wiring_smoke checks by reintroducing the bugs they exist to catch.
+"""Prove the newest smoke checks by reintroducing the bugs they exist to catch.
 
 A check that has never been seen to fail is not evidence. Every one of these was
 written after the fact - one because a CSS fix could not reach a phone that had already
 cached the broken stylesheet, one because a routine bounded-read fix would have silently
 stopped paying sellers past row 100, one because a keystroke handler closed the phone
 keyboard mid-word, one because Flask serves the whole static tree and the checks that
-guard a paid download live on a different URL - so all of them are exactly the kind of
-assertion that can be subtly inert and still print `[ok  ]`.
+guard a paid download live on a different URL, two because a services page told a concert
+ticket buyer there was no pickup and an unattended request told nobody at all, and two because a
+public grid's cost was set by how well its raffles had sold - so all of
+them are exactly the kind of assertion that can be subtly inert and still print `[ok  ]`.
 
-Each control patches the source *in bytes*, runs `tools/wiring_smoke.py`, and restores
-the original bytes from a try/finally. Byte-level rather than line-level so the restore
-is provably exact on a CRLF checkout, and try/finally rather than a copy-and-move so
-there is no window where an interrupted run leaves the tree patched. The md5 of every
-touched file is printed before and after; if a pair does not match, that is the only
-line in the output that matters.
+Each control names the smoke script that owns its check, so the first five run
+`tools/wiring_smoke.py`, the services pair run `tools/services_smoke.py`, and the public-list pair
+run `tools/list_page_smoke.py`.
+
+Each control patches the source *in bytes*, runs that script, and restores the original
+bytes from a try/finally. Byte-level rather than line-level so the restore is provably
+exact on a CRLF checkout, and try/finally rather than a copy-and-move so there is no
+window where an interrupted run leaves the tree patched. The md5 of every touched file is
+printed before and after; if a pair does not match, that is the only line in the output
+that matters.
 
 Two controls point at the same check on purpose. That check asserts both that the
 private upload folders are refused and that the public ones are not, and a fix for
@@ -34,6 +40,8 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON = os.path.join(REPO, 'venv', 'Scripts', 'python.exe')
 SMOKE = os.path.join('tools', 'wiring_smoke.py')
+SERVICES_SMOKE = os.path.join('tools', 'services_smoke.py')
+LIST_SMOKE = os.path.join('tools', 'list_page_smoke.py')
 
 # The check each control is aimed at. Matched against the failing output so a control
 # that trips some *other* check - a real regression, or a patch that broke the parse -
@@ -91,6 +99,68 @@ CONTROLS = [
                'and inspo too, which passes any test that only asks whether private '
                'things are blocked while blanking every image on the shop',
     },
+    # The last two run services_smoke instead, because that is where the checks they
+    # aim at live. Both reintroduce a state the platform was actually shipped in.
+    {
+        'name': 'a ticket told there is no pickup is caught',
+        'file': 'models.py',
+        'smoke': SERVICES_SMOKE,
+        # One line, no newline in the target: main.py is LF but models.py need not be,
+        # and a multi-line target silently finds nothing on a CRLF checkout - which is
+        # reported as INCONCLUSIVE, not as a pass, but proves nothing either way.
+        'old': b"        if not self.has_field('pickup'):",
+        'new': b"        if False and not self.has_field('pickup'):",
+        'expect': 'says nothing about pickup',
+        'why': 'this is the pre-profile state exactly: a concert ticket, a haircut, a '
+               'tutoring hour and a rented room each told the client "No pickup '
+               'offered, take to the location as directed", which is the complaint '
+               'the six profiles were written to answer',
+    },
+    {
+        'name': 'an unattended request that notifies nobody is caught',
+        'file': 'main.py',
+        'smoke': SERVICES_SMOKE,
+        'old': b'        try:\n'
+               b'            notify_service_provider(link_request)\n'
+               b'        except Exception:\n'
+               b"            logger.exception('automatic provider notify failed for %s', request_id)\n",
+        'new': b'        pass\n',
+        'expect': 'the provider was notified without anyone pressing anything',
+        'why': 'without it a request that lands on an empty desk sits there: the MVP '
+               'asked for the provider to be messaged "immediately it lands ... and '
+               'it does not need clicking any button or monitoring", and the client '
+               'still gets the same cheerful welcome either way, so nothing else in '
+               'the product would show it had stopped',
+    },
+    # And two on the public bounded reads, which run list_page_smoke. Both are the
+    # shipped state of a page anonymous traffic lands on directly.
+    {
+        'name': 'a grid that loads every ticket to count buyers is caught',
+        'file': 'templates/raffles.html',
+        'smoke': LIST_SMOKE,
+        'old': b'{% set buyer_count = buyer_counts.get(raffle.id, 0) %}',
+        'new': b"{% set buyer_count = raffle.tickets|map(attribute='user_id')"
+               b'|unique|list|length %}',
+        'expect': 'did not get more expensive as raffles were added',
+        'why': 'this is what the page shipped as, and it is the reason the check '
+               'measures /raffles twice instead of just counting cards: the lazy load '
+               'is one query per card whatever the tickets do, so nothing about the '
+               'query count says the queries got bigger. The card count is capped now, '
+               'which bounds how many of these loads happen - it does nothing about '
+               'the fifty thousand rows inside one of them',
+    },
+    {
+        'name': 'an unbounded row of ticket badges is caught',
+        'file': 'main.py',
+        'smoke': LIST_SMOKE,
+        'old': b'            RaffleTicket.ticket_number.asc()).limit('
+               b'RAFFLE_TICKET_DISPLAY_LIMIT).all()',
+        'new': b'            RaffleTicket.ticket_number.asc()).all()',
+        'expect': 'badges for',
+        'why': 'raffle_buy_ticket takes 50 tickets a press and caps no total, so this '
+               'is the one list on the page that a single buyer can grow without limit '
+               'and without anyone noticing - and the buyer paid for every row of it',
+    },
 ]
 
 
@@ -98,9 +168,9 @@ def md5(path):
     return hashlib.md5(io.open(path, 'rb').read()).hexdigest()
 
 
-def run_smoke():
-    """Run the wiring smoke and return (exit code, the lines worth reading)."""
-    proc = subprocess.run([PYTHON, '-u', SMOKE], cwd=REPO,
+def run_smoke(script=SMOKE):
+    """Run a smoke script and return (exit code, the lines worth reading)."""
+    proc = subprocess.run([PYTHON, '-u', script], cwd=REPO,
                           capture_output=True, text=True)
     blob = (proc.stdout or '') + (proc.stderr or '')
     keep = []
@@ -127,6 +197,7 @@ def main():
         print('')
         print('--- %s' % control['name'])
         print('    file       : %s  md5 %s' % (control['file'], before))
+        print('    smoke      : %s' % control.get('smoke', SMOKE))
         print('    why it     : %s' % control['why'])
 
         if count != 1:
@@ -140,13 +211,17 @@ def main():
 
         try:
             io.open(path, 'wb').write(raw.replace(control['old'], control['new']))
-            code, lines, blob = run_smoke()
+            code, lines, blob = run_smoke(control.get('smoke', SMOKE))
         finally:
             io.open(path, 'wb').write(raw)
 
         after = md5(path)
         restored = after == before
-        named = control['expect'].lower() in blob.lower()
+        # Matched against the lines that are *not* passing checks. Searching the whole
+        # blob would count the check's own `[ok  ]` line as evidence that it fired,
+        # which is the one mistake this whole script exists to catch.
+        named = any(control['expect'].lower() in line.lower()
+                    for line in blob.splitlines() if '[ok' not in line.lower())
 
         print('    smoke exit : %d' % code)
         for line in lines[:12]:

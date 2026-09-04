@@ -53,7 +53,9 @@ from models import db, User, Category, Product, Cart, Order, OrderItem, \
     EventTicket, FeaturedPlacementBid, ServiceListing, ServiceOrder, VendorOnboardingFee, PlatformRevenue, AuditLog, \
     ShippingZone, ShippingQuote, DriverProfile, DriverLocationPing, DeliveryAssignment, \
     StorefrontFollow, SocialAdPost, PromoCode, PromoCodeRedemption, PhoneOwnershipEvidence, \
-    ServiceCatalogueItem, ServiceLinkRequest, ServiceLinkMessage, \
+    ServiceCatalogueItem, ServiceLinkRequest, ServiceLinkMessage, ServicePriceTier, \
+    SERVICE_FULFILMENT_PROFILES, SERVICE_PROFILE_BY_KEY, DEFAULT_SERVICE_PROFILE, \
+    service_profile_spec, profile_has_field, \
     Invoice, InvoiceItem, InvoicePayment, generate_invoice_token
 
 from scale import (CACHE_MISS, CounterBuffer, JobLease, SingleFlight, TTLCache, bool_env,
@@ -6068,6 +6070,39 @@ ADMIN_DASHBOARD_LIST_LIMIT = int_env('ADMIN_DASHBOARD_LIST_LIMIT', 100)
 DISBURSEMENT_LIST_LIMIT = int_env('DISBURSEMENT_LIST_LIMIT', 100)
 DISBURSEMENT_CYCLE_BATCH = int_env('DISBURSEMENT_CYCLE_BATCH', 500)
 
+# The same treatment for the public pages, which matter for a different reason. A staff
+# page is slow for one admin; these are reached by anonymous traffic, so an unbounded
+# read here is a page whose cost is set by how much content the operator has ever
+# published, served to everyone at once.
+#
+#   PUBLIC_LIST_LIMIT bounds the raffle and event grids. Both look operator-controlled
+#   and therefore safe, which is exactly why they were left alone twice: the row count
+#   only ever grows, nobody watching a dashboard would see it, and the page that
+#   eventually goes slow is one of the two an outside visitor is most likely to open.
+#
+#   RAFFLE_TICKET_DISPLAY_LIMIT bounds the ticket badges on a raffle page. This is the
+#   one on this list that grows from a single person's own behaviour rather than the
+#   operator's: raffle_buy_ticket takes up to 50 tickets a press and does not cap the
+#   total, so a determined buyer renders their own thousands of badges. The count is
+#   taken separately and the page says how many of how many, because "you hold 1,400
+#   tickets" is the fact the buyer came for and a truncated row of badges is not it.
+#
+#   DRIVER_ASSIGNMENT_LIST_LIMIT bounds the driver console's job list. Filtered to the
+#   three in-flight statuses, so a long list means a dispatch problem rather than
+#   history piling up - but the phone holding that page is the worst hardware on the
+#   platform and the least able to render whatever the dispatch problem produced.
+PUBLIC_LIST_LIMIT = int_env('PUBLIC_LIST_LIMIT', 60)
+RAFFLE_TICKET_DISPLAY_LIMIT = int_env('RAFFLE_TICKET_DISPLAY_LIMIT', 200)
+DRIVER_ASSIGNMENT_LIST_LIMIT = int_env('DRIVER_ASSIGNMENT_LIST_LIMIT', 50)
+
+# Bounded at the door instead of on the read, and the difference is the whole point.
+# api_shipping_cost and checkout both price a cart line by line, so a cap on *reading*
+# the cart would quote and charge for the first N lines and deliver all of them - the
+# platform silently paying the difference, which is the withdrawal-batch mistake in a
+# different costume. A cart may hold this many distinct products; quantity per line is
+# already capped at 99 in add_to_cart.
+CART_MAX_LINES = int_env('CART_MAX_LINES', 100)
+
 # Every product page view used to be a write and a commit on the product row, so
 # the more popular a listing got the more its viewers serialised behind each other
 # on the same lock. Now the deltas are held per worker and written together.
@@ -9191,6 +9226,15 @@ def add_to_cart(product_id=None):
     if existing:
         existing.quantity += quantity
     else:
+        # Only a new line can push the cart over: adding more of something already in
+        # there costs no extra row, and no extra work at checkout either.
+        if Cart.query.filter_by(user_id=current_user.id).count() >= CART_MAX_LINES:
+            message = (f'Your cart already holds {CART_MAX_LINES} different items. '
+                       'Check out or remove something to add more.')
+            if not wants_json:
+                flash(message, 'warning')
+                return redirect(url_for('cart'))
+            return jsonify({'success': False, 'error': message}), 400
         cart_item = Cart(user_id=current_user.id, product_id=product_id, quantity=quantity)
         db.session.add(cart_item)
 
@@ -9340,6 +9384,23 @@ def order_for_checkout_id(checkout_request_id):
         except (TypeError, ValueError):
             return None
     return None
+
+
+def service_order_for_checkout_id(checkout_request_id):
+    """Resolve a Daraja checkout id back to its ServiceOrder.
+
+    Deliberately a second function rather than teaching order_for_checkout_id to
+    return either kind. Every caller of that one reaches straight for
+    `.order_number`, `.amount_paid`, `.items` or `.shipping_status`, none of which a
+    ServiceOrder has - making it polymorphic would put a ServiceOrder into code
+    written for an Order and the failure would surface as an AttributeError inside a
+    payment callback, which is the worst place on the site to find one. The product
+    path keeps behaving byte-for-byte as it did.
+    """
+    if not checkout_request_id:
+        return None
+    return ServiceOrder.query.filter_by(
+        checkout_request_id=str(checkout_request_id)[:60]).first()
 
 
 def abandon_unpaid_order(order, reason=''):
@@ -9889,11 +9950,47 @@ def mpesa_callback():
         if checkout_id:
             order = order_for_checkout_id(checkout_id)
 
+        if not order and checkout_id:
+            # A service payment, not a product order. Handled as an early return
+            # rather than by teaching the code below to cope with two row types: the
+            # product path reads .items, .shipping_status and .order_number, none of
+            # which a ServiceOrder has. See service_order_for_checkout_id.
+            service_order = service_order_for_checkout_id(checkout_id)
+            if service_order:
+                if result_code == 0:
+                    receipt = ''
+                    paid_amount = 0
+                    for item in (stk_callback.get('CallbackMetadata', {}).get('Item', []) or []):
+                        if item.get('Name') == 'MpesaReceiptNumber':
+                            receipt = item.get('Value', '')
+                        elif item.get('Name') == 'Amount':
+                            paid_amount = item.get('Value', 0)
+                    # Idempotent inside finalize_paid_service_order, so a replayed
+                    # callback - which Safaricom does send - takes no second seat and
+                    # writes no second revenue row.
+                    finalize_paid_service_order(service_order, receipt, paid_amount)
+                elif service_order.payment_status == 'pending':
+                    service_order.payment_status = 'failed'
+                    service_order.status = 'payment_failed'
+                    try:
+                        db.session.commit()
+                    except SQLAlchemyError:
+                        db.session.rollback()
+                        logger.exception('service order %s failure not recorded',
+                                         service_order.id)
+                return jsonify({'ResultCode': 0, 'ResultDesc': 'Success'})
+
+        # Initialised before the success branch, not inside it. settle_invoice_stk
+        # below is called unconditionally and takes both, so on a *failed* callback
+        # they were previously unbound - the NameError landed in the outer except,
+        # which meant a failed invoice payment was never recorded as failed and
+        # Safaricom was told ResultCode 1. Found while adding the service branch.
+        receipt = ''
+        amount = 0
+        phone = ''
+
         if result_code == 0:
             metadata = stk_callback.get('CallbackMetadata', {}).get('Item', [])
-            receipt = ''
-            amount = 0
-            phone = ''
 
             for item in metadata:
                 name = item.get('Name')
@@ -11323,6 +11420,33 @@ def raffle_unique_buyer_count(raffle):
     return db.session.query(func.count(func.distinct(RaffleTicket.user_id))).filter_by(raffle_id=raffle.id).scalar() or 0
 
 
+def raffle_buyer_counts(raffles):
+    """Distinct buyers per raffle, for a page that renders several of them.
+
+    Both grids used to work this out in Jinja - ``raffle.tickets|map(attribute=
+    'user_id')|unique|list|length`` - which is one lazy load per card that pulls
+    every ticket row of that raffle into ORM objects to count the user ids the
+    database could have counted itself. It never looked like an N+1 from the
+    outside: the query count grows with the number of cards, and the cards are
+    few. What grows with the tickets is the number of rows inside each of those
+    queries, so the page gets slower the better the raffles sell, and a raffle
+    that sold fifty thousand tickets builds fifty thousand objects to print one
+    number. One grouped COUNT(DISTINCT) replaces the lot.
+    """
+    ids = [raffle.id for raffle in raffles]
+    if not ids:
+        return {}
+    rows = db.session.query(
+        RaffleTicket.raffle_id,
+        func.count(func.distinct(RaffleTicket.user_id))
+    ).filter(RaffleTicket.raffle_id.in_(ids)).group_by(RaffleTicket.raffle_id).all()
+    counted = {raffle_id: total for raffle_id, total in rows}
+    # A key for every rendered raffle, so the template reads a number instead of
+    # testing for absence: a raffle nobody has entered has no ticket rows at all
+    # and so appears in no group.
+    return {raffle_id: counted.get(raffle_id, 0) for raffle_id in ids}
+
+
 def _raffle_top_holder_ticket(raffle):
     leader = db.session.query(
         RaffleTicket.user_id,
@@ -11339,13 +11463,17 @@ def _raffle_top_holder_ticket(raffle):
 
 @app.route('/raffles')
 def raffles():
-    active_raffles = Raffle.query.filter_by(status='active').order_by(Raffle.ends_at.asc()).all()
+    active_raffles = Raffle.query.filter_by(status='active').order_by(
+        Raffle.ends_at.asc()).limit(PUBLIC_LIST_LIMIT).all()
+    active_total = Raffle.query.filter_by(status='active').count()
     completed_raffles = Raffle.query.filter_by(status='completed').order_by(Raffle.drawn_at.desc()).limit(10).all()
     user_tickets = []
     if current_user.is_authenticated:
         user_tickets = RaffleTicket.query.filter_by(user_id=current_user.id).order_by(RaffleTicket.purchased_at.desc()).limit(50).all()
     return render_template('raffles.html',
                            active_raffles=active_raffles,
+                           active_total=active_total,
+                           buyer_counts=raffle_buyer_counts(active_raffles),
                            completed_raffles=completed_raffles,
                            user_tickets=user_tickets)
 
@@ -11354,12 +11482,22 @@ def raffles():
 def raffle_detail(raffle_id):
     raffle = Raffle.query.get_or_404(raffle_id)
     user_tickets = []
+    user_ticket_total = 0
     if current_user.is_authenticated:
-        user_tickets = RaffleTicket.query.filter_by(raffle_id=raffle_id, user_id=current_user.id).all()
+        # Counted rather than len()-ed on the capped list: the badges are decoration and
+        # the number is the answer, so a buyer past the cap sees the true total even
+        # though they do not see every badge behind it.
+        user_ticket_total = RaffleTicket.query.filter_by(
+            raffle_id=raffle_id, user_id=current_user.id).count()
+        user_tickets = RaffleTicket.query.filter_by(
+            raffle_id=raffle_id, user_id=current_user.id).order_by(
+            RaffleTicket.ticket_number.asc()).limit(RAFFLE_TICKET_DISPLAY_LIMIT).all()
     participants = raffle_unique_buyer_count(raffle)
     minimum = raffle.min_participants or raffle.total_tickets or 100
     progress_pct = (participants / minimum * 100) if minimum else 0
-    return render_template('raffle_detail.html', raffle=raffle, user_tickets=user_tickets, progress_pct=progress_pct, participants=participants)
+    return render_template('raffle_detail.html', raffle=raffle, user_tickets=user_tickets,
+                           user_ticket_total=user_ticket_total,
+                           progress_pct=progress_pct, participants=participants)
 
 
 @app.route('/raffle/<int:raffle_id>/buy', methods=['POST'])
@@ -11499,8 +11637,16 @@ def admin_raffles():
         return redirect(url_for('admin_raffles'))
 
     all_raffles = Raffle.query.order_by(Raffle.created_at.desc()).limit(100).all()
+    # Deliberately not capped, unlike every other list in this sweep. This one fills a
+    # <select> an admin picks the raffle prize from, so a cap does not truncate a display
+    # - it makes every product past the cap unraffleable, with nothing on screen to say
+    # why. The bounded-read pattern is wrong here; the fix is a searchable picker that
+    # queries on input, which is a UI change rather than a one-line limit. Left honest
+    # and slow until then: it grows with the catalogue and is one admin's page, not an
+    # anonymous one, which is the only reason it can wait.
     products = Product.query.filter_by(is_active=True, is_digital=False).order_by(Product.name).all()
-    return render_template('admin/raffles.html', raffles=all_raffles, products=products)
+    return render_template('admin/raffles.html', raffles=all_raffles, products=products,
+                           buyer_counts=raffle_buyer_counts(all_raffles))
 
 
 # ========================================================================
@@ -15514,10 +15660,23 @@ def driver_console(token):
     driver = driver_for_token(token)
     if not driver:
         abort(404)
-    assignments = DeliveryAssignment.query.filter(
+    open_jobs = DeliveryAssignment.query.filter(
         DeliveryAssignment.driver_id == driver.id,
         DeliveryAssignment.status.in_(['assigned', 'picked_up', 'in_transit'])
-    ).order_by(DeliveryAssignment.assigned_at.asc()).all()
+    )
+    assignments = open_jobs.order_by(
+        DeliveryAssignment.assigned_at.asc()).limit(DRIVER_ASSIGNMENT_LIST_LIMIT).all()
+    # Oldest first and counted separately, so a driver holding more jobs than the page
+    # shows is told the number rather than left to assume the list is all of it. A job
+    # that scrolls off a delivery queue is an undelivered parcel, not a hidden row.
+    #
+    # The .asc() is load-bearing beyond the ordering, and it disagrees with the two
+    # admin-side lists (15183, 15354) that sort .desc() - do not "fix" it to match them.
+    # assignments[0] seeds the map trail below, and driver_ping attributes incoming GPS
+    # fixes to `assigned_at.asc()).first()` - the oldest open job. Sorted the other way,
+    # the console draws the trail of one order while the pings accumulate against
+    # another, and the driver watches a map that is not being fed by their own phone.
+    assignments_total = open_jobs.count()
     # Seeded so the road already travelled is on the map the moment the page
     # opens - after a reload, or after the driver comes back from another app.
     trail = driver_trail(driver.id, assignments[0].order_id if assignments else None)
@@ -15525,6 +15684,7 @@ def driver_console(token):
         'driver_console.html',
         driver=driver,
         assignments=assignments,
+        assignments_total=assignments_total,
         token=token,
         map_style_url=map_style_url(),
         ping_seconds=int(shipping_setting_float('driver_ping_seconds', 20) or 20),
@@ -18985,15 +19145,18 @@ def admin_delete_event(event_id):
 @app.route('/events')
 def public_events():
     now = datetime.utcnow()
-    events = Event.query.filter(
+    upcoming = Event.query.filter(
         Event.is_active == True,
         Event.event_date >= now
-    ).order_by(Event.event_date.asc()).all()
+    )
+    events = upcoming.order_by(Event.event_date.asc()).limit(PUBLIC_LIST_LIMIT).all()
+    events_total = upcoming.count()
     past_events = Event.query.filter(
         Event.is_active == True,
         Event.event_date < now
     ).order_by(Event.event_date.desc()).limit(10).all()
-    return render_template('events.html', events=events, past_events=past_events)
+    return render_template('events.html', events=events, events_total=events_total,
+                           past_events=past_events)
 
 
 # ========================================================================
@@ -19501,14 +19664,43 @@ def placement_bid():
 # nobody else - so it is asserted in tools/services_smoke.py rather than trusted to
 # review.
 
-# Exact wording, specified by the MVP. A module constant and not an inline string
-# because it is returned by the route, the chatbot and the keyword fallback, and
-# three copies of a sentence are three chances for one of them to drift.
-SERVICE_BUSY_MESSAGE = ('All our agents are currently busy, please reach out via '
-                        'whatsapp for immediate action.')
+# Exact wording, specified by the MVP. Module constants and not inline strings
+# because each is sent from more than one place - the route, the chatbot, the
+# keyword fallback, WhatsApp, SMS and the in-app inbox - and copies of a sentence
+# are chances for one of them to drift.
+#
+# What replaced what: there used to be a busy-desk constant here, whose sentence
+# told the client every agent was occupied and asked them to reach out on WhatsApp
+# themselves. It was returned whenever nobody was on the desk, and it is gone
+# deliberately. A client is never told the desk is empty; they get the welcome
+# message either way and the request is routed onward behind them, which is the
+# whole of "a customer will not know if there was an active admin or not".
+# tools/services_smoke.py asserts that sentence appears nowhere in the tree, so it
+# is not quoted here either - a check that its own explanation defeats is no check.
+SERVICE_CLIENT_WELCOME_MESSAGE = (
+    'Thank you for showing interest in our services. Please wait as we link you '
+    'with the provider. To avoid fraudulent activities, never pay directly to the '
+    'provider before receiving the service.'
+)
+SERVICE_PROVIDER_INTEREST_MESSAGE = (
+    'A client is interested in the service you listed. Quality service increases '
+    'your rating. Thank you for making SMARKAFRICA a trustworthy platform.'
+)
 
 SERVICE_REQUEST_RATE_LIMIT = os.environ.get('SERVICE_REQUEST_RATE_LIMIT', '20 per hour')
-SERVICE_THREAD_RATE_LIMIT = os.environ.get('SERVICE_THREAD_RATE_LIMIT', '120 per hour')
+# This endpoint is polled, not clicked, so the ceiling has to admit the poll or the
+# thread silently freezes at exactly the wrong moment - a client watching for the
+# admin's reply gets 429s and a panel that never updates, and the fetch's catch
+# swallows it. 12s between polls is 300/hour, plus sends, plus a second tab: 600
+# leaves room for all three and still stops a hammer at ten a minute. The clients
+# pause their polling when the tab is hidden and widen the gap while a thread is
+# quiet, so the steady-state cost of a waiting client is well under this.
+SERVICE_THREAD_RATE_LIMIT = os.environ.get('SERVICE_THREAD_RATE_LIMIT', '600 per hour')
+# Buying a ticket fires an STK push, so it is rate limited on its own: a loop on
+# this endpoint would ring somebody's phone until they gave up on the platform.
+SERVICE_TICKET_RATE_LIMIT = os.environ.get('SERVICE_TICKET_RATE_LIMIT', '30 per hour')
+SERVICE_PROVIDER_NOTIFY_RATE_LIMIT = os.environ.get(
+    'SERVICE_PROVIDER_NOTIFY_RATE_LIMIT', '60 per hour')
 # Duty state is read on every service page and every chatbot turn, so an uncached
 # read is a query per pageview for a row that changes a few times a day. Short
 # enough that an admin going off duty is honoured within seconds.
@@ -19550,6 +19742,10 @@ _service_flight = SingleFlight(stripes=4, timeout=1.0, name='service-flight')
 # The eighteen the MVP named. Seeded once; after that the table is the truth and
 # the admin owns it, so an admin who renames or deactivates one is not overwritten
 # on the next boot.
+#
+# The fulfilment profile is deliberately NOT a fourth element here. It is read from
+# SERVICE_PROFILE_BY_KEY in models.py via seed_profile_for below, so the seed and the
+# model layer cannot end up disagreeing about what a ticket is.
 DEFAULT_SERVICE_CATALOGUE = [
     ('printing', 'Printing & Photocopying', '🖨️'),
     ('laundry', 'Laundry', '🧺'),
@@ -19570,6 +19766,11 @@ DEFAULT_SERVICE_CATALOGUE = [
     ('health_wellness', 'Health & Wellness Services', '🩺'),
     ('career', 'Career Services', '🎓'),
 ]
+
+
+def seed_profile_for(key):
+    """The profile a seeded catalogue key starts on."""
+    return SERVICE_PROFILE_BY_KEY.get(key, DEFAULT_SERVICE_PROFILE)
 
 
 def support_whatsapp_number():
@@ -19621,7 +19822,8 @@ app.jinja_env.globals['support_whatsapp_url'] = support_whatsapp_url
 #
 # A namedtuple cannot be expired, cannot lazy-load and cannot be mutated by one of
 # the four threads sharing a worker's cache.
-ServiceOption = namedtuple('ServiceOption', 'key label emoji seller_listable')
+ServiceOption = namedtuple('ServiceOption',
+                           'key label emoji seller_listable profile')
 
 
 def service_catalogue(seller_only=False):
@@ -19654,7 +19856,10 @@ def _compute_service_catalogue():
         ServiceCatalogueItem.sort_order.asc(),
         ServiceCatalogueItem.label.asc()).limit(200).all()
     cached = tuple(ServiceOption(row.key, row.label, row.emoji or '',
-                                 bool(row.seller_listable)) for row in rows)
+                                 bool(row.seller_listable),
+                                 (row.fulfilment_profile or '').strip().lower()
+                                 or seed_profile_for(row.key))
+                   for row in rows)
     # Filled before the stripe is released so a waiter's re-read finds it.
     _service_catalogue_cache.set('rows', cached)
     return cached
@@ -19831,15 +20036,53 @@ def _compute_service_ids(key, service_key, search):
     return ids
 
 
+def service_price_display(service):
+    """The price as this listing's profile states it.
+
+    A ticket's `price` is the lowest active tier, so it reads "from KES 500" - a flat
+    "KES 500" beside a VIP band at 3,000 is a promise the checkout would then break.
+    A session and a tenancy carry a unit, and quoting one without it ("KES 800" for a
+    room) is the same problem in the other direction.
+    """
+    amount = service.price or 0
+    if not amount:
+        return 'price on request'
+    money = f'KES {amount:,.0f}'
+    profile = service.profile
+    if profile == 'ticket':
+        # "from" unconditionally, and deliberately without counting the tiers:
+        # service.tiers is a lazy relationship, so a len() here would be one query
+        # per card on the busiest anonymous page we have. `price` is maintained as
+        # the lowest active tier, so "from KES 500" is true whether there is one
+        # band or five, and the detail page prints the real bands.
+        return f'from {money}'
+    if profile in ('session', 'tenancy'):
+        unit = (service.rate_unit or ('month' if profile == 'tenancy' else 'session')).strip()
+        return f'{money} per {unit}'
+    return money
+
+
 def service_provider_line(service):
     """One provider as the chatbot and the cards state them.
 
-    "Name — KES 450 — No pickup offered, take to the location as directed" is the
-    MVP's format, so it lives in one function and every surface reads it from here.
+    "Name — KES 450 — free pickup same day" is the MVP's format, so it lives in one
+    function and every surface reads it from here. The third part used to be
+    pickup_display unconditionally, which is how an event ticket came to advertise
+    "No pickup offered, take to the location as directed"; it is offer_display now,
+    which each profile answers in its own terms.
     """
     label = service.title or 'Service provider'
-    price = f'KES {service.price:,.0f}' if service.price else 'price on request'
-    return f'{label} — {price} — {service.pickup_display}'
+    parts = [label, service_price_display(service)]
+    offer = service.offer_display
+    if offer:
+        parts.append(offer)
+    return ' — '.join(parts)
+
+
+# Exposed to Jinja rather than passed per route: the services grid, the detail page,
+# the seller's own list and the admin catalogue all print a price, and a card that
+# formats its own price is a card that formats a ticket's price wrong.
+app.jinja_env.globals['service_price_display'] = service_price_display
 
 
 # --- The chatbot's half of the services flow ---------------------------------
@@ -20082,15 +20325,15 @@ def service_chatbot_reply(message, user=None):
     if not service_key and not mentions_services:
         return None
 
-    duty = service_duty_active() and service_requests_enabled()
+    # Whether anybody is on the desk is deliberately not consulted here. It used to
+    # be: an empty desk swapped the reply for a "our agents are busy" sentence and a
+    # WhatsApp button, which told the client something about our staffing that they
+    # have no use for. The client now always gets the same words and the same button,
+    # and service_contact_admin routes an unattended request onward behind them.
     whatsapp = support_whatsapp_url('Hi, I need help with a service.')
 
     # They asked to be put in touch but have not named a service yet.
     if not service_key:
-        wants_contact = any(word in lowered for word in SERVICE_CONNECT_WORDS)
-        if wants_contact and not duty:
-            return {'reply': SERVICE_BUSY_MESSAGE, 'action': 'whatsapp',
-                    'whatsapp_url': whatsapp, 'options': service_chat_options()}
         options = service_chat_options()
         if not options:
             return None
@@ -20106,26 +20349,33 @@ def service_chatbot_reply(message, user=None):
     providers = service_chat_providers(service_key, county)
 
     if not providers:
-        payload = {
+        # Nobody listed under this label is a fact about the catalogue, not about the
+        # desk, so the WhatsApp route is offered unconditionally here. Gating it on
+        # duty was the same leak in a quieter form: the button appearing or not
+        # appearing told the client whether anyone was working.
+        return {
             'reply': f'Nobody is listed under {label} yet. '
                      f'These are the services with providers right now.',
             'options': service_chat_options(),
             'action': 'pick_service',
+            'whatsapp_url': whatsapp,
+            # action stays pick_service so the tiles are the first thing they see;
+            # support_enhanced.html only draws the WhatsApp button on action ==
+            # 'whatsapp', so this url is the fallback route for a client who has one
+            # already open. Nothing here depends on who is on duty.
         }
-        if not duty:
-            payload['follow_up'] = SERVICE_BUSY_MESSAGE
-            payload['action'] = 'whatsapp'
-            payload['whatsapp_url'] = whatsapp
-        return payload
 
     # The MVP's exact shape: a count line, then one line per provider carrying
-    # price and pickup. "near you" only when we actually hold their county.
+    # price and how the service is offered. "near you" only when we hold their county.
     count = len(providers)
     noun = 'provider' if count == 1 else 'providers'
     where = ' near you' if county else ''
     lines = [f'I found {count} {label} {noun}{where}.']
     lines.extend(service_provider_line(row) for row in providers)
 
+    # A ticketed service has no linking step to offer: the buyer picks a tier and
+    # pays. Every other profile goes to the desk, on duty or not.
+    buys = (item.profile if item else DEFAULT_SERVICE_PROFILE) == 'ticket'
     payload = {
         'reply': '\n'.join(lines),
         'service_key': service_key,
@@ -20133,23 +20383,25 @@ def service_chatbot_reply(message, user=None):
             'id': row.id,
             'title': row.title,
             'price': float(row.price or 0),
-            'price_display': (f'KES {row.price:,.0f}' if row.price else 'price on request'),
+            'price_display': service_price_display(row),
             'location': row.location_display or '',
+            # None on the four profiles with no pickup concept, and the front end
+            # prints nothing for a null. It is the provider line that carries the
+            # per-profile sentence now.
             'pickup': row.pickup_display,
+            'offer': row.offer_display,
             'line': service_provider_line(row),
             'url': url_for('service_detail', service_id=row.id)
             if has_request_context() else f'/services/{row.id}',
         } for row in providers],
-        'action': 'contact_admin' if duty else 'whatsapp',
+        'action': 'buy_ticket' if buys else 'contact_admin',
     }
-    if duty:
+    if buys:
+        payload['follow_up'] = ('Open the one you want and pick your ticket — '
+                                'you pay on the platform, nothing to arrange.')
+    else:
         payload['follow_up'] = ('Open the one you want and press Contact admin — '
                                 'we will connect you with the provider.')
-    else:
-        # Exact wording, as specified. Its own bubble with the WhatsApp button
-        # beneath it, so the provider list is still useful to them.
-        payload['follow_up'] = SERVICE_BUSY_MESSAGE
-        payload['whatsapp_url'] = whatsapp
     return payload
 
 
@@ -20176,10 +20428,14 @@ def services_marketplace():
         current_service=service_key,
         current_item=catalogue_map.get(service_key),
         search=search,
-        duty_active=service_duty_active(),
         direct_contact=service_direct_contact_enabled(),
-        requests_enabled=service_requests_enabled(),
-        whatsapp_url=support_whatsapp_url(),
+        # No duty flags reach this template any more. They existed to draw the
+        # desk-is-quiet banner, which told anonymous visitors about our staffing;
+        # the banner is gone and so is the duty lookup behind it, which was a
+        # Setting read and a User query on the most-cached anonymous page in the
+        # services half. The banner's wording is deliberately not repeated here:
+        # services_smoke greps this file for it, and a comment quoting it would
+        # cost that check its bluntness.
         # Kept so an existing template or bookmark referring to categories still
         # renders rather than raising Undefined mid-deploy.
         categories=[row.label for row in catalogue],
@@ -20216,22 +20472,187 @@ def service_detail(service_id):
     # Signed in either way: a public listing page with a phone number on it is a
     # scraper's shopping list.
     direct = service_direct_contact_enabled()
+    # One ordered query for the bands, and only for the profile that has them.
+    # Reading service.tiers on a haircut would be a query that can only ever come
+    # back empty.
+    tiers = []
+    if service.has_field('tiers'):
+        tiers = ServicePriceTier.query.filter_by(service_id=service.id, is_active=True).order_by(
+            ServicePriceTier.sort_order.asc(), ServicePriceTier.price.asc()).limit(20).all()
+    # The viewer's own orders on this listing: the unpaid one needs a Pay button and
+    # the paid ones carry the ticket code somebody shows at the gate. Signed-in only
+    # and capped, so an anonymous page load - the one that gets the traffic - runs
+    # neither this nor the open_request query above.
+    my_orders = []
+    if current_user.is_authenticated:
+        my_orders = ServiceOrder.query.filter_by(
+            service_id=service.id, client_id=current_user.id).order_by(
+            ServiceOrder.created_at.desc()).limit(6).all()
     return render_template(
         'service_detail.html',
         service=service,
         item=item,
+        profile=service.profile,
+        spec=service.profile_spec,
+        tiers=tiers,
+        price_display=service_price_display(service),
         provider_phone=(service.provider_phone if is_admin_viewer else None),
+        # The provider's own wa.me link, admin-only for the same reason the number
+        # is: it is built from provider_phone. An admin at the desk presses it and
+        # lands in WhatsApp on the provider's number, rather than being handed digits
+        # to retype into a browser.
+        provider_whatsapp_url=(
+            whatsapp_share_url(service.provider_phone,
+                               SERVICE_PROVIDER_INTEREST_MESSAGE)
+            if (is_admin_viewer and service.provider_phone) else None),
         direct_phone=(service.provider_phone
                       if (direct and current_user.is_authenticated) else None),
         is_owner=(current_user.is_authenticated and current_user.id == service.provider_id),
         duty_active=service_duty_active(),
         direct_contact=direct,
         requests_enabled=service_requests_enabled(),
-        busy_message=SERVICE_BUSY_MESSAGE,
+        # No busy_message here any more, and no duty-dependent copy anywhere on this
+        # page: duty_active is passed for the admin badge only. The client sees one
+        # button and one sentence whether or not anybody is at the desk.
+        welcome_message=SERVICE_CLIENT_WELCOME_MESSAGE,
         whatsapp_url=support_whatsapp_url(f'Hi, I need help with: {service.title}'),
         open_request=open_request,
+        my_orders=my_orders,
         provider_line=service_provider_line(service),
     )
+
+
+def service_request_summary(link_request, for_provider=True):
+    """The service description that travels with an interest message.
+
+    Built once and shared by WhatsApp, SMS and the in-app inbox so a provider
+    comparing two of them sees one message, exactly as driver_link_message does for
+    drivers. The client's phone number is never in the provider's copy: the platform
+    thread is where they meet, and a number handed over before an admin has linked
+    them is the bypass this whole desk exists to prevent.
+    """
+    service = link_request.service
+    if not service:
+        return ''
+    lines = [f'Service: {service.title}']
+    spec = service.profile_spec
+    lines.append(f'How it is offered: {spec["label"]} - {service.offer_display}')
+    if service.description:
+        lines.append(f'Details: {service.description[:220]}')
+    note = (link_request.client_note or '').strip()
+    if note:
+        lines.append(f'What the client asked: {note[:220]}')
+    if not for_provider:
+        # The support line is read by an admin, so it carries the two things an
+        # admin needs and a provider must not have.
+        client = link_request.client
+        lines.append(f'Client: {client.username if client else "a client"}')
+        if link_request.client_phone:
+            lines.append(f'Client phone: {link_request.client_phone}')
+        lines.append(f'Request #{link_request.id}')
+    return '\n'.join(lines)
+
+
+def notify_service_provider(link_request, force=False):
+    """Tell a provider a client is interested, on every channel we have.
+
+    Fired automatically the moment a request lands on an empty desk, and by the
+    desk's "Notify provider" button otherwise. Idempotent on provider_notified_at:
+    the automatic path and the button can both run for one request, and a provider
+    who gets the same sentence twice reads it as the platform being broken.
+
+    Returns which channels genuinely delivered, on the notify_driver_tracking_link
+    pattern - a hopeful "sent!" that WhatsApp silently refused is worse than a
+    warning that says so. Meta only permits free-form text inside a 24-hour service
+    window (see send_whatsapp_message), so a provider who has never messaged the
+    business needs whatsapp_template_name configured; without it the whatsapp leg
+    reports False and the SMS and the inbox carry the message.
+    """
+    result = {'whatsapp': False, 'sms': False, 'in_app': False,
+              'share_url': '', 'already': False, 'message': ''}
+    service = link_request.service
+    if not service:
+        return result
+
+    summary = service_request_summary(link_request, for_provider=True)
+    message = SERVICE_PROVIDER_INTEREST_MESSAGE
+    if summary:
+        message = f'{message}\n\n{summary}'
+    result['message'] = message
+    phone = (service.provider_phone or '').strip()
+    result['share_url'] = whatsapp_share_url(phone, message) if phone else ''
+
+    # The share link is built before this return, not after it. The desk's
+    # "WhatsApp provider" button needs the wa.me deep link even on a request whose
+    # provider was already told automatically - otherwise an admin who wants to talk
+    # to the provider about an already-notified request is handed a number to type
+    # into a browser, which is the thing that was asked not to happen.
+    if link_request.provider_notified_at and not force:
+        result['already'] = True
+        return result
+
+    if service.provider_id:
+        note = create_customer_notification(
+            service.provider_id, 'A client is interested in your service',
+            message, 'service')
+        result['in_app'] = note is not None
+
+    link_request.provider_notified_at = utcnow()
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('provider interest note not stored for request %s', link_request.id)
+        result['in_app'] = False
+
+    if phone:
+        result['whatsapp'] = send_whatsapp_message(phone, message)
+        # SMS regardless: it is the one channel that lands without WhatsApp
+        # installed, and a duplicate costs less than a client nobody called back.
+        result['sms'] = send_sms_notification(normalize_mpesa_phone(phone), message)
+    return result
+
+
+def handoff_service_request_to_whatsapp(link_request):
+    """Push an unattended request onto the support WhatsApp line, immediately.
+
+    This is the "if no admin is online to reply, the message lands to whatsapp
+    immediately carrying the service description" half. The client is told nothing
+    about it - they have already had the welcome message and are waiting on a thread
+    an admin will find either way.
+    """
+    summary = service_request_summary(link_request, for_provider=False)
+    if not summary:
+        return {'whatsapp': False, 'sms': False}
+    body = ('A client asked to be linked and nobody was on the linking desk.\n\n'
+            f'{summary}')
+    number = support_whatsapp_number()
+    sent = {'whatsapp': send_whatsapp_message(number, body), 'sms': False}
+    if not sent['whatsapp']:
+        # Only when WhatsApp did not take it. The support line is one number, and an
+        # SMS duplicating a delivered WhatsApp message on every unattended request is
+        # a bill that grows with traffic.
+        sent['sms'] = send_sms_notification(normalize_mpesa_phone(number), body)
+    return sent
+
+
+def flash_provider_notify_result(service, result):
+    """Report the channel outcomes to the admin in one honest sentence."""
+    who = service.provider.username if service and service.provider else 'the provider'
+    if result.get('already'):
+        flash(f'{who} was already notified about this request, so nothing was sent again.',
+              'info')
+        return
+    sent = [label for label, key in (('WhatsApp', 'whatsapp'), ('SMS', 'sms'),
+                                     ('in-app', 'in_app')) if result.get(key)]
+    if sent:
+        flash(f'{who} notified by {", ".join(sent)}.', 'success')
+    elif result.get('share_url'):
+        flash(f'Nothing could be sent to {who} automatically - press "WhatsApp '
+              f'provider" to send it in one tap.', 'warning')
+    else:
+        flash(f'No phone on file for {who}, so only the platform inbox was used.',
+              'warning')
 
 
 @app.route('/services/<int:service_id>/contact-admin', methods=['POST'])
@@ -20240,57 +20661,55 @@ def service_detail(service_id):
 def service_contact_admin(service_id):
     """Ask an admin to link this client to this provider.
 
-    Returns mode=platform with a thread when someone is on duty, and mode=whatsapp
-    with the exact busy sentence when nobody is. Never both, and never the
-    provider's number.
+    One path, and no branch the client can observe. It used to have two: mode
+    'platform' with a thread when somebody was on duty, mode 'whatsapp' with a
+    sentence about every agent being occupied when nobody was. That second mode told
+    the client about our staffing, which is not their problem to hear about - so the
+    response is now byte-identical either way, and tools/services_smoke.py asserts
+    that rather than trusting this docstring.
+
+    What differs is only what happens behind them. An empty desk (or the whole desk
+    switched off) pushes the request onto the support WhatsApp line and notifies the
+    provider automatically, with no button pressed and nothing to monitor.
     """
     service = ServiceListing.query.get_or_404(service_id)
     if not service.is_active:
         return jsonify({'success': False, 'error': 'This service is no longer listed.'}), 404
     if service.provider_id == current_user.id:
         return jsonify({'success': False, 'error': 'This is your own listing.'}), 400
-
-    whatsapp_url = support_whatsapp_url(f'Hi, I need help with: {service.title}')
-    if not service_requests_enabled():
-        return jsonify({'success': True, 'mode': 'whatsapp', 'reply': SERVICE_BUSY_MESSAGE,
-                        'whatsapp_url': whatsapp_url})
+    if service.profile_spec['flow'] == 'buy':
+        # A ticket has no linking step to ask for. Not a duty message: this is about
+        # the service, and it is the same answer at every hour of the day.
+        return jsonify({'success': False,
+                        'error': 'Tickets are bought straight from this page - '
+                                 'pick your ticket and pay.'}), 400
 
     note = (request.form.get('note') or (request.get_json(silent=True) or {}).get('note') or '').strip()[:1000]
     phone = (request.form.get('phone') or (request.get_json(silent=True) or {}).get('phone')
              or current_user.phone or '').strip()[:30]
 
-    admin_id = pick_service_admin()
-    if not admin_id:
-        # Recorded even though no admin will see it live: "how often was nobody at
-        # the desk" is a number the MVP needs, and it is unanswerable if the
-        # WhatsApp hand-off leaves no row.
-        db.session.add(ServiceLinkRequest(
-            service_id=service.id, client_id=current_user.id, status='whatsapp_redirected',
-            client_note=note, client_phone=phone, channel='whatsapp',
-            created_at=utcnow(), closed_at=utcnow()))
-        try:
-            db.session.commit()
-        except Exception as exc:
-            db.session.rollback()
-            logger.warning(f'whatsapp redirect not recorded: {exc}')
-        return jsonify({'success': True, 'mode': 'whatsapp', 'reply': SERVICE_BUSY_MESSAGE,
-                        'whatsapp_url': whatsapp_url})
-
     existing = ServiceLinkRequest.query.filter(
         ServiceLinkRequest.service_id == service.id,
         ServiceLinkRequest.client_id == current_user.id,
-        ServiceLinkRequest.status.in_(('open', 'claimed')),
+        ServiceLinkRequest.status.in_(('open', 'claimed', 'linked')),
     ).first()
     if existing:
-        # Pressing the button twice must not queue the same client twice at the
-        # desk; they get the thread they already have.
+        # Pressing the button twice must not queue the same client twice at the desk;
+        # they get the thread they already have, and the same words with it.
         return jsonify({'success': True, 'mode': 'platform', 'request_id': existing.id,
-                        'existing': True,
-                        'reply': 'You already have an open request. An admin will reply here.'})
+                        'existing': True, 'reply': SERVICE_CLIENT_WELCOME_MESSAGE})
 
+    # The desk switched off is handled here rather than earlier, as an absent admin
+    # and not as a refusal: the row is still recorded, the provider is still told,
+    # and the client still gets a thread. "service_requests_enabled = 0" means
+    # nobody is answering, which is the same situation as nobody being on duty.
+    admin_id = pick_service_admin() if service_requests_enabled() else None
     link_request = ServiceLinkRequest(
         service_id=service.id, client_id=current_user.id, assigned_admin_id=admin_id,
-        status='open', client_note=note, client_phone=phone, channel='platform',
+        status='open', client_note=note, client_phone=phone,
+        # The channel records how it was routed, so "how often was nobody at the
+        # desk" stays answerable from the table. It is not visible to the client.
+        channel='platform' if admin_id else 'whatsapp',
         created_at=utcnow())
     db.session.add(link_request)
     db.session.flush()
@@ -20302,41 +20721,85 @@ def service_contact_admin(service_id):
     except Exception as exc:
         db.session.rollback()
         logger.error(f'service link request failed: {exc}')
-        return jsonify({'success': True, 'mode': 'whatsapp', 'reply': SERVICE_BUSY_MESSAGE,
-                        'whatsapp_url': whatsapp_url})
+        # Even this is not allowed to become a different message. The client is told
+        # to wait and the support line still gets the request, which is what the
+        # successful path does too. Built inline rather than through
+        # handoff_service_request_to_whatsapp: the rollback means there is no row to
+        # describe, and passing that helper a transient object would print
+        # "Request #None".
+        try:
+            send_whatsapp_message(
+                support_whatsapp_number(),
+                'A client asked to be linked and the request could not be saved.\n\n'
+                f'Service: {service.title}\n'
+                f'Client: {current_user.username}\n'
+                f'Client phone: {phone or "not given"}\n'
+                f'What the client asked: {(note or "nothing written")[:220]}')
+        except Exception:
+            logger.exception('service link fallback hand-off failed')
+        return jsonify({'success': True, 'mode': 'platform', 'request_id': 0,
+                        'reply': SERVICE_CLIENT_WELCOME_MESSAGE})
 
-    _, on_duty = service_duty_state()
-    for target in on_duty:
-        create_customer_notification(
-            target,
-            'Service linking request',
-            f'{current_user.username} wants to be linked to "{service.title}". '
-            f'Open the linking desk to claim it.',
-            'service')
-    # create_customer_notification adds without committing, and the commit above has
-    # already gone out - so without this second one the rows are discarded at
-    # teardown and nobody at the desk ever hears about a request the client has just
-    # been promised a reply to. Failing to notify must not fail the request, though:
-    # the ServiceLinkRequest is committed and the desk lists open requests by query,
-    # so the admin still finds it either way.
     request_id = link_request.id
-    try:
-        db.session.commit()
-    except Exception as exc:
-        db.session.rollback()
-        logger.warning(f'service link notification not stored: {exc}')
+    if admin_id:
+        _, on_duty = service_duty_state()
+        for target in on_duty:
+            create_customer_notification(
+                target,
+                'Service linking request',
+                f'{current_user.username} wants to be linked to "{service.title}". '
+                f'Open the linking desk to claim it.',
+                'service')
+        # create_customer_notification adds without committing, and the commit above
+        # has already gone out - so without this second one the rows are discarded at
+        # teardown and nobody at the desk hears about a request the client has just
+        # been promised a reply to. Failing to notify must not fail the request: the
+        # ServiceLinkRequest is committed and the desk lists open requests by query,
+        # so the admin still finds it either way.
+        try:
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            logger.warning(f'service link notification not stored: {exc}')
+    else:
+        # Nobody at the desk. Both of these happen immediately, with no button and
+        # nothing to monitor, and neither of them changes the reply below.
+        try:
+            handoff_service_request_to_whatsapp(link_request)
+        except Exception:
+            logger.exception('service request whatsapp hand-off failed for %s', request_id)
+        try:
+            notify_service_provider(link_request)
+        except Exception:
+            logger.exception('automatic provider notify failed for %s', request_id)
+
     return jsonify({'success': True, 'mode': 'platform', 'request_id': request_id,
-                    'reply': 'An admin is on duty and will reply here shortly.'})
+                    'reply': SERVICE_CLIENT_WELCOME_MESSAGE})
 
 
 @app.route('/services/requests/<int:request_id>/thread', methods=['GET', 'POST'])
 @login_required
 @limiter.limit(SERVICE_THREAD_RATE_LIMIT)
 def service_request_thread(request_id):
-    """The client's half of the conversation. Owner or admin only."""
+    """The conversation. Client, admin, and - once linked - the provider.
+
+    The provider is deliberately not on the thread before an admin marks the request
+    `linked`. That is the whole value of the desk: an unvetted provider who can reach
+    a client from the moment they press a button is a direct line for the fraud the
+    welcome message warns about. After `linked` all three can post and the admin can
+    still read every message, which is what "the admin can see the conversation in
+    real time as they are texting" means here - the desk polls this same endpoint.
+    """
     link_request = ServiceLinkRequest.query.get_or_404(request_id)
     is_admin_viewer = current_user.is_admin
-    if link_request.client_id != current_user.id and not is_admin_viewer:
+    service = link_request.service
+    # Read as the provider only after linking; write, likewise. Computed once here
+    # rather than at each use, because two different answers to "is this the
+    # provider" in one request is how a 403 turns into a leak.
+    is_provider = bool(service and service.provider_id == current_user.id)
+    provider_admitted = is_provider and link_request.status in ('linked', 'closed')
+    if (link_request.client_id != current_user.id and not is_admin_viewer
+            and not provider_admitted):
         abort(403)
     if request.method == 'POST':
         body = (request.form.get('body') or (request.get_json(silent=True) or {}).get('body') or '').strip()[:2000]
@@ -20345,8 +20808,9 @@ def service_request_thread(request_id):
         if link_request.status == 'closed':
             return jsonify({'success': False, 'error': 'This request is closed.'}), 400
         db.session.add(ServiceLinkMessage(request_id=link_request.id, sender_id=current_user.id,
-                                          from_admin=is_admin_viewer, body=body,
-                                          created_at=utcnow()))
+                                          from_admin=is_admin_viewer,
+                                          from_provider=provider_admitted and not is_admin_viewer,
+                                          body=body, created_at=utcnow()))
         if is_admin_viewer and link_request.status == 'open':
             link_request.status = 'claimed'
             link_request.assigned_admin_id = current_user.id
@@ -20363,15 +20827,43 @@ def service_request_thread(request_id):
             except Exception as exc:
                 db.session.rollback()
                 logger.warning(f'service reply notification not stored: {exc}')
+        elif provider_admitted:
+            create_customer_notification(link_request.client_id, 'Reply from the provider',
+                                         f'{current_user.username} replied about '
+                                         f'"{service.title if service else "your request"}".',
+                                         'service')
+            try:
+                db.session.commit()
+            except Exception as exc:
+                db.session.rollback()
+                logger.warning(f'provider reply notification not stored: {exc}')
+        elif service and service.provider_id and link_request.status == 'linked':
+            # The client wrote and the provider is on the thread, so the provider is
+            # the one who needs to hear about it.
+            create_customer_notification(service.provider_id, 'Message from your client',
+                                         f'A client replied about "{service.title}".',
+                                         'service')
+            try:
+                db.session.commit()
+            except Exception as exc:
+                db.session.rollback()
+                logger.warning(f'client reply notification not stored: {exc}')
     messages = ServiceLinkMessage.query.filter_by(request_id=link_request.id).order_by(
         ServiceLinkMessage.created_at.asc()).limit(200).all()
     return jsonify({
         'success': True,
         'status': link_request.status,
-        'service_title': link_request.service.title if link_request.service else '',
+        'service_title': service.title if service else '',
+        # Rendered from the constant, not stored as a row. Stored, it would need an
+        # author at a moment when there may be no admin at all, and it would appear
+        # twice for anybody who reloaded before the desk replied.
+        'welcome': SERVICE_CLIENT_WELCOME_MESSAGE,
+        'provider_on_thread': bool(provider_admitted or (
+            service and service.provider_id and link_request.status in ('linked', 'closed'))),
         'messages': [{
             'id': msg.id,
             'from_admin': bool(msg.from_admin),
+            'from_provider': bool(msg.from_provider),
             'body': msg.body,
             'created_at': msg.created_at.isoformat() if msg.created_at else '',
         } for msg in messages],
@@ -20382,6 +20874,13 @@ def service_request_thread(request_id):
 @login_required
 def create_service():
     """List a service. Sellers need an approved storefront; admins do not.
+
+    Which fields are read depends entirely on the chosen category's fulfilment
+    profile. A ticket is asked for a date, a venue and its price bands and is not
+    asked about pickup at all; a laundry is asked about pickup and never about a
+    venue. That is not cosmetic - apply_service_profile_fields refuses to read a
+    field the profile does not have, so a hand-rolled POST cannot put an event venue
+    on a laundry either.
 
     Location follows the product listing rule the MVP asked for: a typed address
     wins, and a blank address falls back to the coordinates the browser supplied,
@@ -20395,6 +20894,17 @@ def create_service():
             return redirect_response
     options = service_catalogue() if is_admin_lister else service_catalogue(seller_only=True)
     fee = service_listing_fee() if service_direct_contact_enabled() else 0.0
+    # The form needs to know, per option, which fields to show. Passed as plain data
+    # so the template does no lookups and the JS can switch field sets without a
+    # round trip.
+    profiles = {name: {'label': spec['label'], 'fields': list(spec['fields']),
+                       'flow': spec['flow'], 'blurb': spec['blurb'],
+                       'pay_to': spec['pay_to'], 'pay_when': spec['pay_when']}
+                for name, spec in SERVICE_FULFILMENT_PROFILES.items()}
+
+    def back(form_data):
+        return render_template('create_service.html', options=options, fee=fee,
+                               profiles=profiles, form=form_data)
 
     if request.method == 'POST':
         title = (request.form.get('title', '') or '').strip()[:200]
@@ -20403,16 +20913,20 @@ def create_service():
         allowed = {row.key: row for row in options}
         if not title:
             flash('Give the service a title.', 'danger')
-            return render_template('create_service.html', options=options, fee=fee,
-                                   form=request.form)
+            return back(request.form)
         if service_key not in allowed:
             flash('Pick a service from the list.', 'danger')
-            return render_template('create_service.html', options=options, fee=fee,
-                                   form=request.form)
+            return back(request.form)
         if not provider_phone:
             flash('A contact phone is required. Only admins ever see it.', 'danger')
-            return render_template('create_service.html', options=options, fee=fee,
-                                   form=request.form)
+            return back(request.form)
+
+        profile = allowed[service_key].profile or DEFAULT_SERVICE_PROFILE
+        spec = service_profile_spec(profile)
+        tiers, tier_error = read_service_tiers() if 'tiers' in spec['fields'] else ([], '')
+        if tier_error:
+            flash(tier_error, 'danger')
+            return back(request.form)
 
         service = ServiceListing(
             provider_id=current_user.id,
@@ -20420,6 +20934,13 @@ def create_service():
             description=(request.form.get('description', '') or '').strip(),
             category=allowed[service_key].label,
             service_key=service_key,
+            # Copied onto the row, not read through the catalogue: an admin retagging
+            # a category later must not silently reshape listings providers have
+            # already written, and the grid filter wants one indexed column rather
+            # than a join.
+            fulfilment_profile=profile,
+            pay_to=spec['pay_to'],
+            pay_when=spec['pay_when'],
             price_type=request.form.get('price_type', 'fixed'),
             price=form_float('price', 0, minimum=0),
             delivery_days=max(0, int(form_float('delivery_days', 3, minimum=0))),
@@ -20427,14 +20948,28 @@ def create_service():
             platform_commission=float(Setting.get('service_commission_percent', '15') or 15),
             is_admin_listing=is_admin_lister,
         )
-        apply_service_location(service)
-        apply_service_pickup(service)
+        apply_service_profile_fields(service)
+        if tiers:
+            # The grid reads `price` and never the tiers, so the lowest band is
+            # written here. A min(tier.price) per card would be an N+1 on the one
+            # services page anonymous traffic actually hits.
+            service.price = min(row['price'] for row in tiers)
+        elif spec['flow'] == 'buy':
+            flash('A ticketed service needs at least one price band - '
+                  'clients buy it without contacting you.', 'danger')
+            return back(request.form)
         if service_direct_contact_enabled() and fee > 0 and not is_admin_lister:
             service.listing_fee_amount = fee
             service.listing_fee_paid = False
         if request.files.get('service_image'):
             service.image_url = save_uploaded_file(request.files['service_image'], 'services')
         db.session.add(service)
+        db.session.flush()
+        for order, row in enumerate(tiers, start=1):
+            db.session.add(ServicePriceTier(
+                service_id=service.id, name=row['name'], price=row['price'],
+                quantity_total=row['quantity_total'], max_per_order=row['max_per_order'],
+                is_active=True, sort_order=order * 10, created_at=utcnow()))
         db.session.commit()
         invalidate_service_caches()
         if service.listing_fee_amount and not service.listing_fee_paid:
@@ -20444,10 +20979,135 @@ def create_service():
             db.session.commit()
             flash(f'Service listed. A listing fee of KSh {service.listing_fee_amount:,.0f} '
                   f'is due on this listing.', 'warning')
+        elif spec['flow'] == 'buy':
+            flash('Service listed. Clients buy their tickets on the platform and you '
+                  'are paid out after the event.', 'success')
+        elif spec['pay_to'] == 'provider':
+            flash('Service listed. Clients reach you through an admin and pay you '
+                  'directly once the service is done.', 'success')
         else:
             flash('Service listed. Clients will reach you through an admin.', 'success')
         return redirect(url_for('service_detail', service_id=service.id))
-    return render_template('create_service.html', options=options, fee=fee, form={})
+    return back({})
+
+
+def form_datetime(name):
+    """A datetime-local or date input, or None. Never raises on rubbish."""
+    text = (request.form.get(name, '') or '').strip()
+    if not text:
+        return None
+    for shape in ('%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(text, shape)
+        except ValueError:
+            continue
+    return None
+
+
+def read_service_tiers():
+    """The price bands off the create/edit form: (rows, error).
+
+    Parallel arrays rather than a JSON blob, because this posts from a plain form
+    that has to work with JavaScript switched off. A band with no name or no price is
+    skipped rather than rejected - the form ships with blank spare rows, and refusing
+    the whole listing because row four is empty is not a real complaint.
+    """
+    names = request.form.getlist('tier_name')
+    prices = request.form.getlist('tier_price')
+    totals = request.form.getlist('tier_quantity')
+    caps = request.form.getlist('tier_max')
+    rows = []
+    for index, raw_name in enumerate(names):
+        name = (raw_name or '').strip()[:60]
+        try:
+            price = float((prices[index] if index < len(prices) else '') or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        if not name and price <= 0:
+            continue
+        if not name:
+            return [], 'Every price band needs a name - Regular, VIP, and so on.'
+        if price <= 0:
+            return [], f'Give "{name}" a price. A ticket is bought, not negotiated.'
+        try:
+            total = max(0, int(float((totals[index] if index < len(totals) else '') or 0)))
+        except (TypeError, ValueError):
+            total = 0
+        try:
+            cap = int(float((caps[index] if index < len(caps) else '') or 0)) or 5
+        except (TypeError, ValueError):
+            cap = 5
+        rows.append({'name': name, 'price': round(price, 2),
+                     'quantity_total': total, 'max_per_order': max(1, min(cap, 50))})
+    if len(rows) > 12:
+        return [], 'Twelve price bands is the most one listing can carry.'
+    return rows, ''
+
+
+def apply_service_profile_fields(service):
+    """Read only the fields this listing's profile actually has.
+
+    The profile's `fields` tuple is a whitelist, not documentation. A field the
+    profile does not carry is not read from the form at all and is reset to its empty
+    value, so retagging a listing cannot leave a stale event venue on a laundry, and
+    a hand-rolled POST cannot invent one. It is also what keeps pickup_display
+    returning None rather than "No pickup offered" on the four profiles that have no
+    pickup concept.
+    """
+    fields = service.profile_spec['fields']
+
+    if 'location' in fields:
+        apply_service_location(service)
+    else:
+        # A ticket's place is its venue, and a session's may be nowhere at all.
+        service.location_label = None
+        service.location_county = None
+        service.location_lat = None
+        service.location_lng = None
+
+    if 'pickup' in fields:
+        apply_service_pickup(service)
+    else:
+        service.pickup_required = False
+        service.pickup_is_free = False
+        service.pickup_cost = 0.0
+        service.pickup_eta = None
+        service.pickup_via_platform = False
+
+    service.opening_hours = ((request.form.get('opening_hours', '') or '').strip()[:120] or None
+                             if 'opening_hours' in fields else None)
+    service.turnaround_note = ((request.form.get('turnaround_note', '') or '').strip()[:120] or None
+                               if 'turnaround_note' in fields else None)
+    service.service_area = ((request.form.get('service_area', '') or '').strip()[:200] or None
+                            if 'service_area' in fields else None)
+    service.delivery_fee = form_float('delivery_fee', 0, minimum=0) if 'delivery_fee' in fields else 0.0
+    service.min_order_amount = (form_float('min_order_amount', 0, minimum=0)
+                                if 'min_order_amount' in fields else 0.0)
+    if 'serves_at' in fields:
+        at_client = bool(request.form.get('serves_at_client'))
+        at_provider = bool(request.form.get('serves_at_provider'))
+        # One of the two has to be true or the listing says the service happens
+        # nowhere. Their premises is the safer default to fall back on.
+        service.serves_at_client = at_client
+        service.serves_at_provider = at_provider or not at_client
+    else:
+        service.serves_at_client = False
+        service.serves_at_provider = True
+    service.appointment_required = (bool(request.form.get('appointment_required'))
+                                    if 'appointment_required' in fields else False)
+    if 'rate_unit' in fields:
+        unit = (request.form.get('rate_unit', '') or '').strip().lower()[:20]
+        allowed_units = ('hour', 'session', 'day', 'week', 'month', 'task')
+        service.rate_unit = unit if unit in allowed_units else (
+            'month' if service.profile == 'tenancy' else 'session')
+    else:
+        service.rate_unit = None
+    service.deposit_amount = (form_float('deposit_amount', 0, minimum=0)
+                              if 'deposit_amount' in fields else 0.0)
+    service.available_from = form_datetime('available_from') if 'available_from' in fields else None
+    service.event_starts_at = form_datetime('event_starts_at') if 'event_starts_at' in fields else None
+    service.event_venue = ((request.form.get('event_venue', '') or '').strip()[:200] or None
+                           if 'event_venue' in fields else None)
 
 
 def apply_service_location(service):
@@ -20491,33 +21151,282 @@ def apply_service_pickup(service):
     service.pickup_via_platform = bool(request.form.get('pickup_via_platform'))
 
 
+def service_order_reference(order):
+    """The account reference the payer sees on the M-Pesa prompt.
+
+    Prefixed so a service payment is distinguishable from a product order at a
+    glance in the Daraja portal, and so a reconciliation by eye does not have to
+    guess which table a reference belongs to.
+    """
+    return f'SVC{order.id:06d}'
+
+
+def start_service_payment(order, phone):
+    """Fire the STK push for a pending service order. Returns (ok, message).
+
+    Nothing about the order is settled here. The push only rings a phone; the
+    callback is the sole place that may mark it paid, take revenue or move a seat
+    count - see finalize_paid_service_order.
+    """
+    if not phone:
+        return False, 'Add an M-Pesa phone number to pay.'
+    result = stk_push(phone, order.amount, service_order_reference(order))
+    if result.get('success'):
+        checkout_request_id = result.get('checkout_request_id')
+        if checkout_request_id:
+            order.checkout_request_id = str(checkout_request_id)[:60]
+        order.payment_status = 'pending'
+        db.session.commit()
+        return True, f'Enter your M-Pesa PIN on {phone} to complete the payment.'
+    response = result.get('response') or {}
+    detail = (response.get('errorMessage') or response.get('ResponseDescription')
+              or response.get('responseDescription') or '')
+    message = result.get('error', 'Unknown error')
+    if detail and detail not in message:
+        message = f'{message}: {detail}'
+    return False, f'Payment could not be started: {message}'
+
+
+def generate_ticket_code():
+    """A short ticket code, unambiguous enough to be read out at a gate.
+
+    Reuses PROMO_CODE_ALPHABET for the same reason it exists: a code containing 0/O
+    or 1/I is one a gate attendant will mistype under a queue. Checked against the
+    indexed column rather than trusted to be unique, because a duplicate would admit
+    two people on one ticket.
+    """
+    for _ in range(40):
+        body = ''.join(secrets.choice(PROMO_CODE_ALPHABET) for _ in range(8))
+        code = f'SA{body}'
+        if not ServiceOrder.query.filter_by(ticket_code=code).first():
+            return code
+    return f'SA{secrets.token_hex(6).upper()}'
+
+
+def finalize_paid_service_order(order, receipt='', amount=None):
+    """Settle a service order once money has actually arrived. Idempotent.
+
+    Called from mpesa_callback and from nowhere else. Everything that used to happen
+    in order_service the moment somebody pressed a button happens here instead:
+    revenue is recorded, orders_completed moves, a seat is taken off the tier and a
+    ticket code is minted. Guarded on payment_status so a replayed callback - which
+    Safaricom does send - is a no-op rather than a second revenue row and a second
+    seat.
+
+    Returns True when this call is the one that settled it.
+    """
+    if not order or order.is_paid:
+        return False
+    service = order.service
+    order.payment_status = 'paid'
+    order.paid_at = utcnow()
+    if receipt:
+        order.mpesa_receipt = receipt[:50]
+    if order.status == 'pending':
+        order.status = 'in_progress'
+
+    tier = order.tier
+    if tier:
+        # Checked here as well as at purchase, because the gap between the two is
+        # exactly where an oversell lives: two buyers can both pass the check at the
+        # till and only one of them can have the last seat. The later arrival is
+        # still marked paid - the money is in - and flagged for a refund rather than
+        # silently given a seat that does not exist.
+        wanted = max(1, order.quantity or 1)
+        left = tier.seats_left
+        if left is not None and wanted > left:
+            order.status = 'oversold_refund_due'
+            logger.error('service order %s paid for %s seats on tier %s with %s left; '
+                         'flagged for refund', order.id, wanted, tier.id, left)
+        else:
+            tier.quantity_sold = (tier.quantity_sold or 0) + wanted
+
+    if not order.ticket_code and service and service.profile == 'ticket':
+        # Minted only on payment, so an unpaid prompt never produces something that
+        # looks like a ticket.
+        order.ticket_code = generate_ticket_code()
+
+    if (order.pay_to or 'platform') == 'platform' and order.platform_fee:
+        record_platform_revenue('service_commission', order.platform_fee,
+                                f'Service: {service.title if service else order.service_id}',
+                                str(order.service_id), 'service', order.client_id)
+    if service:
+        service.orders_completed = (service.orders_completed or 0) + 1
+
+    create_customer_notification(
+        order.client_id,
+        'Service payment confirmed',
+        (f'Your payment for "{service.title}" is confirmed.'
+         + (f' Your ticket code is {order.ticket_code}.' if order.ticket_code else ''))
+        if service else 'Your service payment is confirmed.',
+        'payment')
+    if order.provider_id:
+        create_customer_notification(
+            order.provider_id, 'You have been paid for a service',
+            f'A client paid KES {order.amount:,.0f} for "{service.title}" on the platform. '
+            f'Your payout is KES {(order.provider_payout or 0):,.0f}.'
+            if service else 'A client paid for a service on the platform.',
+            'payment')
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('service order %s could not be settled', order.id)
+        return False
+    invalidate_service_caches()
+    return True
+
+
+@app.route('/services/<int:service_id>/buy', methods=['POST'])
+@login_required
+@limiter.limit(SERVICE_TICKET_RATE_LIMIT)
+def buy_service_ticket(service_id):
+    """Buy a ticket outright - no linking desk, no introduction, just a price.
+
+    Rate limited on its own because it fires an STK push: a loop on this endpoint
+    would ring somebody's phone until they gave up on the platform.
+    """
+    service = ServiceListing.query.get_or_404(service_id)
+    if not service.is_active:
+        flash('This service is no longer listed.', 'danger')
+        return redirect(url_for('services_marketplace'))
+    if service.profile_spec['flow'] != 'buy':
+        flash('This service is arranged through an admin rather than bought directly.',
+              'info')
+        return redirect(url_for('service_detail', service_id=service.id))
+    if service.provider_id == current_user.id:
+        flash('You cannot buy your own listing.', 'danger')
+        return redirect(url_for('service_detail', service_id=service.id))
+
+    try:
+        tier_id = int(request.form.get('tier_id') or 0)
+    except (TypeError, ValueError):
+        tier_id = 0
+    tier = ServicePriceTier.query.filter_by(id=tier_id, service_id=service.id,
+                                            is_active=True).first() if tier_id else None
+    if not tier:
+        flash('Pick which ticket you want.', 'danger')
+        return redirect(url_for('service_detail', service_id=service.id))
+    try:
+        quantity = int(request.form.get('quantity') or 1)
+    except (TypeError, ValueError):
+        quantity = 1
+    if not tier.can_take(quantity):
+        left = tier.seats_left
+        if left == 0:
+            flash(f'{tier.name} is sold out.', 'warning')
+        elif left is not None and quantity > left:
+            flash(f'Only {left} left on {tier.name}.', 'warning')
+        else:
+            flash(f'You can buy between 1 and {tier.max_per_order or 5} at a time.',
+                  'warning')
+        return redirect(url_for('service_detail', service_id=service.id))
+
+    phone = (request.form.get('phone') or current_user.phone or '').strip()[:30]
+    amount = round(tier.price * quantity, 2)
+    platform_fee = round(amount * (service.platform_commission or 0) / 100, 2)
+    order = ServiceOrder(
+        service_id=service.id, client_id=current_user.id, provider_id=service.provider_id,
+        amount=amount, platform_fee=platform_fee, provider_payout=amount - platform_fee,
+        requirements=(request.form.get('requirements', '') or '').strip()[:1000],
+        status='pending', payment_status='pending',
+        pay_to='platform', tier_id=tier.id, quantity=quantity,
+        due_date=service.event_starts_at or (utcnow() + timedelta(days=7)),
+        created_at=utcnow())
+    db.session.add(order)
+    db.session.commit()
+
+    ok, message = start_service_payment(order, normalize_mpesa_phone(phone))
+    flash(message, 'info' if ok else 'warning')
+    return redirect(url_for('service_detail', service_id=service.id))
+
+
 @app.route('/services/<int:service_id>/order', methods=['POST'])
 @login_required
 def order_service(service_id):
+    """Order a service that is paid on the platform after the work.
+
+    Split by pay_to, because the money does not work the same way for all six
+    profiles. It used to record platform revenue and increment orders_completed the
+    moment this ran, with no payment of any kind behind either - the row said a job
+    was done and the ledger said we had earned a commission on it. Both now happen
+    in finalize_paid_service_order and only when money has arrived.
+    """
     service = ServiceListing.query.get_or_404(service_id)
+    if not service.is_active:
+        flash('This service is no longer listed.', 'danger')
+        return redirect(url_for('services_marketplace'))
     if service.provider_id == current_user.id:
         flash('You cannot order your own service.', 'danger')
         return redirect(url_for('services_marketplace'))
-    platform_fee = round(service.price * service.platform_commission / 100, 2)
-    provider_payout = service.price - platform_fee
+    if service.profile_spec['flow'] == 'buy':
+        return redirect(url_for('buy_service_ticket', service_id=service.id), code=307)
+    if service.pays_provider_direct:
+        # visit and tenancy: there is no order and no revenue row to create. A
+        # barber is paid in the chair and a landlord at the viewing, so all this
+        # button can honestly do is put them in touch - and never pay first, which
+        # is what the welcome message tells the client.
+        flash('This provider is paid directly, after the service. Press "Contact '
+              'admin" and we will link you - never pay before you have been served.',
+              'info')
+        return redirect(url_for('service_detail', service_id=service.id))
+
+    if not service.price or service.price <= 0:
+        flash('This provider quotes per job. Press "Contact admin" and the price is '
+              'agreed in the thread before anything is paid.', 'info')
+        return redirect(url_for('service_detail', service_id=service.id))
+
+    existing = ServiceOrder.query.filter_by(
+        service_id=service.id, client_id=current_user.id,
+        payment_status='pending').order_by(ServiceOrder.created_at.desc()).first()
+    if existing:
+        flash('You already have an unpaid order on this service.', 'info')
+        return redirect(url_for('service_detail', service_id=service.id))
+
+    amount = round(service.price + (service.delivery_fee or 0), 2)
+    platform_fee = round(amount * (service.platform_commission or 0) / 100, 2)
     order = ServiceOrder(
-        service_id=service.id,
-        client_id=current_user.id,
-        provider_id=service.provider_id,
-        amount=service.price,
-        platform_fee=platform_fee,
-        provider_payout=provider_payout,
-        requirements=request.form.get('requirements', '').strip(),
-        status='pending',
-        due_date=utcnow() + timedelta(days=service.delivery_days),
-    )
+        service_id=service.id, client_id=current_user.id, provider_id=service.provider_id,
+        amount=amount, platform_fee=platform_fee, provider_payout=amount - platform_fee,
+        requirements=(request.form.get('requirements', '') or '').strip()[:1000],
+        status='pending', payment_status='pending', pay_to='platform', quantity=1,
+        due_date=utcnow() + timedelta(days=service.delivery_days or 3),
+        created_at=utcnow())
     db.session.add(order)
-    record_platform_revenue('service_commission', platform_fee, f'Service: {service.title}', str(service.id), 'service', current_user.id)
-    service.orders_completed += 1
     db.session.commit()
-    invalidate_service_caches()
-    flash(f'Service ordered! Provider will deliver within {service.delivery_days} days.', 'success')
+
+    if service.pays_upfront:
+        # errand: the provider is buying goods with their own money, so the client
+        # pays before anyone shops.
+        phone = (request.form.get('phone') or current_user.phone or '').strip()[:30]
+        ok, message = start_service_payment(order, normalize_mpesa_phone(phone))
+        flash(message, 'info' if ok else 'warning')
+    else:
+        flash(f'Order placed. You pay KES {amount:,.0f} on the platform once the work '
+              f'is done - press Pay on the order when the provider marks it ready.',
+              'success')
     return redirect(url_for('service_detail', service_id=service.id))
+
+
+@app.route('/services/orders/<int:order_id>/pay', methods=['POST'])
+@login_required
+@limiter.limit(SERVICE_TICKET_RATE_LIMIT)
+def pay_service_order(order_id):
+    """Pay a service order that was placed to be paid after the work.
+
+    Same rate limit as the ticket route and for the same reason: it fires an STK
+    push, so it is not something to be allowed in a loop.
+    """
+    order = ServiceOrder.query.get_or_404(order_id)
+    if order.client_id != current_user.id:
+        abort(403)
+    if order.is_paid:
+        flash('This order is already paid.', 'info')
+        return redirect(url_for('service_detail', service_id=order.service_id))
+    phone = (request.form.get('phone') or current_user.phone or '').strip()[:30]
+    ok, message = start_service_payment(order, normalize_mpesa_phone(phone))
+    flash(message, 'info' if ok else 'warning')
+    return redirect(url_for('service_detail', service_id=order.service_id))
 
 
 # --- 7b. Service linking desk (admin) ---
@@ -20580,6 +21489,7 @@ def admin_service_request_action(request_id, action):
     """claim / link / close a request."""
     link_request = ServiceLinkRequest.query.get_or_404(request_id)
     now = utcnow()
+    was = link_request.status
     if action == 'claim':
         link_request.assigned_admin_id = current_user.id
         link_request.status = 'claimed'
@@ -20589,16 +21499,73 @@ def admin_service_request_action(request_id, action):
         link_request.status = 'linked'
         link_request.linked_at = now
         create_customer_notification(link_request.client_id, 'You have been linked',
-                                     'An admin has connected you with the service provider.',
+                                     'An admin has connected you with the service provider. '
+                                     'Chat here on the platform - never pay the provider '
+                                     'before you have received the service.',
                                      'service')
-        flash('Marked as linked and the client notified.', 'success')
+        # The provider only joins the thread at 'linked' (see service_request_thread),
+        # so this is the moment they can be told there is something to answer. Sent
+        # once: re-linking an already-linked request would otherwise notify twice.
+        service = link_request.service
+        if was != 'linked' and service and service.provider_id:
+            create_customer_notification(
+                service.provider_id, 'You can now chat with the client',
+                f'An admin linked a client to "{service.title}". Open the request '
+                f'thread to reply. An admin can see this conversation.', 'service')
+        flash('Marked as linked and both sides notified.', 'success')
     elif action == 'close':
         link_request.status = 'closed'
         link_request.closed_at = now
+        # The completion counter for the two profiles that never produce a
+        # ServiceOrder. A visit or a viewing is paid to the provider in person, so
+        # there is no callback to hang this on - closing a request that actually
+        # reached 'linked' is the only evidence the platform ever gets. Guarded on
+        # the previous status, so closing an unlinked request counts nothing and
+        # closing twice cannot count twice.
+        service = link_request.service
+        if was == 'linked' and service and service.pays_provider_direct:
+            service.orders_completed = (service.orders_completed or 0) + 1
         flash('Request closed.', 'info')
     else:
         abort(404)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('service request %s action %s failed', request_id, action)
+        flash('That did not save. Try again.', 'danger')
+    return redirect(request.referrer or url_for('admin_service_requests'))
+
+
+@app.route('/admin/services/requests/<int:request_id>/notify-provider', methods=['POST'])
+@login_required
+@admin_required
+@limiter.limit(SERVICE_PROVIDER_NOTIFY_RATE_LIMIT)
+def admin_service_notify_provider(request_id):
+    """Send the provider the interest message, and optionally open wa.me on it.
+
+    Two buttons, one route. "Notify provider" stays on the desk and reports which
+    channels genuinely delivered; "WhatsApp provider" does the same send and then
+    hands the browser the provider's wa.me deep link, which is what
+    "not that the number asks to open on a browser" means - a link that opens the
+    conversation, never a number to retype.
+
+    The send itself is idempotent on provider_notified_at, so this button is safe on
+    a request the empty-desk path already notified automatically: nothing is sent
+    twice, and the WhatsApp leg still opens.
+    """
+    link_request = ServiceLinkRequest.query.get_or_404(request_id)
+    service = link_request.service
+    if not service:
+        abort(404)
+    open_whatsapp = bool(request.form.get('open_whatsapp'))
+    result = notify_service_provider(link_request)
+    flash_provider_notify_result(service, result)
+    if open_whatsapp and result.get('share_url'):
+        return redirect(result['share_url'])
+    if open_whatsapp:
+        flash(f'No phone number on "{service.title}", so there is no WhatsApp '
+              f'conversation to open.', 'warning')
     return redirect(request.referrer or url_for('admin_service_requests'))
 
 
@@ -20622,16 +21589,21 @@ def admin_service_catalogue():
             if ServiceCatalogueItem.query.filter_by(key=key).first():
                 flash(f'A service with the key "{key}" already exists.', 'warning')
                 return redirect(url_for('admin_service_catalogue'))
+            profile = (request.form.get('fulfilment_profile') or '').strip().lower()
+            if profile not in SERVICE_FULFILMENT_PROFILES:
+                profile = seed_profile_for(key)
             db.session.add(ServiceCatalogueItem(
                 key=key, label=label,
                 emoji=(request.form.get('emoji', '') or '').strip()[:16] or None,
                 seller_listable=bool(request.form.get('seller_listable')),
+                fulfilment_profile=profile,
                 is_active=True,
                 sort_order=int(form_float('sort_order', 100, minimum=0)),
                 created_by_id=current_user.id, created_at=utcnow()))
             db.session.commit()
             invalidate_service_caches()
-            flash(f'Added "{label}".', 'success')
+            flash(f'Added "{label}" as a {SERVICE_FULFILMENT_PROFILES[profile]["label"].lower()} '
+                  f'service.', 'success')
             return redirect(url_for('admin_service_catalogue'))
 
         # Bulk save of the toggles. Only the rows this form actually carried are
@@ -20649,6 +21621,14 @@ def admin_service_catalogue():
             row.seller_listable = request.form.get(f'listable_{row.id}') is not None
             row.is_active = request.form.get(f'active_{row.id}') is not None
             row.sort_order = int(form_float(f'sort_{row.id}', row.sort_order or 100, minimum=0))
+            # Retagging a category changes the shape of the *next* listing in it and
+            # of the create form, and deliberately leaves listings providers already
+            # wrote alone - each one carries its own copy of the profile. Rewriting
+            # them here would reshape a live listing behind its owner's back, and
+            # could strip an event's venue off a page that is selling tickets.
+            profile = (request.form.get(f'profile_{row.id}') or '').strip().lower()
+            if profile in SERVICE_FULFILMENT_PROFILES:
+                row.fulfilment_profile = profile
             emoji = (request.form.get(f'emoji_{row.id}', '') or '').strip()[:16]
             if emoji:
                 row.emoji = emoji
@@ -20663,6 +21643,8 @@ def admin_service_catalogue():
                   .filter(ServiceListing.is_active.is_(True))
                   .group_by(ServiceListing.service_key).all())
     return render_template('admin/service_catalogue.html', rows=rows, counts=counts,
+                           profiles=SERVICE_FULFILMENT_PROFILES,
+                           default_profile=DEFAULT_SERVICE_PROFILE,
                            direct_contact=service_direct_contact_enabled(),
                            listing_fee=service_listing_fee())
 
@@ -21992,6 +22974,48 @@ def phase_two_schema_spec():
             ('listing_fee_amount', 'listing_fee_amount FLOAT DEFAULT 0'),
             ('listing_fee_paid', 'listing_fee_paid BOOLEAN DEFAULT 0'),
             ('is_admin_listing', 'is_admin_listing BOOLEAN DEFAULT 0'),
+            # How this one is offered. Deliberately no DEFAULT: a NULL here reads
+            # as "written before the profiles existed", which ServiceListing.profile
+            # resolves to dropoff - and that is exactly what those rows were.
+            # Stamping 'dropoff' on them instead would lose the distinction between
+            # a legacy row and one a provider actually chose.
+            ('fulfilment_profile', 'fulfilment_profile VARCHAR(20)'),
+            ('pay_to', "pay_to VARCHAR(20) DEFAULT 'platform'"),
+            ('pay_when', "pay_when VARCHAR(20) DEFAULT 'after'"),
+            ('opening_hours', 'opening_hours VARCHAR(120)'),
+            ('turnaround_note', 'turnaround_note VARCHAR(120)'),
+            ('service_area', 'service_area VARCHAR(200)'),
+            ('delivery_fee', 'delivery_fee FLOAT DEFAULT 0'),
+            ('min_order_amount', 'min_order_amount FLOAT DEFAULT 0'),
+            ('serves_at_provider', 'serves_at_provider BOOLEAN DEFAULT 1'),
+            ('serves_at_client', 'serves_at_client BOOLEAN DEFAULT 0'),
+            ('appointment_required', 'appointment_required BOOLEAN DEFAULT 0'),
+            ('rate_unit', 'rate_unit VARCHAR(20)'),
+            ('deposit_amount', 'deposit_amount FLOAT DEFAULT 0'),
+            ('available_from', 'available_from DATETIME'),
+            ('event_starts_at', 'event_starts_at DATETIME'),
+            ('event_venue', 'event_venue VARCHAR(200)'),
+        ],
+        'service_catalogue_items': [
+            ('fulfilment_profile', "fulfilment_profile VARCHAR(20) DEFAULT 'dropoff'"),
+        ],
+        # A service order used to be a row with no payment behind it. These are what
+        # make it a real one: 'pending' by default, so any row that predates this
+        # migration is not silently counted as paid.
+        'service_orders': [
+            ('payment_status', "payment_status VARCHAR(20) DEFAULT 'pending'"),
+            ('checkout_request_id', 'checkout_request_id VARCHAR(60)'),
+            ('paid_at', 'paid_at DATETIME'),
+            ('pay_to', "pay_to VARCHAR(20) DEFAULT 'platform'"),
+            ('tier_id', 'tier_id INTEGER'),
+            ('quantity', 'quantity INTEGER DEFAULT 1'),
+            ('ticket_code', 'ticket_code VARCHAR(24)'),
+        ],
+        'service_link_requests': [
+            ('provider_notified_at', 'provider_notified_at DATETIME'),
+        ],
+        'service_link_messages': [
+            ('from_provider', 'from_provider BOOLEAN DEFAULT 0'),
         ],
     }
     index_specs = [
@@ -22054,6 +23078,15 @@ def phase_two_schema_spec():
         ('ix_service_requests_client_created', 'service_link_requests', 'client_id, created_at', False),
         ('ix_service_requests_service_created', 'service_link_requests', 'service_id, created_at', False),
         ('ix_service_messages_request_created', 'service_link_messages', 'request_id, created_at', False),
+        # Ticket tiers, read once per detail page in sort order.
+        ('ix_service_tiers_service_order', 'service_price_tiers', 'service_id, sort_order', False),
+        # The Daraja callback for a service order arrives holding nothing but the
+        # checkout id - the same reason ix_orders_mpesa_checkout exists above.
+        ('ix_service_orders_checkout', 'service_orders', 'checkout_request_id', False),
+        ('ix_service_orders_client_created', 'service_orders', 'client_id, created_at', False),
+        # The services grid filters by profile: ticket listings render a tier picker
+        # and the rest render a request button, so the split is a query, not a loop.
+        ('ix_service_listings_profile_active', 'service_listings', 'fulfilment_profile, is_active', False),
         # Invoices. The client's pay page is reached by token and the admin list is
         # filtered by status and due date, so both are indexed rather than scanned.
         ('ix_invoices_status_due', 'invoices', 'status, due_date', False),
@@ -22748,7 +23781,16 @@ def init_database():
         if not ServiceCatalogueItem.query.filter_by(key=key).first():
             db.session.add(ServiceCatalogueItem(
                 key=key, label=label, emoji=emoji, seller_listable=True,
+                fulfilment_profile=seed_profile_for(key),
                 is_active=True, sort_order=order * 10))
+    # Rows seeded before profiles existed have a NULL here and would otherwise stay
+    # on the dropoff fallback forever - which would tell an event-ticket buyer about
+    # pickup, the exact bug the profiles exist to remove. Backfilled only where it is
+    # blank, so an admin's own choice of profile is never overwritten.
+    for row in ServiceCatalogueItem.query.filter(
+            or_(ServiceCatalogueItem.fulfilment_profile.is_(None),
+                ServiceCatalogueItem.fulfilment_profile == '')).all():
+        row.fulfilment_profile = seed_profile_for(row.key)
     db.session.commit()
     invalidate_service_caches()
 

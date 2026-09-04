@@ -52,17 +52,22 @@ os.environ.setdefault('CACHE_TYPE', 'NullCache')
 # inventing a hundred users, orders and claims to do it. The code path is the
 # same one production takes; only the number differs.
 os.environ.setdefault('ADMIN_DASHBOARD_LIST_LIMIT', '12')
+# Same reasoning for the public caps: small enough that a handful of fixture rows
+# crosses them, and the same code path either way.
+os.environ.setdefault('PUBLIC_LIST_LIMIT', '6')
+os.environ.setdefault('RAFFLE_TICKET_DISPLAY_LIMIT', '10')
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import event
 
 import main as app_module
 from main import (ADMIN_DASHBOARD_LIST_LIMIT, ADMIN_REVIEWS_PER_PAGE, LEDGER_PER_PAGE,
-                  ORDERS_PER_PAGE, REVIEWS_PER_PAGE, SELLER_PRODUCTS_PER_PAGE, app, db,
+                  ORDERS_PER_PAGE, PUBLIC_LIST_LIMIT, RAFFLE_TICKET_DISPLAY_LIMIT,
+                  REVIEWS_PER_PAGE, SELLER_PRODUCTS_PER_PAGE, app, db,
                   flush_product_views)
-from models import (BusinessStorefront, Category, CustomerFeedback, Order, OrderItem,
-                    PaymentClaim, Product, Review, SellerVerification, Transaction, User,
-                    WithdrawalRequest)
+from models import (BusinessStorefront, Category, CustomerFeedback, Event, Order, OrderItem,
+                    PaymentClaim, Product, Raffle, RaffleTicket, Review,
+                    SellerVerification, Transaction, User, WithdrawalRequest)
 from scale import CounterBuffer
 
 FAILURES = []
@@ -161,6 +166,8 @@ def teardown():
                    .filter(Product.name.like(f'{TAG}%')).all()] or [0]
     order_ids = [row[0] for row in db.session.query(Order.id)
                  .filter(Order.user_id.in_(user_ids)).all()] or [0]
+    raffle_ids = [row[0] for row in db.session.query(Raffle.id)
+                  .filter(Raffle.title.like(f'{TAG}%')).all()] or [0]
     # Claims before orders: payment_claims.order_id is a not-null foreign key, so
     # clearing the orders first leaves rows pointing at nothing and Postgres
     # refuses the delete outright.
@@ -173,6 +180,13 @@ def teardown():
                           # and the whole teardown rolls back.
                           (Transaction, Transaction.user_id.in_(user_ids)),
                           (WithdrawalRequest, WithdrawalRequest.user_id.in_(user_ids)),
+                          # Tickets before raffles, and raffles before the product they
+                          # are drawn for: raffles.product_id and raffle_tickets.raffle_id
+                          # are both not-null foreign keys.
+                          (RaffleTicket, db.or_(RaffleTicket.raffle_id.in_(raffle_ids),
+                                                RaffleTicket.user_id.in_(user_ids))),
+                          (Raffle, Raffle.id.in_(raffle_ids)),
+                          (Event, Event.title.like(f'{TAG}%')),
                           (OrderItem, OrderItem.order_id.in_(order_ids)),
                           (Order, Order.id.in_(order_ids)),
                           (Review, Review.product_id.in_(product_ids)),
@@ -260,6 +274,149 @@ def add_reviews(product_id, count, start=0):
                               is_visible=True,
                               created_at=datetime.utcnow() - timedelta(hours=i)))
     db.session.commit()
+
+
+def add_raffles(seller_id, product_id, count, start=0):
+    """Active raffles, one card each on /raffles."""
+    made = []
+    for i in range(start, start + count):
+        raffle = Raffle(product_id=product_id, seller_id=seller_id,
+                        title=f'{TAG} raffle {i}', product_value=5000.0,
+                        ticket_price=50.0, total_tickets=500, min_participants=10,
+                        status='active',
+                        ends_at=datetime.utcnow() + timedelta(days=7 + i))
+        db.session.add(raffle)
+        made.append(raffle)
+    db.session.commit()
+    return made
+
+
+def add_raffle_tickets(raffle_id, user_id, count, start=0):
+    for i in range(start, start + count):
+        db.session.add(RaffleTicket(raffle_id=raffle_id, user_id=user_id,
+                                    ticket_number=i + 1))
+    db.session.commit()
+
+
+def add_events(creator_id, count, start=0):
+    for i in range(start, start + count):
+        db.session.add(Event(title=f'{TAG} event {i}',
+                             description=f'{TAG} description {i}',
+                             event_date=datetime.utcnow() + timedelta(days=3 + i),
+                             location='Nairobi', is_active=True,
+                             created_by=creator_id))
+    db.session.commit()
+
+
+def check_public_lists(seller_id, product_id, buyer_id, admin_id):
+    """The three public pages whose lists were bounded by nothing but the content.
+
+    These read as low-risk for as long as you only ask who controls the row count -
+    an operator publishes raffles and events, so the answer is "us" and the page
+    gets left alone. It is the wrong question. An anonymous page's cost is paid by
+    every visitor, the row count only ever goes up, and /raffles and /events are two
+    of the few pages an outside visitor arrives on directly.
+
+    The raffle grid was worse than unbounded. It worked the buyer count out in Jinja
+    with `raffle.tickets|map(attribute='user_id')|unique|list|length`, so each card
+    loaded every ticket row of its raffle to count the user ids SQL was already
+    holding. The query count grows with the cards, not the tickets, which is why it
+    never looked like an N+1 and why the check below measures the page while the
+    tickets grow and the card count does not.
+    """
+    print('the public grids are capped, and say what they are not showing')
+    cap = PUBLIC_LIST_LIMIT
+    add_raffles(seller_id, product_id, 2)
+    add_events(admin_id, 2)
+    ctx = app.app_context()
+    ctx.push()
+    try:
+        with app.test_client() as anon:
+            first_raffles, raffles_before = count_page(anon, '/raffles')
+            first_events, events_before = count_page(anon, '/events')
+            check('/raffles renders for an anonymous visitor',
+                  first_raffles.status_code == 200, first_raffles.status_code)
+            check('/events renders for an anonymous visitor',
+                  first_events.status_code == 200, first_events.status_code)
+            started = first_raffles.data.count(f'{TAG} raffle'.encode())
+            # Same guard as the protection desk: a shared database already holding
+            # sixty real raffles would put the first render at the cap and the
+            # growth comparison below would be measuring the same page twice.
+            check('the fixture starts below the cap', started < cap,
+                  f'{started} raffle cards, cap {cap}')
+    finally:
+        db.session.remove()
+        ctx.pop()
+
+    more = add_raffles(seller_id, product_id, cap + 5, start=100)
+    add_events(admin_id, cap + 5, start=100)
+    # And a raffle that sold well, so the per-card ticket load has something to load.
+    # 40 tickets over 4 buyers: enough that a page loading them all runs measurably
+    # more SQL, few enough that the fixture stays cheap.
+    hot = more[0]
+    buyers = [make_user(f'raffbuyer{i}').id for i in range(4)]
+    number = 0
+    for buyer in buyers:
+        add_raffle_tickets(hot.id, buyer, 10, start=number)
+        number += 10
+    ctx = app.app_context()
+    ctx.push()
+    try:
+        with app.test_client() as anon:
+            second_raffles, raffles_after = count_page(anon, '/raffles')
+            second_events, events_after = count_page(anon, '/events')
+            cards = second_raffles.data.count(f'{TAG} raffle'.encode())
+            check(f'at most {cap} raffle cards with {cap + 7} live',
+                  cards <= cap, cards)
+            check(f'at most {cap} event cards with {cap + 7} upcoming',
+                  second_events.data.count(f'{TAG} event'.encode()) <= cap,
+                  second_events.data.count(f'{TAG} event'.encode()))
+            # The other half, which the cap alone would have hidden: a visitor who
+            # cannot see all the raffles should at least be told there are more.
+            raffle_body = squash(second_raffles)
+            live = Raffle.query.filter_by(status='active').count()
+            check('and /raffles says how many of how many it is showing',
+                  f'of {live} open raffles' in raffle_body,
+                  raffle_body[raffle_body.find('open raffles') - 60:
+                              raffle_body.find('open raffles') + 14])
+            upcoming = Event.query.filter(
+                Event.is_active == True,
+                Event.event_date >= datetime.utcnow()).count()
+            check('and /events does too',
+                  f'of {upcoming} upcoming events' in squash(second_events),
+                  upcoming)
+            check_no_growth('/raffles did not get more expensive as raffles were added',
+                            raffles_before, raffles_after, '/raffles')
+            check_no_growth('/events did not either',
+                            events_before, events_after, '/events')
+            # The buyer count is the number the card exists to show, so a cheaper
+            # query that prints the wrong figure is not a fix.
+            check('the buyer count on a card is still the truth',
+                  b'4/10 buyers joined' in second_raffles.data,
+                  '4 distinct buyers over 40 tickets')
+    finally:
+        db.session.remove()
+        ctx.pop()
+
+    print("a buyer's own ticket badges are bounded by the page, not by their spending")
+    ticket_cap = RAFFLE_TICKET_DISPLAY_LIMIT
+    add_raffle_tickets(hot.id, buyer_id, ticket_cap + 6, start=number)
+    with as_user(buyer_id) as client:
+        detail, _ = count_page(client, f'/raffle/{hot.id}')
+        check('the raffle page renders for the buyer', detail.status_code == 200,
+              detail.status_code)
+        badges = detail.data.count(b'badge bg-warning text-dark fs-6')
+        check(f'at most {ticket_cap} badges for {ticket_cap + 6} tickets',
+              badges <= ticket_cap, badges)
+        # This is the one that matters. A raffle is won by whoever holds the most
+        # tickets, so a page that renders ten badges and says nothing else has told
+        # a buyer holding sixteen that they hold ten.
+        body = squash(detail)
+        check('the real total is on the page anyway',
+              f'of {ticket_cap + 6} tickets' in body,
+              body[body.find('Your Tickets'):body.find('Your Tickets') + 120])
+        check('and it says every one of them is in the draw',
+              'Every one of them is in the draw' in body)
 
 
 def add_protection_rows(count, start=0):
@@ -737,6 +894,8 @@ def run():
     check('the view buffer is the only thing buffered this way',
           app_module._product_view_buffer.name == 'product-views',
           app_module._product_view_buffer.stats())
+
+    check_public_lists(seller_id, subject_id, buyer_id, admin_id)
 
 
 def main():
