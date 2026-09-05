@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {#
-  Every service listing, live or paused, with the two lifecycle buttons.
+  Every service listing, live or paused, with the lifecycle buttons.
 
   This page exists because pausing works: a paused listing leaves the grid, the search
   index and the chatbot's provider list, which is the whole point of the button - and
@@ -8,10 +8,17 @@
   admin acting on a complaint has a service *name*, not a position in a list, so this
   filters and searches rather than paginating.
 
-  Deleting is refused whenever anything points at the listing, and the reason is printed
-  in place of the button. For an admin that is not a limitation to work around: pausing
-  IS the takedown - the listing becomes unreachable for clients while every order, thread
-  and payment record stays joinable for whatever follows the complaint.
+  Removal is two stages and this page is the middle one. A provider who has served their
+  last client asks to be let go; an admin confirms nothing is still owed to anybody; the
+  provider then presses Delete themselves. So the Confirm button here grants clearance -
+  it does not delete. What an admin is being asked for is the judgement the data cannot
+  make: an order counts as settled the moment it is paid, and a laundry job paid this
+  morning is still a pile of shirts.
+
+  What an admin cannot do is override. A client the platform can prove is outstanding -
+  an unpaid order, a refund owed, a ticket for an event still ahead, a request open at
+  the desk - blocks removal for both roles, and pausing stays the takedown: the listing
+  becomes unreachable while every order, thread and payment record stays joinable.
 #}
 {% block title %}Service listings - {{ super() }}{% endblock %}
 
@@ -34,6 +41,23 @@
         </div>
     </div>
 
+    {#
+      The queue, shown whatever the current filter is. A provider who asked to be let go
+      is waiting on a page with a greyed-out button, and if this count were only visible
+      while already filtered for it, nobody would find out there was anything to answer.
+    #}
+    {% if awaiting_removal and status != 'removal' %}
+    <div class="alert alert-warning d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <div>
+            <i class="fas fa-hourglass-half me-1"></i>
+            <strong>{{ awaiting_removal }}</strong> provider(s) are waiting for you to confirm
+            a service can be removed.
+        </div>
+        <a href="{{ url_for('admin_services', status='removal') }}"
+           class="btn btn-sm btn-warning text-nowrap">Review them</a>
+    </div>
+    {% endif %}
+
     <form method="GET" action="{{ url_for('admin_services') }}" class="row g-2 mb-3">
         <div class="col-12 col-md">
             <input name="q" class="form-control" value="{{ search }}"
@@ -44,6 +68,8 @@
                 <option value="" {{ 'selected' if not status }}>All</option>
                 <option value="active" {{ 'selected' if status == 'active' }}>Live only</option>
                 <option value="paused" {{ 'selected' if status == 'paused' }}>Paused only</option>
+                <option value="removal" {{ 'selected' if status == 'removal' }}>Awaiting removal{{ ' (%d)' % awaiting_removal if awaiting_removal }}</option>
+                <option value="retired" {{ 'selected' if status == 'retired' }}>Removed</option>
             </select>
         </div>
         <div class="col-auto d-flex gap-2">
@@ -79,6 +105,7 @@
                 {% set counts = dependencies.get(service.id, (0, 0)) %}
                 {% set order_count = counts[0] %}
                 {% set request_count = counts[1] %}
+                {% set blocked = blockers.get(service.id, []) %}
                 <tr>
                     <td>
                         <a href="{{ url_for('service_detail', service_id=service.id) }}"
@@ -106,13 +133,34 @@
                         {% endif %}
                     </td>
                     <td>
-                        {% if service.is_active %}
+                        {% if service.is_retired %}
+                        <span class="badge bg-dark">Removed</span>
+                        <div class="small text-muted text-nowrap">{{ service.retired_at.strftime('%d %b %Y') }}</div>
+                        {% elif service.is_active %}
                         <span class="badge bg-success">Live</span>
                         {% else %}
                         <span class="badge bg-secondary">Paused</span>
                         {% endif %}
+                        {% if service.removal_cleared %}
+                        <div class="mt-1"><span class="badge bg-danger">Cleared to delete</span></div>
+                        {% elif service.removal_pending %}
+                        <div class="mt-1"><span class="badge bg-warning text-dark">Removal requested</span></div>
+                        {% endif %}
                     </td>
                     <td>
+                        {#
+                          A removed listing has no actions at all. Its row is here so a
+                          dispute about a past order can be worked from something, and
+                          every button on it would be a way to bring back a service two
+                          people already agreed was gone.
+                        #}
+                        {% if service.is_retired %}
+                        <div class="small text-muted text-end">
+                            <i class="fas fa-circle-check me-1"></i>Removed
+                            {%- if service.removal_cleared_by %}, cleared by
+                            {{ service.removal_cleared_by.username }}{% endif %}
+                        </div>
+                        {% else %}
                         <div class="d-flex flex-wrap gap-2 justify-content-end">
                             {% if service.is_active %}
                             <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
@@ -124,7 +172,8 @@
                                 </button>
                             </form>
                             {% else %}
-                            <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}">
+                            <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
+                                  {% if service.removal_pending or service.removal_cleared %}onsubmit="return confirm('Put &quot;{{ service.title|e }}&quot; back in front of clients?\n\nIts provider asked for it to be removed. Restoring cancels that request, and the removal would have to be asked for again.');"{% endif %}>
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                                 <input type="hidden" name="state" value="active">
                                 <button class="btn btn-sm btn-outline-success text-nowrap">
@@ -133,21 +182,80 @@
                             </form>
                             {% endif %}
 
-                            {% if order_count or request_count %}
-                            <span class="small text-muted align-self-center text-nowrap"
-                                  title="Deleting would destroy clients' orders and message threads">
-                                <i class="fas fa-lock"></i>
+                            {#
+                              The clearance pair, shown only while a provider is actually
+                              asking. Confirm grants the provider their Delete button; it
+                              does not delete, because the person who stopped offering the
+                              service is the person who removes it.
+                            #}
+                            {% if service.removal_pending %}
+                            {% if blocked %}
+                            <span class="small text-danger align-self-center"
+                                  title="{{ blocked|join('; ') }}">
+                                <i class="fas fa-lock me-1"></i>{{ blocked|length }} outstanding
                             </span>
                             {% else %}
-                            <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
-                                  onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot; permanently?\n\nThis cannot be undone. Nothing points at this listing, so nothing else is affected.');">
+                            <form method="POST" action="{{ url_for('admin_service_removal_clearance', service_id=service.id) }}"
+                                  onsubmit="return confirm('Confirm &quot;{{ service.title|e }}&quot; can be removed?\n\nNothing is outstanding on the platform: {{ order_count }} order(s) and {{ request_count }} request(s) are all settled here. You are confirming there is no unfinished work behind them off the platform either.\n\nIts provider will then be able to delete it.');">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                <button class="btn btn-sm btn-outline-danger">
+                                <input type="hidden" name="decision" value="confirm">
+                                <button class="btn btn-sm btn-success text-nowrap">
+                                    <i class="fas fa-circle-check me-1"></i>Confirm
+                                </button>
+                            </form>
+                            {% endif %}
+                            <button class="btn btn-sm btn-outline-secondary text-nowrap"
+                                    data-bs-toggle="collapse" data-bs-target="#decline-{{ service.id }}"
+                                    aria-expanded="false" aria-controls="decline-{{ service.id }}">
+                                <i class="fas fa-xmark me-1"></i>Decline
+                            </button>
+                            {% endif %}
+
+                            {#
+                              An admin's own delete. Unblocked and cleared listings only -
+                              the same two gates the provider's button has, because the
+                              rule is about the clients, not about who is pressing.
+                            #}
+                            {% if blocked %}
+                            <span class="small text-muted align-self-center text-nowrap"
+                                  title="{{ blocked|join('; ') }}">
+                                <i class="fas fa-lock"></i>
+                            </span>
+                            {% elif service.removal_cleared or not (order_count or request_count) %}
+                            <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
+                                  onsubmit="return confirm('Remove &quot;{{ service.title|e }}&quot; now?\n\nThis cannot be undone. {% if order_count or request_count %}Its {{ order_count }} order(s) and {{ request_count }} request(s) stay readable so past clients can still see what they paid for, but the listing is gone from the platform.{% else %}Nothing points at this listing, so nothing else is affected.{% endif %}');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                <button class="btn btn-sm btn-outline-danger" title="Remove listing">
                                     <i class="fas fa-trash"></i>
                                 </button>
                             </form>
                             {% endif %}
                         </div>
+
+                        {#
+                          Collapsed rather than a prompt: a decline is the message the
+                          provider acts on, so it needs somewhere to type, and an empty
+                          reason leaves them with a paused listing and nothing to do.
+                        #}
+                        {% if service.removal_pending %}
+                        <div class="collapse mt-2" id="decline-{{ service.id }}">
+                            <form method="POST" action="{{ url_for('admin_service_removal_clearance', service_id=service.id) }}"
+                                  class="d-flex flex-wrap gap-2 justify-content-end">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                <input type="hidden" name="decision" value="decline">
+                                <input name="note" maxlength="300" class="form-control form-control-sm"
+                                       style="max-width:20rem;" required
+                                       placeholder="What is still outstanding? The provider sees this.">
+                                <button class="btn btn-sm btn-secondary text-nowrap">Send decline</button>
+                            </form>
+                        </div>
+                        {% endif %}
+                        {% if service.removal_note %}
+                        <div class="small text-muted mt-1 text-end">
+                            <i class="fas fa-comment-dots me-1"></i>{{ service.removal_note }}
+                        </div>
+                        {% endif %}
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}

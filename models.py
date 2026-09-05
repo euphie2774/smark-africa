@@ -2074,13 +2074,68 @@ class ServiceListing(db.Model):
     event_starts_at = db.Column(db.DateTime)            # ticket
     event_venue = db.Column(db.String(200))             # ticket
 
+    # --- retiring a listing for good --------------------------------------
+    # Pausing and deleting are not the same fact, and neither is "the provider is
+    # finished with this service". A provider who has served their last client asks
+    # for removal, an admin confirms nothing is still owed to anybody, and only then
+    # can the provider delete it. Three columns because it is three separate events
+    # by two different people, and after a dispute the question asked is which admin
+    # authorised it.
+    removal_requested_at = db.Column(db.DateTime)
+    removal_cleared_at = db.Column(db.DateTime)
+    removal_cleared_by_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    # The provider's reason on the way in, or the admin's reason for declining on the
+    # way back. One column: only one of them is ever the latest word, and the flow
+    # has exactly two directions.
+    removal_note = db.Column(db.String(300))
+    # The tombstone. Set when a listing with settled history is removed: the row has
+    # to survive because service_orders.service_id and service_link_requests.service_id
+    # are both nullable=False, so a paid client's order must keep resolving to the
+    # thing they paid for. Distinct from is_active=False, which means paused and
+    # resumable - this one is gone, and nothing resumes it.
+    retired_at = db.Column(db.DateTime)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    provider = db.relationship('User', lazy=True)
+    # foreign_keys is explicit on both because removal_cleared_by_id is a second path
+    # from this table to users, and SQLAlchemy will not guess between two. Named the
+    # way ServiceOrder.provider already is (models.py:2341) rather than inventing a
+    # style for it.
+    provider = db.relationship('User', foreign_keys=[provider_id], lazy=True)
+    removal_cleared_by = db.relationship('User', foreign_keys=[removal_cleared_by_id],
+                                         lazy=True)
     # Ordered here so no caller has to remember to, and so the "from KES x" price
     # and the picker agree about which tier comes first.
     tiers = db.relationship('ServicePriceTier', lazy=True, cascade='all, delete-orphan',
                             order_by='ServicePriceTier.sort_order,ServicePriceTier.price')
+
+    @property
+    def is_retired(self):
+        """Removed for good. Invisible to clients, unresumable, kept for the records.
+
+        Every public read path filters is_active=True, so a retired row is already
+        unreachable for clients the moment retired_at is stamped - this property is
+        for the two management pages, which are the only surfaces that show a listing
+        without asking whether it is active.
+        """
+        return self.retired_at is not None
+
+    @property
+    def removal_pending(self):
+        """The provider has asked to remove it and no admin has answered yet."""
+        return self.removal_requested_at is not None and not self.removal_cleared_at \
+            and not self.is_retired
+
+    @property
+    def removal_cleared(self):
+        """An admin confirmed the clients are sorted, so the provider may delete it.
+
+        Clearance is permission to press the button, never a licence for the button
+        to skip its own checks: the delete route re-counts what is outstanding at the
+        moment of the press, because a client can arrive between the confirmation and
+        the click.
+        """
+        return self.removal_cleared_at is not None and not self.is_retired
 
     @property
     def profile(self):

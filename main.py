@@ -19698,6 +19698,13 @@ SERVICE_PROVIDER_INTEREST_MESSAGE = (
     'your rating. Thank you for making SMARKAFRICA a trustworthy platform.'
 )
 
+# A request in one of these states is a client the platform has not finished with:
+# waiting at the desk, claimed by an admin, or connected and mid-conversation. The
+# terminal states are 'closed' and 'whatsapp_redirected'. Named because the removal
+# guard and the duplicate-request check must agree about it for ever - if a status is
+# ever added, a listing could otherwise be retired out from under a live client.
+SERVICE_LIVE_REQUEST_STATUSES = ('open', 'claimed', 'linked')
+
 SERVICE_REQUEST_RATE_LIMIT = os.environ.get('SERVICE_REQUEST_RATE_LIMIT', '20 per hour')
 # This endpoint is polled, not clicked, so the ceiling has to admit the poll or the
 # thread silently freezes at exactly the wrong moment - a client watching for the
@@ -20463,9 +20470,24 @@ def service_detail(service_id):
     leak it, because for everyone else it is not in the context at all.
     """
     service = ServiceListing.query.get_or_404(service_id)
-    if not service.is_active and not (current_user.is_authenticated and current_user.is_admin):
+    # A listing that is not live is unreachable for clients - that is the whole of what
+    # pausing does - but the two people entitled to act on it can still open it: an
+    # admin, and the provider whose listing it is.
+    #
+    # The provider matters here because of the removal flow. Asking for removal pauses
+    # the listing on the way out, so without this the person who just asked is locked
+    # out of the page carrying every button for the rest of it, and a plain pause hides
+    # the Resume button from the only person whose service it is. Retired rows are
+    # included for them too: a provider who follows an old link should be told the
+    # listing was removed rather than shown a 404, and the template renders that state
+    # with no actions on it at all.
+    viewer_is_admin = current_user.is_authenticated and current_user.is_admin
+    if not service.is_active and not (
+            viewer_is_admin
+            or (current_user.is_authenticated
+                and current_user.id == service.provider_id)):
         abort(404)
-    is_admin_viewer = current_user.is_authenticated and current_user.is_admin
+    is_admin_viewer = viewer_is_admin
     item = service_catalogue_map().get(service.service_key or '')
     open_request = None
     if current_user.is_authenticated:
@@ -20702,7 +20724,7 @@ def service_contact_admin(service_id):
     existing = ServiceLinkRequest.query.filter(
         ServiceLinkRequest.service_id == service.id,
         ServiceLinkRequest.client_id == current_user.id,
-        ServiceLinkRequest.status.in_(('open', 'claimed', 'linked')),
+        ServiceLinkRequest.status.in_(SERVICE_LIVE_REQUEST_STATUSES),
     ).first()
     if existing:
         # Pressing the button twice must not queue the same client twice at the desk;
@@ -21490,27 +21512,128 @@ def service_dependency_counts(services):
     return {sid: (orders.get(sid, 0), requests_.get(sid, 0)) for sid in ids}
 
 
-def service_removal_blockers(service):
-    """Why this one listing cannot be deleted, phrased for whoever pressed the button.
+def _blocker_sentences(unpaid, refunds, ticket_holders, live_requests):
+    """The wording for one listing's outstanding clients, from four numbers.
 
-    Counted here rather than passed in from the page, because the page's numbers were
-    true when it rendered and this decides whether a row is about to be destroyed. A
-    ticket bought in the seconds between the two is precisely the case worth losing.
+    Split from the counting so the single-listing check at the moment of the press and
+    the whole-page map render identical sentences. Two copies of this wording would
+    drift, and the page would then promise something the button disagrees with.
     """
     blockers = []
-    orders = ServiceOrder.query.filter_by(service_id=service.id).count()
-    if orders:
-        paid = ServiceOrder.query.filter_by(service_id=service.id,
-                                            payment_status='paid').count()
-        if paid:
-            blockers.append(f'{paid} paid order(s) point at it, and deleting it would '
-                            f'destroy the record those clients paid for')
-        else:
-            blockers.append(f'{orders} order(s) point at it')
-    asked = ServiceLinkRequest.query.filter_by(service_id=service.id).count()
-    if asked:
-        blockers.append(f'{asked} client request(s) and their message threads point at it')
+    if unpaid:
+        blockers.append(f'{unpaid} order(s) are still waiting on payment - a client '
+                        f'could be paying right now')
+    if refunds:
+        blockers.append(f'{refunds} client(s) are owed a refund on this listing')
+    if ticket_holders:
+        blockers.append(f'{ticket_holders} paid ticket(s) are for an event that has '
+                        f'not happened yet')
+    if live_requests:
+        blockers.append(f'{live_requests} client request(s) are still open at the '
+                        f'linking desk')
     return blockers
+
+
+def _ticket_event_pending(service):
+    """Whether paid tickets on this listing are still owed an event."""
+    return bool(service.profile == 'ticket' and service.event_starts_at
+                and service.event_starts_at > utcnow())
+
+
+def service_unsorted_clients(service):
+    """Clients this listing still owes something, phrased for whoever pressed the button.
+
+    "Sorted" has to mean something the data can actually reach, or the removal button
+    is decorative. Nothing in the platform ever marks a ServiceOrder 'completed' - a
+    paid order goes to 'in_progress' in mark_service_order_paid and stays there, and
+    orders_completed is incremented at payment - so "unsorted" cannot mean "not
+    completed". It would block every listing that ever sold anything, for ever.
+
+    So this counts only what the platform can prove is still outstanding:
+
+      * payment still in flight. An STK callback can land seconds from now and turn
+        this row into a client who has paid for something nobody is offering.
+      * a refund owed. oversold_refund_due is money the platform took for a seat that
+        did not exist; it is the last row that should vanish.
+      * a paid ticket for an event that has not happened. Those clients are holding
+        something they intend to use on a date in the future.
+      * a request still open, claimed or linked - the client is mid-conversation at
+        the desk, which is the plainest form of "not yet sorted" there is.
+
+    What it deliberately does not block on: settled history. A closed request, a paid
+    job on a profile the platform counted at payment, a past event, a failed payment.
+    Those are records, not obligations, and keeping a provider tied to a listing for
+    ever because it once worked is the opposite of what removal is for.
+
+    Counted fresh at the moment of the press rather than trusting the page's numbers,
+    because a client can arrive between the render and the click - and that client is
+    exactly the one worth not losing.
+    """
+    unpaid = ServiceOrder.query.filter_by(service_id=service.id,
+                                          payment_status='pending').count()
+    refunds = ServiceOrder.query.filter_by(service_id=service.id,
+                                           status='oversold_refund_due').count()
+    holders = 0
+    if _ticket_event_pending(service):
+        holders = ServiceOrder.query.filter_by(service_id=service.id,
+                                               payment_status='paid').count()
+    live = ServiceLinkRequest.query.filter(
+        ServiceLinkRequest.service_id == service.id,
+        ServiceLinkRequest.status.in_(SERVICE_LIVE_REQUEST_STATUSES)).count()
+    return _blocker_sentences(unpaid, refunds, holders, live)
+
+
+def service_blocker_map(services):
+    """{id: [sentences]} for a page showing several listings.
+
+    Three grouped queries for the whole page, not four per row. The per-row version is
+    the trap named on raffle_buyer_counts and service_dependency_counts: it reads as an
+    ordinary function call, the query count grows with the listings rather than with
+    the orders, so it never looks like an N+1 - and it gets slower for exactly the
+    providers with enough listings to need this page.
+    """
+    ids = [service.id for service in services]
+    if not ids:
+        return {}
+    # One pass over the orders, split by what each status means, rather than one query
+    # per meaning: the row set is identical and only the grouping differs.
+    order_rows = db.session.query(
+        ServiceOrder.service_id, ServiceOrder.payment_status, ServiceOrder.status,
+        func.count(ServiceOrder.id)
+    ).filter(ServiceOrder.service_id.in_(ids)).group_by(
+        ServiceOrder.service_id, ServiceOrder.payment_status, ServiceOrder.status).all()
+    unpaid, refunds, paid = {}, {}, {}
+    for sid, payment_status, status, count in order_rows:
+        if payment_status == 'pending':
+            unpaid[sid] = unpaid.get(sid, 0) + count
+        if status == 'oversold_refund_due':
+            refunds[sid] = refunds.get(sid, 0) + count
+        if payment_status == 'paid':
+            paid[sid] = paid.get(sid, 0) + count
+    live = dict(db.session.query(
+        ServiceLinkRequest.service_id, func.count(ServiceLinkRequest.id)
+    ).filter(ServiceLinkRequest.service_id.in_(ids),
+             ServiceLinkRequest.status.in_(SERVICE_LIVE_REQUEST_STATUSES)).group_by(
+        ServiceLinkRequest.service_id).all())
+    return {
+        service.id: _blocker_sentences(
+            unpaid.get(service.id, 0), refunds.get(service.id, 0),
+            paid.get(service.id, 0) if _ticket_event_pending(service) else 0,
+            live.get(service.id, 0))
+        for service in services
+    }
+
+
+def service_settled_history(service):
+    """(orders, requests) already on the books for a listing that has no blockers.
+
+    What an admin is being asked to sign off on. The blockers list says what is
+    outstanding; this says what is kept, which is the other half of an informed
+    confirmation - "nothing is outstanding" and "there are forty paid jobs behind it"
+    are both true at once and mean different things for the button they press.
+    """
+    return (ServiceOrder.query.filter_by(service_id=service.id).count(),
+            ServiceLinkRequest.query.filter_by(service_id=service.id).count())
 
 
 def service_for_management(service_id):
@@ -21534,13 +21657,20 @@ def my_services():
     Inactive rows are shown too, and deliberately - a paused listing is invisible
     everywhere else on the platform, so if it were filtered out here there would be no
     surface anywhere that could turn it back on.
+
+    Retired rows are the exception: the provider asked for those to be gone and an
+    admin agreed, so listing them here would be showing somebody the thing they
+    deleted. They stay reachable on the admin page, where a dispute is worked from.
     """
-    services = ServiceListing.query.filter_by(provider_id=current_user.id).order_by(
+    base = ServiceListing.query.filter(
+        ServiceListing.provider_id == current_user.id,
+        ServiceListing.retired_at.is_(None))
+    services = base.order_by(
         ServiceListing.is_active.desc(), ServiceListing.created_at.desc()
     ).limit(PUBLIC_LIST_LIMIT).all()
-    total = ServiceListing.query.filter_by(provider_id=current_user.id).count()
-    return render_template('my_services.html', services=services, total=total,
-                           dependencies=service_dependency_counts(services))
+    return render_template('my_services.html', services=services, total=base.count(),
+                           dependencies=service_dependency_counts(services),
+                           blockers=service_blocker_map(services))
 
 
 @app.route('/admin/services')
@@ -21553,23 +21683,56 @@ def admin_services():
     which is the point - and that would otherwise include hiding it from the only
     people who can review it. Without this page an admin can act on a service only by
     finding it in the public grid, and a paused one is not in the public grid.
+
+    'removal' is the queue that makes the two-stage removal work: a provider asking to
+    be let go is a request addressed to an admin, and a request nobody can find is a
+    provider left waiting on a page with a greyed-out button.
     """
     query = ServiceListing.query
     status = (request.args.get('status') or '').strip().lower()
     if status == 'active':
-        query = query.filter(ServiceListing.is_active == True)
+        query = query.filter(ServiceListing.is_active == True,
+                             ServiceListing.retired_at.is_(None))
     elif status == 'paused':
-        query = query.filter(ServiceListing.is_active == False)
+        # Retired rows are excluded here rather than counted as paused: they are also
+        # is_active=False, and an admin filtering for "paused" is looking for listings
+        # somebody might still switch back on.
+        query = query.filter(ServiceListing.is_active == False,
+                             ServiceListing.retired_at.is_(None))
+    elif status == 'removal':
+        query = query.filter(ServiceListing.removal_requested_at.isnot(None),
+                             ServiceListing.removal_cleared_at.is_(None),
+                             ServiceListing.retired_at.is_(None))
+    elif status == 'retired':
+        query = query.filter(ServiceListing.retired_at.isnot(None))
     search = (request.args.get('q') or '').strip()[:80]
     if search:
         like = f'%{search}%'
         query = query.filter(db.or_(ServiceListing.title.ilike(like),
                                     ServiceListing.category.ilike(like)))
-    services = query.order_by(ServiceListing.created_at.desc()).limit(
-        ADMIN_SERVICE_LIST_LIMIT).all()
+    services = query.order_by(ServiceListing.created_at.desc()).options(
+        # Both are many-to-one, so these are LEFT JOINs that cannot multiply rows.
+        # The page prints provider.username on every row and the clearing admin on
+        # every retired one; lazy, that is one or two queries per row, and the count
+        # would grow with the listings rather than with anything a reader would think
+        # to look at. ADMIN_SERVICE_LIST_LIMIT caps how bad it gets, which is not the
+        # same as it not happening.
+        joinedload(ServiceListing.provider),
+        joinedload(ServiceListing.removal_cleared_by),
+    ).limit(ADMIN_SERVICE_LIST_LIMIT).all()
+    # The count for the badge on the filter, whatever is being filtered right now: an
+    # admin looking at the live listings still needs to see that four providers are
+    # waiting for an answer. One count, not a second listing.
+    awaiting = ServiceListing.query.filter(
+        ServiceListing.removal_requested_at.isnot(None),
+        ServiceListing.removal_cleared_at.is_(None),
+        ServiceListing.retired_at.is_(None)).count()
     return render_template('admin/services.html', services=services,
                            total=query.count(), status=status, search=search,
-                           dependencies=service_dependency_counts(services))
+                           awaiting_removal=awaiting,
+                           dependencies=service_dependency_counts(services),
+                           blockers=service_blocker_map(services))
+
 
 
 @app.route('/services/<int:service_id>/status', methods=['POST'])
@@ -21578,10 +21741,25 @@ def service_set_status(service_id):
     """Pause or resume one listing. Provider or admin."""
     service = service_for_management(service_id)
     resume = (request.form.get('state') or '') == 'active'
+    if service.is_retired:
+        # Pausing a retired listing is a no-op and resuming one would put something
+        # back in front of clients that the provider and an admin agreed was gone.
+        # There is no undo button by design: the way back is to list it again.
+        flash('That listing was removed. Removing is not a pause - list the service '
+              'again if you have started offering it.', 'warning')
+        return redirect(request.referrer or url_for('my_services'))
     if service.is_active == resume:
         flash('That listing was already %s.' % ('active' if resume else 'paused'), 'info')
         return redirect(request.referrer or url_for('my_services'))
     service.is_active = resume
+    if resume:
+        # Offering it again is the opposite of removing it, so a pending request and a
+        # clearance both go. Otherwise a listing could sit live and sellable with a
+        # live Delete button on it, and the admin's confirmation would be a statement
+        # about a state of affairs that has since been reversed.
+        service.removal_requested_at = None
+        service.removal_cleared_at = None
+        service.removal_cleared_by_id = None
     # Counted before the commit so the message can be specific, and only when pausing:
     # these are the clients already mid-conversation, who are the reason a pause is not
     # simply a silent flag flip.
@@ -21617,12 +21795,154 @@ def service_set_status(service_id):
     return redirect(request.referrer or url_for('my_services'))
 
 
+@app.route('/services/<int:service_id>/removal-request', methods=['POST'])
+@login_required
+def service_request_removal(service_id):
+    """Stage one: the provider says they are finished with this listing.
+
+    Not a delete. It asks an admin to confirm nothing is still owed to anybody, and
+    the provider presses delete themselves once that clearance exists - they are the
+    one who knows they have stopped offering it, so they are the one who removes it.
+
+    Blockers are checked here as well as at the press, so a provider is told about a
+    client waiting on them now rather than after an admin has spent attention on it.
+    """
+    service = service_for_management(service_id)
+    if service.is_retired:
+        flash('That listing has already been removed.', 'info')
+        return redirect(request.referrer or url_for('my_services'))
+    blockers = service_unsorted_clients(service)
+    if blockers:
+        flash('Not yet - ' + '; '.join(blockers) +
+              '. Sort those clients first. Pause the listing meanwhile: it disappears '
+              'for new clients and nothing already agreed is lost.', 'warning')
+        return redirect(request.referrer or url_for('my_services'))
+    if service.removal_cleared:
+        flash('An admin has already confirmed this one. The Delete button is live.',
+              'info')
+        return redirect(request.referrer or url_for('my_services'))
+    already = service.removal_pending
+    service.removal_requested_at = service.removal_requested_at or utcnow()
+    note = (request.form.get('note') or '').strip()[:300]
+    if note:
+        service.removal_note = note
+    # Paused on the way out. Asking for removal and continuing to sell are not things
+    # somebody means at the same time, and a client who arrives during the wait is a
+    # new blocker that would undo the request.
+    service.is_active = False
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('service %s removal request failed', service_id)
+        flash('That did not save. Try again.', 'danger')
+        return redirect(request.referrer or url_for('my_services'))
+    invalidate_service_caches()
+    if already:
+        flash('Still with the admins. You will be able to delete it once confirmed.',
+              'info')
+        return redirect(request.referrer or url_for('my_services'))
+    notify_admins_removal_requested(service)
+    flash(f'Asked the admins to confirm "{service.title}" can go. It is paused and off '
+          f'the services page already. Once an admin checks nothing is outstanding, the '
+          f'Delete button here becomes live.', 'success')
+    return redirect(request.referrer or url_for('my_services'))
+
+
+@app.route('/admin/services/<int:service_id>/removal-clearance', methods=['POST'])
+@login_required
+@admin_required
+def admin_service_removal_clearance(service_id):
+    """Stage two: an admin confirms, or declines, that a listing can be removed.
+
+    The counts are taken again here rather than trusted from the request: the whole
+    point of the confirmation is that it is made against the state of things now, and
+    a client can arrive between the provider asking and an admin looking.
+    """
+    service = ServiceListing.query.get_or_404(service_id)
+    decision = (request.form.get('decision') or '').strip()
+    note = (request.form.get('note') or '').strip()[:300]
+    if service.is_retired:
+        flash('That listing has already been removed.', 'info')
+        return redirect(request.referrer or url_for('admin_services'))
+    if not service.removal_requested_at:
+        flash('Its provider has not asked for that listing to be removed.', 'warning')
+        return redirect(request.referrer or url_for('admin_services'))
+    if decision == 'decline':
+        service.removal_requested_at = None
+        service.removal_cleared_at = None
+        service.removal_cleared_by_id = None
+        service.removal_note = note or None
+        try:
+            db.session.commit()
+        except SQLAlchemyError:
+            db.session.rollback()
+            logger.exception('service %s removal decline failed', service_id)
+            flash('That did not save. Try again.', 'danger')
+            return redirect(request.referrer or url_for('admin_services'))
+        # Left paused on purpose: the provider paused it to ask, and un-pausing on
+        # their behalf would put a listing back in front of clients without the person
+        # who offers it deciding to.
+        notify_provider_removal_declined(service, note)
+        flash(f'Declined. "{service.title}" stays, still paused, and its provider has '
+              f'been told why.', 'info')
+        return redirect(request.referrer or url_for('admin_services'))
+    if decision != 'confirm':
+        flash('Choose confirm or decline.', 'warning')
+        return redirect(request.referrer or url_for('admin_services'))
+    blockers = service_unsorted_clients(service)
+    if blockers:
+        # No override, for an admin either. These are clients the platform can prove
+        # are still owed something, and a confirmation is a judgement about the work
+        # off the platform - not permission to drop a paid order on the floor.
+        flash('Cannot confirm: ' + '; '.join(blockers) +
+              '. Those have to be settled first - the listing can stay paused until '
+              'they are.', 'warning')
+        return redirect(request.referrer or url_for('admin_services'))
+    service.removal_cleared_at = utcnow()
+    service.removal_cleared_by_id = current_user.id
+    if note:
+        service.removal_note = note
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('service %s removal clearance failed', service_id)
+        flash('That did not save. Try again.', 'danger')
+        return redirect(request.referrer or url_for('admin_services'))
+    notify_provider_removal_cleared(service)
+    flash(f'Confirmed. Its provider can now delete "{service.title}".', 'success')
+    return redirect(request.referrer or url_for('admin_services'))
+
+
 @app.route('/services/<int:service_id>/delete', methods=['POST'])
 @login_required
 def service_delete(service_id):
-    """Delete one listing, but only when nothing points at it. Provider or admin."""
+    """Stage three: the listing goes. Pressed by whoever listed it, or by an admin.
+
+    Three refusals and two outcomes.
+
+    Refused if any client is still unsorted - by both roles, with no override, because
+    that is the rule: an unsorted client means pause is the only thing on offer.
+    Refused if the listing has history and no admin has confirmed it, because "no
+    pending unfinished work" covers work the platform cannot see - a laundry job paid
+    for this morning counts as a settled order here and is still a pile of shirts.
+    A listing with no history at all needs no clearance: nobody has ever been a client
+    of it, so there is nothing for an admin to have an opinion about, and a typo made
+    a minute ago should not need a queue.
+
+    Then either the row goes or it is tombstoned. service_orders.service_id and
+    service_link_requests.service_id are both nullable=False and neither cascades, so
+    a listing anybody ever ordered from cannot be deleted without breaking the record
+    of what they paid for. It is stamped retired_at instead: gone from every page,
+    every search and the chatbot, still resolvable from the order that points at it.
+    """
     service = service_for_management(service_id)
-    blockers = service_removal_blockers(service)
+    if service.is_retired:
+        flash('That listing has already been removed.', 'info')
+        return redirect(url_for('admin_services') if current_user.is_admin
+                        else url_for('my_services'))
+    blockers = service_unsorted_clients(service)
     if blockers:
         # Refused rather than cascaded, and the alternative is named in the same
         # breath, because the person pressing this wants the listing gone and needs to
@@ -21631,10 +21951,23 @@ def service_delete(service_id):
               '. Pause it instead - it disappears for clients and nothing is lost.',
               'warning')
         return redirect(request.referrer or url_for('my_services'))
+    orders, requests_seen = service_settled_history(service)
+    if (orders or requests_seen) and not service.removal_cleared:
+        flash('Ask an admin to confirm this one first: %d order(s) and %d client '
+              'request(s) are on its record, and an admin checks there is no '
+              'unfinished work behind them before it goes. Use "Request removal".'
+              % (orders, requests_seen), 'warning')
+        return redirect(request.referrer or url_for('my_services'))
     title = service.title
+    provider_id = service.provider_id
+    tombstone = bool(orders or requests_seen)
     try:
-        # Tiers go with it through the delete-orphan cascade on ServiceListing.tiers.
-        db.session.delete(service)
+        if tombstone:
+            service.retired_at = utcnow()
+            service.is_active = False
+        else:
+            # Tiers go with it through the delete-orphan cascade on ServiceListing.tiers.
+            db.session.delete(service)
         db.session.commit()
     except SQLAlchemyError:
         db.session.rollback()
@@ -21642,7 +21975,15 @@ def service_delete(service_id):
         flash('That did not delete. Try again, or pause the listing instead.', 'danger')
         return redirect(request.referrer or url_for('my_services'))
     invalidate_service_caches()
-    flash(f'"{title}" has been deleted.', 'success')
+    if tombstone:
+        flash(f'"{title}" has been removed. It is gone from the services page, the '
+              f'search and the chatbot. The {orders} order(s) and {requests_seen} '
+              f'request(s) already on its record stay readable, so a past client can '
+              f'still see what they paid for.', 'success')
+    else:
+        flash(f'"{title}" has been deleted.', 'success')
+    if current_user.is_admin and provider_id != current_user.id:
+        notify_provider_service_removed(provider_id, title)
     # Never back to the referrer here: on the service's own page that is a 404 now.
     return redirect(url_for('admin_services') if current_user.is_admin
                     else url_for('my_services'))
@@ -21666,6 +22007,86 @@ def notify_admins_service_paused(service, open_requests):
     except SQLAlchemyError:
         db.session.rollback()
         logger.exception('could not notify admins about paused service %s', service.id)
+
+
+def notify_admins_removal_requested(service):
+    """Tell admins a provider is asking for a listing to be removed for good.
+
+    Same swallow-and-log shape as the pause notice, and for the same reason: the
+    request is already committed, and it is visible on /admin/services either way -
+    the notification is the nudge, not the record. Which is also why the count of
+    settled orders is in the body: it is the thing the admin is being asked to look
+    behind, and putting it here saves a page load to find out whether it is even
+    worth opening.
+    """
+    orders, requests_seen = service_settled_history(service)
+    try:
+        for admin in User.query.filter_by(is_admin=True).limit(ADMIN_FANOUT_LIMIT).all():
+            create_customer_notification(
+                admin.id, 'A provider wants a service removed',
+                f'"{service.title}" has no clients outstanding on the platform and its '
+                f'provider says they are no longer offering it. {orders} order(s) and '
+                f'{requests_seen} client request(s) are on its record. Confirm on the '
+                f'services page once you are satisfied nothing is still owed off the '
+                f'platform, and the provider can then delete it.', 'service')
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('could not notify admins about removal of service %s',
+                         service.id)
+
+
+def notify_provider_removal_cleared(service):
+    """Tell the provider the Delete button on their listing is now live."""
+    try:
+        create_customer_notification(
+            service.provider_id, 'Your service can now be deleted',
+            f'An admin has confirmed there is no unfinished work behind "{service.title}". '
+            f'Open your services page and press Delete to remove it. It stays paused and '
+            f'invisible to clients until you do.', 'service')
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('could not notify provider about cleared service %s', service.id)
+
+
+def notify_provider_removal_declined(service, note):
+    """Tell the provider an admin will not clear the removal, and why.
+
+    The reason is the whole message. A decline with no reason leaves the provider with
+    a paused listing, no Delete button and nothing to act on, so the note is appended
+    when there is one and its absence is stated when there is not.
+    """
+    reason = (f' Reason given: {note}' if note else
+              ' No reason was recorded - ask an admin what is still outstanding.')
+    try:
+        create_customer_notification(
+            service.provider_id, 'Your service was not removed',
+            f'An admin did not confirm the removal of "{service.title}".{reason} It is '
+            f'still yours and still paused - you can resume it, or ask again once that '
+            f'is settled.', 'service')
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('could not notify provider about declined removal of service %s',
+                         service.id)
+
+
+def notify_provider_service_removed(provider_id, title):
+    """Tell a provider an admin removed their listing without them pressing it.
+
+    Only sent when the presser was not the provider. An admin can delete, and the
+    provider finding out by noticing an absence is how a support ticket starts.
+    """
+    try:
+        create_customer_notification(
+            provider_id, 'A service of yours was removed',
+            f'An admin removed "{title}" from the platform. Nothing was outstanding on '
+            f'it. Contact support if that was not expected.', 'service')
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('could not notify provider %s about removed service', provider_id)
 
 
 
@@ -23234,6 +23655,14 @@ def phase_two_schema_spec():
             ('available_from', 'available_from DATETIME'),
             ('event_starts_at', 'event_starts_at DATETIME'),
             ('event_venue', 'event_venue VARCHAR(200)'),
+            # Retiring a listing. No DEFAULT on any of them: NULL is the whole
+            # meaning here - never asked, never cleared, never retired - and a
+            # stamped default would read as an event that happened.
+            ('removal_requested_at', 'removal_requested_at DATETIME'),
+            ('removal_cleared_at', 'removal_cleared_at DATETIME'),
+            ('removal_cleared_by_id', 'removal_cleared_by_id INTEGER'),
+            ('removal_note', 'removal_note VARCHAR(300)'),
+            ('retired_at', 'retired_at DATETIME'),
         ],
         'service_catalogue_items': [
             ('fulfilment_profile', "fulfilment_profile VARCHAR(20) DEFAULT 'dropoff'"),

@@ -66,6 +66,14 @@
                                 {% else %}
                                 <span class="badge bg-secondary">Paused</span>
                                 {% endif %}
+                                {# Beside the Live/Paused badge, not instead of it: a removal
+                                   in progress is a second fact about a listing that is also
+                                   paused, and replacing the badge would hide which. #}
+                                {% if service.removal_cleared %}
+                                <span class="badge bg-danger">Cleared to delete</span>
+                                {% elif service.removal_pending %}
+                                <span class="badge bg-warning text-dark">Removal requested</span>
+                                {% endif %}
                             </div>
                             <div class="small text-muted mb-1">
                                 {{ service.profile_spec.label }} &middot;
@@ -118,20 +126,52 @@
                         {% endif %}
 
                         {#
-                          Delete is shown only when nothing points at the listing, and the
-                          reason replaces the button rather than sitting next to a disabled
-                          one. The route re-checks this at the moment of the press - these
-                          numbers were true when the page rendered, and a ticket bought in
-                          between is exactly the row worth not destroying.
+                          Removal is three states, not a button. In order:
+
+                          - a client still unsorted -> no removal at all, and the reason
+                            replaces the button rather than sitting beside a disabled one;
+                          - nothing outstanding -> "Request removal", which asks an admin
+                            to confirm there is no unfinished work behind the record;
+                          - confirmed by an admin -> the real Delete.
+
+                          A listing nobody has ever ordered from skips the queue entirely:
+                          there is no client to have been left unsorted, so a typo made a
+                          minute ago does not wait on an admin.
+
+                          Every branch is re-checked in the route at the moment of the
+                          press. These numbers were true when the page rendered, and a
+                          ticket bought in between is exactly the row worth not destroying.
                         #}
-                        {% if order_count or request_count %}
+                        {% set blocked = blockers.get(service.id, []) %}
+                        {% if blocked %}
                         <span class="small text-muted align-self-center">
-                            <i class="fas fa-lock me-1"></i>Cannot be deleted - clients' orders
-                            and messages point at it. Pausing is the way to retire it.
+                            <i class="fas fa-lock me-1"></i>Cannot be removed yet -
+                            {{ blocked|join('; ') }}. Sort those clients, then ask.
                         </span>
+                        {% elif service.removal_cleared %}
+                        <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
+                              onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot; for good?\n\nAn admin has confirmed nothing is outstanding. This cannot be undone - if you start offering it again you will have to list it afresh.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-danger">
+                                <i class="fas fa-trash me-1"></i>Delete for good
+                            </button>
+                        </form>
+                        {% elif service.removal_pending %}
+                        <span class="small text-warning-emphasis align-self-center">
+                            <i class="fas fa-hourglass-half me-1"></i>Removal requested -
+                            waiting for an admin to confirm nothing is outstanding.
+                        </span>
+                        {% elif order_count or request_count %}
+                        <form method="POST" action="{{ url_for('service_request_removal', service_id=service.id) }}"
+                              onsubmit="return confirm('Ask to remove &quot;{{ service.title|e }}&quot;?\n\nUse this once you have sorted your last client and are no longer offering it. It pauses straight away, and an admin checks nothing is still owed before you can delete it.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-outline-danger">
+                                <i class="fas fa-circle-check me-1"></i>Request removal
+                            </button>
+                        </form>
                         {% else %}
                         <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
-                              onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot; permanently?\n\nThis cannot be undone. Nothing points at this listing yet, so nothing else is affected.');">
+                              onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot; permanently?\n\nThis cannot be undone. No client has ever ordered or asked about this listing, so nothing else is affected.');">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <button class="btn btn-sm btn-outline-danger">
                                 <i class="fas fa-trash me-1"></i>Delete
@@ -139,6 +179,17 @@
                         </form>
                         {% endif %}
                     </div>
+                    {% if service.removal_note and not service.removal_cleared and not service.removal_pending %}
+                    {#
+                      A declined removal, and the reason. Shown only in that state: on the
+                      way in the note is the provider's own words back at them, which is
+                      noise, and once cleared the note is history.
+                    #}
+                    <div class="alert alert-warning small mt-3 mb-0 py-2">
+                        <i class="fas fa-circle-info me-1"></i>An admin did not confirm the
+                        last removal request: {{ service.removal_note }}
+                    </div>
+                    {% endif %}
                 </div>
             </div>
         </div>
@@ -153,10 +204,12 @@
 
     <div class="alert alert-light border mt-4 small mb-0">
         <i class="fas fa-circle-info me-1"></i>
-        <strong>Stopping is not deleting.</strong>
-        Stopping takes the service off the platform for clients but keeps your record of it -
-        completed jobs, ratings, and any tickets clients have already paid for stay valid.
-        Deleting is only possible while a listing is still untouched.
+        <strong>Stopping is not removing.</strong>
+        Stopping takes the service off the platform for clients but keeps everything -
+        completed jobs, ratings, and any tickets clients have already paid for stay valid,
+        and you can switch it back on here. Removing is for when you have sorted your last
+        client and are done: ask, an admin confirms nothing is outstanding, then you delete
+        it. While any client is still unsorted, stopping is the only option.
     </div>
     {% endif %}
 </div>

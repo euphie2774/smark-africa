@@ -1754,6 +1754,280 @@ def check_taking_a_service_down(provider_id, stranger_id, admin_id, customer_id)
           and ServiceOrder.query.filter_by(service_id=attached_id).count() == 1)
 
 
+def check_two_stage_removal(provider_id, stranger_id, admin_id, customer_id):
+    """A provider who has sorted their last client removes the listing, in three steps.
+
+    Request -> an admin confirms -> the provider deletes. The reason it is three and not
+    one press: "no pending unfinished work" is not a question the tables can answer. No
+    ServiceOrder is ever marked completed anywhere in the platform - payment moves it
+    'pending'->'in_progress' and that is terminal - so a laundry job paid this morning
+    counts as settled here and is still a pile of shirts. An admin is in the loop for
+    exactly the part the data cannot see.
+
+    Four things are asserted, and the third and fourth are the ones worth having:
+
+    1. an unsorted client blocks the request, for the provider AND for an admin, with no
+       override anywhere - which is the rule stated as a rule;
+    2. the clearance is granted by an admin and spent by the provider, not by whoever
+       pressed first;
+    3. a listing with settled history is TOMBSTONED rather than destroyed, because
+       service_orders.service_id is nullable=False with no cascade and a past client's
+       order has to keep resolving to the thing they paid for;
+    4. a listing with no history at all is still really destroyed, so check 3 is not
+       passing on a delete button that never deletes anything.
+    """
+    print('\n-- removing a service for good, in two stages')
+
+    # A listing with a settled client on it: paid, and past. This is the subject of the
+    # whole flow - the provider who has finished with a service that has a history.
+    sorted_out = make_listing(provider_id, f'{TAG} Retiring Laundry', 300.0, OPEN_KEY,
+                              'Smoketest Openlisting', 0)
+    # A second one carrying a client who is NOT sorted, to prove the refusal.
+    still_busy = make_listing(provider_id, f'{TAG} Busy Laundry', 300.0, OPEN_KEY,
+                              'Smoketest Openlisting', 0)
+    sorted_id, busy_id = sorted_out.id, still_busy.id
+    settled_order = ServiceOrder(service_id=sorted_id, client_id=customer_id,
+                                 provider_id=provider_id, quantity=1, amount=300.0,
+                                 payment_status='paid', status='in_progress',
+                                 pay_to='platform', created_at=datetime.utcnow())
+    db.session.add(settled_order)
+    db.session.add(ServiceLinkRequest(service_id=sorted_id, client_id=customer_id,
+                                      status='closed', created_at=datetime.utcnow()))
+    # Unpaid: a client could be paying right now, which is the case the guard exists
+    # for. An 'open' desk request would do as well and is checked further down.
+    db.session.add(ServiceOrder(service_id=busy_id, client_id=customer_id,
+                                provider_id=provider_id, quantity=1, amount=300.0,
+                                payment_status='pending', pay_to='platform',
+                                created_at=datetime.utcnow()))
+    db.session.commit()
+    # Held by primary key, not by service_id. What the tombstone check further down is
+    # asserting is that THIS order survived the removal of the listing it points at, and
+    # a filter on service_id answers a different question - how many orders happen to sit
+    # on that id - which is a question about the fixture rather than about the behaviour,
+    # and one whose answer can change when a script earlier in the suite has been adding
+    # and deleting listings of its own.
+    settled_order_id = settled_order.id
+
+    # -- the refusal, first, because it is the rule --------------------------------
+    with as_user(provider_id) as client:
+        response = client.post(f'/services/{busy_id}/removal-request',
+                               follow_redirects=True)
+        body = response.get_data(as_text=True)
+    db.session.expire_all()
+    busy = db.session.get(ServiceListing, busy_id)
+    check('a listing with an unsorted client cannot even be put up for removal',
+          busy.removal_requested_at is None, busy.removal_requested_at)
+    check('and the refusal names pausing as the thing that does work',
+          'Pause the listing meanwhile' in body, 'no such wording')
+    with as_user(provider_id) as client:
+        response = client.post(f'/services/{busy_id}/delete', follow_redirects=True)
+    db.session.expire_all()
+    check('nor deleted', db.session.get(ServiceListing, busy_id) is not None)
+    check('and it is not quietly retired either',
+          db.session.get(ServiceListing, busy_id).retired_at is None,
+          db.session.get(ServiceListing, busy_id).retired_at)
+
+    # The same refusal for an admin. An admin confirming is a judgement about work off
+    # the platform, never permission to drop a paid order on the floor - so this is the
+    # check that the confirm button is a gate and not a bypass. The request is stamped
+    # directly here because the route refuses to stamp it, which is check one above:
+    # this builds the state an admin would be looking at if a client had arrived in the
+    # gap between the ask and the answer.
+    db.session.get(ServiceListing, busy_id).removal_requested_at = datetime.utcnow()
+    db.session.commit()
+    with as_user(admin_id) as client:
+        response = client.post(f'/admin/services/{busy_id}/removal-clearance',
+                               data={'decision': 'confirm'}, follow_redirects=True)
+        body = response.get_data(as_text=True)
+    db.session.expire_all()
+    busy = db.session.get(ServiceListing, busy_id)
+    check('an admin cannot confirm removal over an unsorted client either',
+          busy.removal_cleared_at is None, busy.removal_cleared_at)
+    check('and is told which client is outstanding',
+          'still waiting on payment' in body, 'no such wording')
+    with as_user(admin_id) as client:
+        client.post(f'/services/{busy_id}/delete', follow_redirects=True)
+    db.session.expire_all()
+    check('and an admin delete is refused on it as well',
+          db.session.get(ServiceListing, busy_id) is not None
+          and db.session.get(ServiceListing, busy_id).retired_at is None)
+
+    # -- the delete before the clearance ------------------------------------------
+    with as_user(provider_id) as client:
+        response = client.post(f'/services/{sorted_id}/delete', follow_redirects=True)
+        body = response.get_data(as_text=True)
+    db.session.expire_all()
+    check('a listing with settled history is not deleted without an admin confirming',
+          db.session.get(ServiceListing, sorted_id).retired_at is None)
+    check('and the provider is told to ask',
+          'Request removal' in body, 'no such wording')
+
+    # -- stage one: the provider asks ---------------------------------------------
+    with as_user(provider_id) as client:
+        response = client.post(f'/services/{sorted_id}/removal-request',
+                               follow_redirects=True)
+        body = response.get_data(as_text=True)
+    db.session.expire_all()
+    row = db.session.get(ServiceListing, sorted_id)
+    check('with every client sorted, the provider can ask for removal',
+          row.removal_requested_at is not None, row.removal_requested_at)
+    check('and asking pauses it, so no new client arrives during the wait',
+          row.is_active is False, row.is_active)
+    check('the Delete button is not live yet', row.removal_cleared is False,
+          row.removal_cleared)
+    check('and the admins were told, on the platform',
+          CustomerNotification.query.filter(
+              CustomerNotification.user_id == admin_id,
+              CustomerNotification.title == 'A provider wants a service removed').count()
+          >= 1)
+
+    with as_user(admin_id) as client:
+        body = client.get('/admin/services?status=removal').get_data(as_text=True)
+        check('an admin has a queue of the providers waiting on them',
+              f'{TAG} Retiring Laundry' in body, len(body))
+
+    # The listing is paused now, and service_detail used to 404 anything not live for
+    # everybody but an admin. That locked the provider who had just asked out of the page
+    # the rest of the flow lives on, and made the owner-facing half of that template
+    # unreachable - dead markup that no check could have caught, because an admin reading
+    # the same page renders a different branch of it.
+    with as_user(provider_id) as client:
+        own = client.get(f'/services/{sorted_id}')
+        own_body = own.get_data(as_text=True)
+        check('the provider can still open their own paused listing',
+              own.status_code == 200, own.status_code)
+        check('and it tells them the removal is with the admins',
+              'is with the admins' in own_body, 'no such wording')
+    with as_user(stranger_id) as client:
+        refused = client.get(f'/services/{sorted_id}')
+        check('while a client following an old link to it gets nothing',
+              refused.status_code == 404, refused.status_code)
+
+    # -- who may spend the clearance ----------------------------------------------
+    with as_user(stranger_id) as client:
+        refused = client.post(f'/admin/services/{sorted_id}/removal-clearance',
+                              data={'decision': 'confirm'})
+        check('a stranger cannot confirm a removal', refused.status_code in (302, 403),
+              refused.status_code)
+    with as_user(provider_id) as client:
+        refused = client.post(f'/admin/services/{sorted_id}/removal-clearance',
+                              data={'decision': 'confirm'})
+        check('and neither can the provider confirm their own',
+              refused.status_code in (302, 403), refused.status_code)
+    db.session.expire_all()
+    check('so the listing is still uncleared',
+          db.session.get(ServiceListing, sorted_id).removal_cleared_at is None)
+
+    # -- a decline, and what it leaves behind --------------------------------------
+    with as_user(admin_id) as client:
+        client.post(f'/admin/services/{sorted_id}/removal-clearance',
+                    data={'decision': 'decline', 'note': 'Two shirts still uncollected'},
+                    follow_redirects=True)
+    db.session.expire_all()
+    row = db.session.get(ServiceListing, sorted_id)
+    check('a declined removal clears the request rather than half-granting it',
+          row.removal_requested_at is None and row.removal_cleared_at is None,
+          (row.removal_requested_at, row.removal_cleared_at))
+    check('the reason is kept, because it is the only thing the provider can act on',
+          row.removal_note == 'Two shirts still uncollected', row.removal_note)
+    check('and the provider was told',
+          CustomerNotification.query.filter(
+              CustomerNotification.user_id == provider_id,
+              CustomerNotification.title == 'Your service was not removed').count() == 1)
+    with as_user(provider_id) as client:
+        response = client.post(f'/services/{sorted_id}/delete', follow_redirects=True)
+    db.session.expire_all()
+    check('a declined listing has no live Delete button behind it',
+          db.session.get(ServiceListing, sorted_id).retired_at is None)
+
+    # -- stage two and three, all the way through ---------------------------------
+    with as_user(provider_id) as client:
+        client.post(f'/services/{sorted_id}/removal-request', follow_redirects=True)
+    with as_user(admin_id) as client:
+        client.post(f'/admin/services/{sorted_id}/removal-clearance',
+                    data={'decision': 'confirm'}, follow_redirects=True)
+    db.session.expire_all()
+    row = db.session.get(ServiceListing, sorted_id)
+    check('an admin confirms, and the clearance records which admin',
+          row.removal_cleared_at is not None and row.removal_cleared_by_id == admin_id,
+          (row.removal_cleared_at, row.removal_cleared_by_id))
+    check('confirming does not itself delete anything - the provider presses that',
+          row.retired_at is None, row.retired_at)
+    check('and the provider was told the button is live',
+          CustomerNotification.query.filter(
+              CustomerNotification.user_id == provider_id,
+              CustomerNotification.title == 'Your service can now be deleted').count() == 1)
+
+    # A client arriving in the gap. The clearance is a gate, not a stored verdict: it
+    # was true when the admin looked, and the press re-counts.
+    late = ServiceLinkRequest(service_id=sorted_id, client_id=customer_id,
+                              status='open', created_at=datetime.utcnow())
+    db.session.add(late)
+    db.session.commit()
+    with as_user(provider_id) as client:
+        response = client.post(f'/services/{sorted_id}/delete', follow_redirects=True)
+        body = response.get_data(as_text=True)
+    db.session.expire_all()
+    check('a client arriving after the clearance still blocks the delete',
+          db.session.get(ServiceListing, sorted_id).retired_at is None)
+    check('and the block says so at the linking desk',
+          'open at the linking desk' in body, 'no such wording')
+    db.session.delete(late)
+    db.session.commit()
+
+    with as_user(provider_id) as client:
+        response = client.post(f'/services/{sorted_id}/delete', follow_redirects=True)
+        body = response.get_data(as_text=True)
+    db.session.expire_all()
+    row = db.session.get(ServiceListing, sorted_id)
+    check('with the clearance in hand and nobody waiting, the provider removes it',
+          row is not None and row.retired_at is not None,
+          None if row is None else row.retired_at)
+    settled = db.session.get(ServiceOrder, settled_order_id)
+    check('a listing with history is tombstoned, not destroyed - the paid order still '
+          'resolves to what was bought',
+          settled is not None and settled.service is not None,
+          'order %s -> service %s, %d order(s) on that listing'
+          % (settled_order_id, None if settled is None else settled.service_id,
+             ServiceOrder.query.filter_by(service_id=sorted_id).count()))
+    check('and it is inactive, so every read path that filters on is_active drops it',
+          row.is_active is False, row.is_active)
+
+    with as_anonymous() as client:
+        body = client.get('/services').get_data(as_text=True)
+        check('a removed listing is off the public services page',
+              f'{TAG} Retiring Laundry' not in body, len(body))
+    with as_user(provider_id) as client:
+        body = client.get('/services/mine').get_data(as_text=True)
+        check('and off the provider page, because they deleted it',
+              f'{TAG} Retiring Laundry' not in body, len(body))
+        # Resuming would put a service two people agreed was gone back in front of
+        # clients, and would be the one undo the flow must not have.
+        response = client.post(f'/services/{sorted_id}/status', data={'state': 'active'},
+                               follow_redirects=True)
+        resumed_body = response.get_data(as_text=True)
+    db.session.expire_all()
+    check('a removed listing cannot be switched back on',
+          db.session.get(ServiceListing, sorted_id).is_active is False,
+          db.session.get(ServiceListing, sorted_id).is_active)
+    check('and the refusal says to list it again instead',
+          'list the service again' in resumed_body, 'no such wording')
+    with as_user(admin_id) as client:
+        body = client.get('/admin/services?status=retired').get_data(as_text=True)
+        check('an admin can still find it, which is where a dispute is worked from',
+              f'{TAG} Retiring Laundry' in body, len(body))
+
+    # -- the other outcome, or the tombstone check above proves nothing -------------
+    fresh = make_listing(provider_id, f'{TAG} Fresh Typo', 300.0, OPEN_KEY,
+                         'Smoketest Openlisting', 0)
+    fresh_id = fresh.id
+    with as_user(provider_id) as client:
+        client.post(f'/services/{fresh_id}/delete', follow_redirects=True)
+    db.session.expire_all()
+    check('a listing no client ever touched needs no clearance and is really gone',
+          db.session.get(ServiceListing, fresh_id) is None)
+
+
 def run():
     check_client_never_sees_a_busy_message()
     check_profile_map()
@@ -1836,6 +2110,9 @@ def run():
     # Before the pagination check and after everything that asserts a reply line for
     # line: this one adds three listings of its own and deletes one of them.
     check_taking_a_service_down(provider_id, stranger_id, admin_id, customer_id)
+    # Straight after it: the same subject taken one stage further, and it adds three
+    # more listings plus notifications of its own.
+    check_two_stage_removal(provider_id, stranger_id, admin_id, customer_id)
     # Last, because it adds a catalogue row and thirteen listings. Run earlier it
     # would be perturbing the very counts and line-for-line replies the checks
     # above assert.

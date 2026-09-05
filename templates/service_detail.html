@@ -38,10 +38,23 @@
         </ol>
     </nav>
 
-    {% if not service.is_active %}
+    {#
+      Who can see this page at all while the listing is off: an admin, and the provider
+      whose listing it is (main.py service_detail). So the banner names both rather than
+      claiming admins only - a provider reading "only admins can see this" on their own
+      listing would reasonably conclude they were seeing an admin's view of it.
+    #}
+    {% if service.is_retired %}
+    <div class="alert alert-dark small">
+        <i class="fas fa-circle-check me-1"></i>
+        This listing was removed{% if service.retired_at %} on
+        {{ service.retired_at.strftime('%d %b %Y') }}{% endif %}. It is off the services
+        page, the search and the chatbot. Past orders on it stay readable.
+    </div>
+    {% elif not service.is_active %}
     <div class="alert alert-warning small">
         <i class="fas fa-eye-slash me-1"></i>
-        This listing is switched off. Only admins can see this page.
+        This listing is switched off. Only its provider and the admins can see this page.
     </div>
     {% endif %}
 
@@ -622,15 +635,31 @@
                         {{ 'Manage this listing' if is_owner else 'Admin controls' }}
                     </h3>
                     <p class="small text-muted mb-3">
-                        {% if service.is_active %}
+                        {% if service.is_retired %}
+                        This service has been removed. It is off the services page, the search
+                        and the chatbot, and it cannot be switched back on — this page stays
+                        readable so past orders still resolve to what was bought.
+                        {% elif service.is_active %}
                         This service is live. Pausing it takes it off the services page and
                         stops new clients reaching it; everything already recorded is kept
                         {%- if service.profile == 'ticket' %}, including tickets clients have
                         already paid for{% endif %}.
+                        {% elif service.removal_cleared %}
+                        An admin has confirmed this one can go. Removing it is final; until it
+                        is removed it stays paused and clients cannot reach it.
+                        {% elif service.removal_pending %}
+                        Removal has been requested and is with the admins. It is paused
+                        meanwhile, so clients cannot see or reach it.
                         {% else %}
                         This service is paused — clients cannot see or reach it.
                         {% endif %}
                     </p>
+                    {#
+                      A removed listing gets no buttons. Every one of them would be a way to
+                      undo something the provider and an admin agreed on, and the page is
+                      here to keep a past order resolvable, not to be worked from.
+                    #}
+                    {% if not service.is_retired %}
                     <div class="d-flex flex-wrap gap-2">
                         {% if service.is_active %}
                         <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
@@ -642,7 +671,8 @@
                             </button>
                         </form>
                         {% else %}
-                        <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}">
+                        <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
+                              {% if service.removal_pending or service.removal_cleared %}onsubmit="return confirm('Start offering &quot;{{ service.title|e }}&quot; again?\n\nThat cancels the removal request — it would have to be asked for again.');"{% endif %}>
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <input type="hidden" name="state" value="active">
                             <button class="btn btn-sm btn-success">
@@ -651,24 +681,54 @@
                         </form>
                         {% endif %}
                         {#
-                          Always rendered, never conditioned on a count. This page shows one
-                          listing, so counting its orders and requests here to decide whether
-                          to draw the button would be two queries added to the busiest page in
-                          the services half of the platform, to hide a button whose route
-                          refuses the action anyway and says why.
+                          Removal is a stage, and which stage this listing is at is read from
+                          its own columns — never from a count. This page shows one listing and
+                          is the busiest page in the services half of the platform, so counting
+                          its orders and requests here to decide what to draw would be two
+                          queries per view to hide a button whose route refuses the action
+                          anyway and says why. The management pages, which already count for
+                          every row in one grouped query, are where the reasons are spelled out.
                         #}
+                        {% if service.removal_cleared %}
                         <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
-                              onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot; permanently?\n\nThis only works while no orders or client requests point at it. If any do, it will be refused and you can pause it instead.');">
+                              onsubmit="return confirm('Remove &quot;{{ service.title|e }}&quot; for good?\n\nAn admin has confirmed nothing is outstanding. This cannot be undone.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-danger">
+                                <i class="fas fa-trash me-1"></i>Delete for good
+                            </button>
+                        </form>
+                        {% elif service.removal_pending %}
+                        <span class="btn btn-sm btn-outline-secondary disabled">
+                            <i class="fas fa-hourglass-half me-1"></i>Removal requested
+                        </span>
+                        {% elif is_owner %}
+                        <form method="POST" action="{{ url_for('service_request_removal', service_id=service.id) }}"
+                              onsubmit="return confirm('Ask to remove &quot;{{ service.title|e }}&quot;?\n\nUse this once your last client is sorted and you have stopped offering it. It pauses straight away, and an admin checks nothing is still owed before you can delete it. If a client is still unsorted this will be refused and pausing is the option.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-outline-danger">
+                                <i class="fas fa-circle-check me-1"></i>Request removal
+                            </button>
+                        </form>
+                        {% else %}
+                        <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
+                              onsubmit="return confirm('Remove &quot;{{ service.title|e }}&quot;?\n\nThis is refused while any client is still unsorted, and while its record needs a confirmation the provider has not asked for. Pausing works either way.');">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <button class="btn btn-sm btn-outline-danger">
                                 <i class="fas fa-trash me-1"></i>Delete
                             </button>
                         </form>
+                        {% endif %}
                         <a href="{{ url_for('admin_services') if not is_owner else url_for('my_services') }}"
                            class="btn btn-sm btn-outline-secondary">
                             <i class="fas fa-list me-1"></i>{{ 'All listings' if not is_owner else 'My services' }}
                         </a>
                     </div>
+                    {% else %}
+                    <a href="{{ url_for('admin_services', status='retired') if not is_owner else url_for('my_services') }}"
+                       class="btn btn-sm btn-outline-secondary">
+                        <i class="fas fa-list me-1"></i>{{ 'Removed listings' if not is_owner else 'My services' }}
+                    </a>
+                    {% endif %}
                 </div>
             </div>
             {% endif %}

@@ -6,13 +6,15 @@ cached the broken stylesheet, one because a routine bounded-read fix would have 
 stopped paying sellers past row 100, one because a keystroke handler closed the phone
 keyboard mid-word, one because Flask serves the whole static tree and the checks that
 guard a paid download live on a different URL, two because a services page told a concert
-ticket buyer there was no pickup and an unattended request told nobody at all, and two because a
-public grid's cost was set by how well its raffles had sold - so all of
+ticket buyer there was no pickup and an unattended request told nobody at all, two because a
+public grid's cost was set by how well its raffles had sold, and three because removing a
+service for good has to refuse an unsorted client, wait for an admin, and keep a paid
+client's receipt resolvable - so all of
 them are exactly the kind of assertion that can be subtly inert and still print `[ok  ]`.
 
 Each control names the smoke script that owns its check, so the first five run
-`tools/wiring_smoke.py`, the services pair run `tools/services_smoke.py`, and the public-list pair
-run `tools/list_page_smoke.py`.
+`tools/wiring_smoke.py`, the services checks run `tools/services_smoke.py`, and the
+public-list pair run `tools/list_page_smoke.py`.
 
 Each control patches the source *in bytes*, runs that script, and restores the original
 bytes from a try/finally. Byte-level rather than line-level so the restore is provably
@@ -160,6 +162,58 @@ CONTROLS = [
         'why': 'raffle_buy_ticket takes 50 tickets a press and caps no total, so this '
                'is the one list on the page that a single buyer can grow without limit '
                'and without anyone noticing - and the buyer paid for every row of it',
+    },
+    # And three on removing a service for good, which is two stages and three refusals,
+    # so each control aims at a different one of them. All run services_smoke.
+    {
+        'name': 'a removal that ignores an unpaid order is caught',
+        'file': 'main.py',
+        'smoke': SERVICES_SMOKE,
+        'old': b'    unpaid = ServiceOrder.query.filter_by(service_id=service.id,\n'
+               b"                                          payment_status='pending')"
+               b'.count()\n',
+        'new': b'    unpaid = 0\n',
+        'expect': 'cannot even be put up for removal',
+        'why': 'this is the rule the whole flow exists to enforce - a client not yet '
+               'sorted means pausing is the only option - and an unpaid order is the '
+               'sharpest case of it, because the client may be on the M-Pesa prompt '
+               'right now. Nothing visible changes when this count goes: the listing '
+               'still pauses, the admin queue still populates, the provider still gets '
+               'their button, and a client who was mid-payment is deleted over',
+    },
+    {
+        'name': 'a delete that skips the admin confirmation is caught',
+        'file': 'main.py',
+        'smoke': SERVICES_SMOKE,
+        'old': b'    if (orders or requests_seen) and not service.removal_cleared:\n',
+        'new': b'    if False:\n',
+        'expect': 'without an admin confirming',
+        'why': 'the admin is in the loop for the part the tables cannot answer. No '
+               'ServiceOrder is ever marked completed anywhere in this codebase - '
+               'payment moves it in_progress and that is terminal - so a laundry job '
+               'paid this morning counts as settled here and is still a pile of '
+               'shirts. Drop this gate and the platform silently claims a certainty '
+               'it does not have',
+    },
+    {
+        'name': 'a delete that destroys a listing with history is caught',
+        'file': 'main.py',
+        'smoke': SERVICES_SMOKE,
+        'old': b'        if tombstone:\n'
+               b'            service.retired_at = utcnow()\n'
+               b'            service.is_active = False\n'
+               b'        else:\n'
+               b'            # Tiers go with it through the delete-orphan cascade on '
+               b'ServiceListing.tiers.\n'
+               b'            db.session.delete(service)\n',
+        'new': b'        db.session.delete(service)\n',
+        'expect': 'with the clearance in hand',
+        'why': 'service_orders.service_id and service_link_requests.service_id are '
+               'both nullable=False and neither cascades, so there is no detach-and-'
+               'keep: a hard delete is an IntegrityError, or on a database not '
+               'enforcing it, a paid client opening their order and finding it points '
+               'at nothing. The tombstone is not tidiness, it is the only way the row '
+               'can go while the receipt survives',
     },
 ]
 
