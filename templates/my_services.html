@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+{#
+  The page a provider could not reach. Everything else in the services half of the
+  platform is addressed to the client: the grid, the detail page, the linking desk.
+  provider_id was written once at creation and read nowhere, so once a service was
+  listed its owner had no surface that showed it to them and no way to say they had
+  stopped offering it - clients simply kept being linked to a service nobody was
+  providing any more.
+
+  Paused rows are listed here alongside live ones on purpose. A paused listing is
+  invisible on the grid, in search and to the chatbot, so this is the only page that
+  can turn one back on.
+#}
+{% block title %}My services - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-3">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <div>
+            <h1 class="h3 fw-bold mb-1"><i class="fas fa-screwdriver-wrench me-2"></i>My services</h1>
+            <p class="text-muted small mb-0">
+                What you have listed, and how to take it down again.
+            </p>
+        </div>
+        <a href="{{ url_for('create_service') }}" class="btn btn-success">
+            <i class="fas fa-plus me-1"></i>Offer another service
+        </a>
+    </div>
+
+    {% if not services %}
+    <div class="text-center py-5">
+        <i class="fas fa-screwdriver-wrench fa-3x text-muted mb-3"></i>
+        <h4>You have not listed a service yet</h4>
+        <p class="text-muted">List one and clients will reach you through our linking desk.</p>
+        <a href="{{ url_for('create_service') }}" class="btn btn-success">
+            <i class="fas fa-plus me-1"></i>Offer a service
+        </a>
+    </div>
+    {% else %}
+
+    <div class="row g-3">
+        {% for service in services %}
+        {% set counts = dependencies.get(service.id, (0, 0)) %}
+        {% set order_count = counts[0] %}
+        {% set request_count = counts[1] %}
+        <div class="col-12">
+            <div class="card border-0 shadow-sm {{ '' if service.is_active else 'bg-light' }}">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap gap-3">
+                        {% if service.image_url %}
+                        <img src="{{ service.image_url }}" alt="{{ service.title }}"
+                             class="rounded flex-shrink-0"
+                             style="width:72px;height:72px;object-fit:cover;{{ '' if service.is_active else 'filter:grayscale(1);opacity:.6;' }}">
+                        {% else %}
+                        <div class="rounded bg-secondary bg-opacity-10 d-flex align-items-center justify-content-center flex-shrink-0"
+                             style="width:72px;height:72px;">
+                            <i class="fas {{ service.profile_spec.icon }} text-secondary"></i>
+                        </div>
+                        {% endif %}
+
+                        <div class="flex-grow-1" style="min-width:0;">
+                            <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+                                <h2 class="h6 fw-bold mb-0 text-truncate">{{ service.title }}</h2>
+                                {% if service.is_active %}
+                                <span class="badge bg-success">Live</span>
+                                {% else %}
+                                <span class="badge bg-secondary">Paused</span>
+                                {% endif %}
+                            </div>
+                            <div class="small text-muted mb-1">
+                                {{ service.profile_spec.label }} &middot;
+                                <span class="fw-semibold text-success">{{ service_price_display(service) }}</span>
+                            </div>
+                            <div class="small text-muted">
+                                {% if service.orders_completed %}
+                                <span class="me-2"><i class="fas fa-check-circle me-1"></i>{{ service.orders_completed }} completed</span>
+                                {% endif %}
+                                {% if order_count %}
+                                <span class="me-2"><i class="fas fa-receipt me-1"></i>{{ order_count }} order(s)</span>
+                                {% endif %}
+                                {% if request_count %}
+                                <span class="me-2"><i class="fas fa-comments me-1"></i>{{ request_count }} client request(s)</span>
+                                {% endif %}
+                                {% if not (service.orders_completed or order_count or request_count) %}
+                                <span>No orders or requests yet</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+
+                    {#
+                      Wrapped so three buttons stack rather than overflow at 390px, which
+                      is the width most providers will open this at.
+                    #}
+                    <div class="d-flex flex-wrap gap-2 mt-3">
+                        <a href="{{ url_for('service_detail', service_id=service.id) }}"
+                           class="btn btn-sm btn-outline-primary">
+                            <i class="fas fa-eye me-1"></i>View
+                        </a>
+
+                        {% if service.is_active %}
+                        <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
+                              onsubmit="return confirm('Stop offering &quot;{{ service.title|e }}&quot;?\n\nIt disappears from the services page and no new client can reach it. You can switch it back on here at any time.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input type="hidden" name="state" value="paused">
+                            <button class="btn btn-sm btn-warning">
+                                <i class="fas fa-pause me-1"></i>Stop offering
+                            </button>
+                        </form>
+                        {% else %}
+                        <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input type="hidden" name="state" value="active">
+                            <button class="btn btn-sm btn-success">
+                                <i class="fas fa-play me-1"></i>Start offering again
+                            </button>
+                        </form>
+                        {% endif %}
+
+                        {#
+                          Delete is shown only when nothing points at the listing, and the
+                          reason replaces the button rather than sitting next to a disabled
+                          one. The route re-checks this at the moment of the press - these
+                          numbers were true when the page rendered, and a ticket bought in
+                          between is exactly the row worth not destroying.
+                        #}
+                        {% if order_count or request_count %}
+                        <span class="small text-muted align-self-center">
+                            <i class="fas fa-lock me-1"></i>Cannot be deleted - clients' orders
+                            and messages point at it. Pausing is the way to retire it.
+                        </span>
+                        {% else %}
+                        <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
+                              onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot; permanently?\n\nThis cannot be undone. Nothing points at this listing yet, so nothing else is affected.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-outline-danger">
+                                <i class="fas fa-trash me-1"></i>Delete
+                            </button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if total and total > services|length %}
+    <p class="text-muted small mt-3 mb-0">
+        Showing {{ services|length }} of {{ total }} listings, live ones first.
+    </p>
+    {% endif %}
+
+    <div class="alert alert-light border mt-4 small mb-0">
+        <i class="fas fa-circle-info me-1"></i>
+        <strong>Stopping is not deleting.</strong>
+        Stopping takes the service off the platform for clients but keeps your record of it -
+        completed jobs, ratings, and any tickets clients have already paid for stay valid.
+        Deleting is only possible while a listing is still untouched.
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

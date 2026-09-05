@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{#
+  Every service listing, live or paused, with the two lifecycle buttons.
+
+  This page exists because pausing works: a paused listing leaves the grid, the search
+  index and the chatbot's provider list, which is the whole point of the button - and
+  would otherwise also mean leaving the view of the only people able to review it. An
+  admin acting on a complaint has a service *name*, not a position in a list, so this
+  filters and searches rather than paginating.
+
+  Deleting is refused whenever anything points at the listing, and the reason is printed
+  in place of the button. For an admin that is not a limitation to work around: pausing
+  IS the takedown - the listing becomes unreachable for clients while every order, thread
+  and payment record stays joinable for whatever follows the complaint.
+#}
+{% block title %}Service listings - {{ super() }}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+        <div>
+            <h2 class="mb-1"><i class="fas fa-screwdriver-wrench me-2"></i>Service listings</h2>
+            <p class="text-muted mb-0 small">
+                Review, pause or remove any service on the platform.
+            </p>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="{{ url_for('admin_service_requests') }}" class="btn btn-outline-secondary">
+                <i class="fas fa-link me-1"></i>Linking desk
+            </a>
+            <a href="{{ url_for('admin_service_catalogue') }}" class="btn btn-outline-secondary">
+                <i class="fas fa-list-check me-1"></i>Catalogue
+            </a>
+        </div>
+    </div>
+
+    <form method="GET" action="{{ url_for('admin_services') }}" class="row g-2 mb-3">
+        <div class="col-12 col-md">
+            <input name="q" class="form-control" value="{{ search }}"
+                   placeholder="Search by title or category" aria-label="Search listings">
+        </div>
+        <div class="col-auto">
+            <select name="status" class="form-select" aria-label="Filter by status">
+                <option value="" {{ 'selected' if not status }}>All</option>
+                <option value="active" {{ 'selected' if status == 'active' }}>Live only</option>
+                <option value="paused" {{ 'selected' if status == 'paused' }}>Paused only</option>
+            </select>
+        </div>
+        <div class="col-auto d-flex gap-2">
+            <button class="btn btn-primary"><i class="fas fa-search"></i><span class="d-none d-sm-inline ms-1">Filter</span></button>
+            {% if search or status %}
+            <a href="{{ url_for('admin_services') }}" class="btn btn-outline-secondary" title="Clear">
+                <i class="fas fa-xmark"></i>
+            </a>
+            {% endif %}
+        </div>
+    </form>
+
+    {% if not services %}
+    <div class="alert alert-light border text-center py-4 mb-0">
+        <i class="fas fa-magnifying-glass fa-2x text-muted mb-2 d-block"></i>
+        No listings match that.
+    </div>
+    {% else %}
+
+    <div class="table-responsive">
+        <table class="table align-middle">
+            <thead>
+                <tr>
+                    <th>Service</th>
+                    <th>Provider</th>
+                    <th class="text-nowrap">Attached</th>
+                    <th>Status</th>
+                    <th class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for service in services %}
+                {% set counts = dependencies.get(service.id, (0, 0)) %}
+                {% set order_count = counts[0] %}
+                {% set request_count = counts[1] %}
+                <tr>
+                    <td>
+                        <a href="{{ url_for('service_detail', service_id=service.id) }}"
+                           class="fw-semibold text-decoration-none">{{ service.title }}</a>
+                        <div class="small text-muted">
+                            {{ service.profile_spec.label }} &middot; {{ service_price_display(service) }}
+                        </div>
+                    </td>
+                    <td class="small">
+                        {{ service.provider.username if service.provider else 'unknown' }}
+                        {#
+                          provider_phone is admin-only across every services template, and
+                          this page is admin-only, so it belongs here - it is the number an
+                          admin rings when a listing needs explaining.
+                        #}
+                        {% if service.provider_phone %}
+                        <div class="text-muted">{{ service.provider_phone }}</div>
+                        {% endif %}
+                    </td>
+                    <td class="small text-nowrap">
+                        {% if order_count %}<div>{{ order_count }} order(s)</div>{% endif %}
+                        {% if request_count %}<div>{{ request_count }} request(s)</div>{% endif %}
+                        {% if not (order_count or request_count) %}
+                        <span class="text-muted">nothing</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if service.is_active %}
+                        <span class="badge bg-success">Live</span>
+                        {% else %}
+                        <span class="badge bg-secondary">Paused</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="d-flex flex-wrap gap-2 justify-content-end">
+                            {% if service.is_active %}
+                            <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
+                                  onsubmit="return confirm('Take &quot;{{ service.title|e }}&quot; off the platform?\n\nClients can no longer reach it. Orders, threads and payment records are kept.');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                <input type="hidden" name="state" value="paused">
+                                <button class="btn btn-sm btn-warning text-nowrap">
+                                    <i class="fas fa-pause me-1"></i>Take down
+                                </button>
+                            </form>
+                            {% else %}
+                            <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                <input type="hidden" name="state" value="active">
+                                <button class="btn btn-sm btn-outline-success text-nowrap">
+                                    <i class="fas fa-play me-1"></i>Restore
+                                </button>
+                            </form>
+                            {% endif %}
+
+                            {% if order_count or request_count %}
+                            <span class="small text-muted align-self-center text-nowrap"
+                                  title="Deleting would destroy clients' orders and message threads">
+                                <i class="fas fa-lock"></i>
+                            </span>
+                            {% else %}
+                            <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
+                                  onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot; permanently?\n\nThis cannot be undone. Nothing points at this listing, so nothing else is affected.');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                                <button class="btn btn-sm btn-outline-danger">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </form>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if total and total > services|length %}
+    <p class="text-muted small mb-0">
+        Showing {{ services|length }} of {{ total }} matching listings, newest first.
+        Narrow it with the search box rather than scrolling.
+    </p>
+    {% endif %}
+    {% endif %}
+</div>
+{% endblock %}

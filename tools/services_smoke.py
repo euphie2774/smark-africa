@@ -1621,6 +1621,139 @@ def check_services_pagination(provider_id):
                   response.status_code)
 
 
+def check_taking_a_service_down(provider_id, stranger_id, admin_id, customer_id):
+    """Pausing, resuming, and the one delete that is allowed.
+
+    The gap this closes is that provider_id was written at creation and read nowhere,
+    so a provider who stopped offering a service had no way to say so - which made
+    every other guarantee in this file a promise about a service that might not exist
+    any more.
+
+    The delete guard is the part worth testing rather than trusting. Both dependent
+    columns are nullable=False, so there is no "detach and keep": a delete that gets
+    past the guard is an IntegrityError, or on a database not enforcing it, a paid
+    order pointing at a service_id that resolves to nothing. So this asserts the
+    refusal on a listing with a paid order AND the success on a clean one - a guard
+    that refuses everything would pass the first half on its own.
+    """
+    print('\n-- taking a service down again')
+
+    # Three listings, because the three outcomes need three subjects: one to pause and
+    # resume, one that is clean enough to really delete, and one with money attached.
+    pausable = make_listing(provider_id, f'{TAG} Pausable Shop', 250.0, OPEN_KEY,
+                            'Smoketest Openlisting', 0)
+    disposable = make_listing(provider_id, f'{TAG} Typo Listing', 250.0, OPEN_KEY,
+                              'Smoketest Openlisting', 0)
+    attached = make_listing(provider_id, f'{TAG} Sold Out Gala', 500.0, TICKET_KEY,
+                            'Smoketest Tickets', 0,
+                            event_starts_at=datetime.utcnow() + timedelta(days=30),
+                            event_venue='KICC Grounds')
+    pausable_id, disposable_id, attached_id = pausable.id, disposable.id, attached.id
+    # A *paid* order, so the refusal is the one that matters rather than the milder
+    # "an order exists" branch. provider_id is nullable=False here as well as
+    # client_id, which is the shape a real ticket purchase writes.
+    db.session.add(ServiceOrder(service_id=attached_id, client_id=customer_id,
+                                provider_id=provider_id, quantity=1, amount=500.0,
+                                payment_status='paid', pay_to='platform',
+                                created_at=datetime.utcnow()))
+    db.session.commit()
+
+    with as_user(provider_id) as client:
+        response = client.get('/services/mine')
+        body = response.get_data(as_text=True)
+        check('a provider can reach a page of their own listings',
+              response.status_code == 200, response.status_code)
+        check('and the listing they made is on it', f'{TAG} Pausable Shop' in body,
+              len(body))
+
+        client.post(f'/services/{pausable_id}/status', data={'state': 'paused'},
+                    follow_redirects=True)
+    # Re-read outside the request context that changed it. The POST committed through
+    # a session of its own (one app context per identity, above), and this session's
+    # copy of the row is the pre-POST one - the identity map does not observe commits
+    # it did not make. Without expire_all every read below would assert against the
+    # value from when the listing was created, and a run would pass or fail on which
+    # read happened to refresh first.
+    db.session.expire_all()
+    check('pausing clears is_active',
+          db.session.get(ServiceListing, pausable_id).is_active is False,
+          db.session.get(ServiceListing, pausable_id).is_active)
+
+    with as_anonymous() as client:
+        body = client.get('/services').get_data(as_text=True)
+        check('a paused listing leaves the public services page',
+              f'{TAG} Pausable Shop' not in body, len(body))
+
+    with as_user(provider_id) as client:
+        # The reason inactive rows are not filtered out of this page: it is the only
+        # surface anywhere that can switch one back on.
+        body = client.get('/services/mine').get_data(as_text=True)
+        check('but stays on the provider page, or it could never be resumed',
+              f'{TAG} Pausable Shop' in body, len(body))
+        client.post(f'/services/{pausable_id}/status', data={'state': 'active'},
+                    follow_redirects=True)
+    db.session.expire_all()
+    check('resuming sets it back', db.session.get(ServiceListing, pausable_id).is_active is True,
+          db.session.get(ServiceListing, pausable_id).is_active)
+
+    # Authorisation, on the route rather than on the template that hides the button.
+    with as_user(stranger_id) as client:
+        forbidden = client.post(f'/services/{pausable_id}/status',
+                                data={'state': 'paused'})
+        check('a stranger cannot pause a listing that is not theirs',
+              forbidden.status_code == 403, forbidden.status_code)
+        gone = client.post(f'/services/{disposable_id}/delete')
+        check('nor delete one', gone.status_code == 403, gone.status_code)
+    # The two 403s above changed nothing, but the session still holds pre-POST copies
+    # from before them; expire so this reads the database and not the past.
+    db.session.expire_all()
+    check('and the listing they aimed at is untouched',
+          db.session.get(ServiceListing, pausable_id).is_active is True
+          and db.session.get(ServiceListing, disposable_id) is not None)
+
+    # The half of the guard that refuses.
+    with as_user(provider_id) as client:
+        response = client.post(f'/services/{attached_id}/delete', follow_redirects=True)
+        body = response.get_data(as_text=True)
+    db.session.expire_all()
+    survived = db.session.get(ServiceListing, attached_id)
+    check('a listing with a paid order is not deleted', survived is not None)
+    check('and the refusal says what to do instead', 'Pause it instead' in body,
+          'no such wording on the page')
+
+    # The half that allows, without which the check above passes for a guard that
+    # refuses everything and a button that never works.
+    with as_user(provider_id) as client:
+        client.post(f'/services/{disposable_id}/delete', follow_redirects=True)
+    db.session.expire_all()
+    check('a listing nothing points at is really deleted',
+          db.session.get(ServiceListing, disposable_id) is None)
+
+    # Admin, on somebody else's listing, and the page that is the only way to find a
+    # paused one.
+    with as_user(provider_id) as client:
+        client.post(f'/services/{pausable_id}/status', data={'state': 'paused'},
+                    follow_redirects=True)
+    with as_user(admin_id) as client:
+        response = client.get('/admin/services?status=paused')
+        body = response.get_data(as_text=True)
+        check('an admin can list paused listings, which are invisible everywhere else',
+              response.status_code == 200 and f'{TAG} Pausable Shop' in body,
+              response.status_code)
+        client.post(f'/services/{pausable_id}/status', data={'state': 'active'},
+                    follow_redirects=True)
+    db.session.expire_all()
+    check('and can restore one they do not own',
+          db.session.get(ServiceListing, pausable_id).is_active is True)
+    with as_user(admin_id) as client:
+        client.post(f'/services/{attached_id}/status', data={'state': 'paused'},
+                    follow_redirects=True)
+    db.session.expire_all()
+    check('an admin takedown is a pause, and the paid order survives it',
+          db.session.get(ServiceListing, attached_id).is_active is False
+          and ServiceOrder.query.filter_by(service_id=attached_id).count() == 1)
+
+
 def run():
     check_client_never_sees_a_busy_message()
     check_profile_map()
@@ -1700,6 +1833,9 @@ def run():
     # After check_chatbot_format, which is what seeds the laundry providers these
     # boundary checks need in order to prove a services question still works.
     check_intent_boundaries()
+    # Before the pagination check and after everything that asserts a reply line for
+    # line: this one adds three listings of its own and deletes one of them.
+    check_taking_a_service_down(provider_id, stranger_id, admin_id, customer_id)
     # Last, because it adds a catalogue row and thirteen listings. Run earlier it
     # would be perturbing the very counts and line-for-line replies the checks
     # above assert.

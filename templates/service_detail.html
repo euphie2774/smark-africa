@@ -601,6 +601,77 @@
                     {% endif %}
                 </div>
             </div>
+
+            {#
+              Owner and admin only, and the last thing on the page rather than beside the
+              client's call to action - a provider viewing their own listing is here to
+              check how it reads to a client, not to take it down, and an admin arriving
+              from a complaint can scroll.
+
+              is_owner is computed rather than tested inline because the block below asks
+              three times and getting one of them wrong shows another provider a button
+              that pauses this listing. The route checks ownership again regardless: this
+              gate decides what renders, never what is permitted.
+            #}
+            {% set is_owner = current_user.is_authenticated and current_user.id == service.provider_id %}
+            {% if is_owner or (current_user.is_authenticated and current_user.is_admin) %}
+            <div class="card border-warning-subtle mt-3">
+                <div class="card-body">
+                    <h3 class="h6 fw-bold mb-1">
+                        <i class="fas fa-sliders me-1"></i>
+                        {{ 'Manage this listing' if is_owner else 'Admin controls' }}
+                    </h3>
+                    <p class="small text-muted mb-3">
+                        {% if service.is_active %}
+                        This service is live. Pausing it takes it off the services page and
+                        stops new clients reaching it; everything already recorded is kept
+                        {%- if service.profile == 'ticket' %}, including tickets clients have
+                        already paid for{% endif %}.
+                        {% else %}
+                        This service is paused — clients cannot see or reach it.
+                        {% endif %}
+                    </p>
+                    <div class="d-flex flex-wrap gap-2">
+                        {% if service.is_active %}
+                        <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
+                              onsubmit="return confirm('Stop offering &quot;{{ service.title|e }}&quot;?\n\nIt disappears from the services page and no new client can reach it. It can be switched back on at any time.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input type="hidden" name="state" value="paused">
+                            <button class="btn btn-sm btn-warning">
+                                <i class="fas fa-pause me-1"></i>{{ 'Stop offering this' if is_owner else 'Take down' }}
+                            </button>
+                        </form>
+                        {% else %}
+                        <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <input type="hidden" name="state" value="active">
+                            <button class="btn btn-sm btn-success">
+                                <i class="fas fa-play me-1"></i>{{ 'Start offering again' if is_owner else 'Restore' }}
+                            </button>
+                        </form>
+                        {% endif %}
+                        {#
+                          Always rendered, never conditioned on a count. This page shows one
+                          listing, so counting its orders and requests here to decide whether
+                          to draw the button would be two queries added to the busiest page in
+                          the services half of the platform, to hide a button whose route
+                          refuses the action anyway and says why.
+                        #}
+                        <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
+                              onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot; permanently?\n\nThis only works while no orders or client requests point at it. If any do, it will be refused and you can pause it instead.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-outline-danger">
+                                <i class="fas fa-trash me-1"></i>Delete
+                            </button>
+                        </form>
+                        <a href="{{ url_for('admin_services') if not is_owner else url_for('my_services') }}"
+                           class="btn btn-sm btn-outline-secondary">
+                            <i class="fas fa-list me-1"></i>{{ 'All listings' if not is_owner else 'My services' }}
+                        </a>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
         </div>
     </div>
 </div>

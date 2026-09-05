@@ -146,6 +146,12 @@
                             <li><a class="dropdown-item" href="{{ url_for('customer_rewards_card') }}"><i class="fas fa-credit-card me-2"></i>My Card & Credits</a></li>
                             <li><a class="dropdown-item" href="{{ url_for('seller_withdrawals') }}"><i class="fas fa-wallet me-2"></i>Earnings</a></li>
                             <li><a class="dropdown-item" href="{{ url_for('seller_ads') }}"><i class="fas fa-bullhorn me-2"></i>Ads</a></li>
+                            {#
+                              Alongside Earnings and Ads rather than behind a seller check:
+                              a service can be listed by anyone with an approved storefront,
+                              and the page itself is the answer to "have I listed anything".
+                            #}
+                            <li><a class="dropdown-item" href="{{ url_for('my_services') }}"><i class="fas fa-screwdriver-wrench me-2"></i>My Services</a></li>
                             <li><hr class="dropdown-divider"></li>
                             {% if auth_user.is_admin %}
                             {#
@@ -165,6 +171,7 @@
                                 </form>
                             </li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_service_requests') }}"><i class="fas fa-link me-2"></i>Service Linking Desk</a></li>
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('admin_services') }}"><i class="fas fa-screwdriver-wrench me-2"></i>Service Listings</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_service_catalogue') }}"><i class="fas fa-list-check me-2"></i>Service Catalogue</a></li>
                             <li><a class="dropdown-item text-warning" href="{{ url_for('admin_invoices') }}"><i class="fas fa-file-invoice-dollar me-2"></i>Invoices</a></li>
                             <li><hr class="dropdown-divider"></li>

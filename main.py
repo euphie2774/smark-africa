@@ -6103,6 +6103,17 @@ DRIVER_ASSIGNMENT_LIST_LIMIT = int_env('DRIVER_ASSIGNMENT_LIST_LIMIT', 50)
 # already capped at 99 in add_to_cart.
 CART_MAX_LINES = int_env('CART_MAX_LINES', 100)
 
+# The admin review screen for service listings, which is the only page that can see a
+# paused one. Filterable and searchable rather than paginated, because the job it exists
+# for arrives as a name - "take down the listing this complaint is about" - and not as a
+# position in a list.
+ADMIN_SERVICE_LIST_LIMIT = int_env('ADMIN_SERVICE_LIST_LIMIT', 100)
+
+# How many admins one fan-out notifies. Admin count is small and stays small, so this is
+# not really about scale - it is so a table that has quietly accumulated staff accounts
+# can never turn one provider's button press into an unbounded write loop.
+ADMIN_FANOUT_LIMIT = int_env('ADMIN_FANOUT_LIMIT', 25)
+
 # Every product page view used to be a write and a commit on the product row, so
 # the more popular a listing got the more its viewers serialised behind each other
 # on the same lock. Now the deltas are held per worker and written together.
@@ -21429,7 +21440,235 @@ def pay_service_order(order_id):
     return redirect(url_for('service_detail', service_id=order.service_id))
 
 
-# --- 7b. Service linking desk (admin) ---
+# --- 7a-ii. Taking a service down again ---------------------------------------
+#
+# A listing could be created and then never reached again: provider_id was written
+# once and read nowhere, so a provider who stopped offering had no way to say so and
+# no page that showed them what they had listed. Clients kept being linked to it.
+#
+# Two actions, not one, because "I have stopped offering this" and "this should never
+# have existed" are different facts with different consequences:
+#
+#   Pausing clears is_active. The listing leaves the grid, the search index and the
+#   chatbot's provider list, and no new client can reach it - but every row that
+#   points at it survives, which matters most for the one profile that takes money up
+#   front. Somebody holding a paid VIP ticket still holds it; the event did not stop
+#   existing because the provider stopped selling seats. Reversible, and the provider
+#   does it themselves.
+#
+#   Deleting removes the row. Allowed only when nothing points at it - no orders, no
+#   link requests - so it is the escape hatch for a listing typed wrong five minutes
+#   ago and nothing else. Both dependent columns are nullable=False, so there is no
+#   "detach and keep" to fall back on: a delete past that guard is either an
+#   IntegrityError or, on a database not enforcing it, a paid order pointing at a
+#   service_id that no longer resolves. Neither is a thing to offer behind a button.
+#
+# Admins get the same two actions and no third one. An admin who needs a fraudulent
+# listing gone today pauses it - that is the takedown - and the row stays joinable for
+# whatever follows.
+
+def service_dependency_counts(services):
+    """(orders, requests) per listing, for a page that shows several of them.
+
+    Two grouped queries rather than two per row. The per-row version is the trap
+    described on raffle_buyer_counts: it reads as a property access, the query count
+    grows with the listings and not with the orders, and it gets slower for exactly
+    the providers who are doing well enough to have a page worth loading.
+    """
+    ids = [service.id for service in services]
+    if not ids:
+        return {}
+    orders = dict(db.session.query(
+        ServiceOrder.service_id, func.count(ServiceOrder.id)
+    ).filter(ServiceOrder.service_id.in_(ids)).group_by(ServiceOrder.service_id).all())
+    requests_ = dict(db.session.query(
+        ServiceLinkRequest.service_id, func.count(ServiceLinkRequest.id)
+    ).filter(ServiceLinkRequest.service_id.in_(ids)).group_by(
+        ServiceLinkRequest.service_id).all())
+    # A key for every listing, so the template reads two numbers instead of testing
+    # for absence: a listing nobody has ordered or asked about is in neither group.
+    return {sid: (orders.get(sid, 0), requests_.get(sid, 0)) for sid in ids}
+
+
+def service_removal_blockers(service):
+    """Why this one listing cannot be deleted, phrased for whoever pressed the button.
+
+    Counted here rather than passed in from the page, because the page's numbers were
+    true when it rendered and this decides whether a row is about to be destroyed. A
+    ticket bought in the seconds between the two is precisely the case worth losing.
+    """
+    blockers = []
+    orders = ServiceOrder.query.filter_by(service_id=service.id).count()
+    if orders:
+        paid = ServiceOrder.query.filter_by(service_id=service.id,
+                                            payment_status='paid').count()
+        if paid:
+            blockers.append(f'{paid} paid order(s) point at it, and deleting it would '
+                            f'destroy the record those clients paid for')
+        else:
+            blockers.append(f'{orders} order(s) point at it')
+    asked = ServiceLinkRequest.query.filter_by(service_id=service.id).count()
+    if asked:
+        blockers.append(f'{asked} client request(s) and their message threads point at it')
+    return blockers
+
+
+def service_for_management(service_id):
+    """Load a listing the current user is allowed to administer, or 403.
+
+    Ownership or admin, and nothing else. Split out because three routes need the
+    identical check and a lifecycle route getting it wrong lets one provider pause a
+    competitor's listing.
+    """
+    service = ServiceListing.query.get_or_404(service_id)
+    if not (current_user.is_admin or service.provider_id == current_user.id):
+        abort(403)
+    return service
+
+
+@app.route('/services/mine')
+@login_required
+def my_services():
+    """The page a provider had no way to reach: what you have listed, and the buttons.
+
+    Inactive rows are shown too, and deliberately - a paused listing is invisible
+    everywhere else on the platform, so if it were filtered out here there would be no
+    surface anywhere that could turn it back on.
+    """
+    services = ServiceListing.query.filter_by(provider_id=current_user.id).order_by(
+        ServiceListing.is_active.desc(), ServiceListing.created_at.desc()
+    ).limit(PUBLIC_LIST_LIMIT).all()
+    total = ServiceListing.query.filter_by(provider_id=current_user.id).count()
+    return render_template('my_services.html', services=services, total=total,
+                           dependencies=service_dependency_counts(services))
+
+
+@app.route('/admin/services')
+@login_required
+@admin_required
+def admin_services():
+    """Every listing, active or not, with the same two buttons.
+
+    Needed because pausing hides a listing from the grid, the search and the chatbot -
+    which is the point - and that would otherwise include hiding it from the only
+    people who can review it. Without this page an admin can act on a service only by
+    finding it in the public grid, and a paused one is not in the public grid.
+    """
+    query = ServiceListing.query
+    status = (request.args.get('status') or '').strip().lower()
+    if status == 'active':
+        query = query.filter(ServiceListing.is_active == True)
+    elif status == 'paused':
+        query = query.filter(ServiceListing.is_active == False)
+    search = (request.args.get('q') or '').strip()[:80]
+    if search:
+        like = f'%{search}%'
+        query = query.filter(db.or_(ServiceListing.title.ilike(like),
+                                    ServiceListing.category.ilike(like)))
+    services = query.order_by(ServiceListing.created_at.desc()).limit(
+        ADMIN_SERVICE_LIST_LIMIT).all()
+    return render_template('admin/services.html', services=services,
+                           total=query.count(), status=status, search=search,
+                           dependencies=service_dependency_counts(services))
+
+
+@app.route('/services/<int:service_id>/status', methods=['POST'])
+@login_required
+def service_set_status(service_id):
+    """Pause or resume one listing. Provider or admin."""
+    service = service_for_management(service_id)
+    resume = (request.form.get('state') or '') == 'active'
+    if service.is_active == resume:
+        flash('That listing was already %s.' % ('active' if resume else 'paused'), 'info')
+        return redirect(request.referrer or url_for('my_services'))
+    service.is_active = resume
+    # Counted before the commit so the message can be specific, and only when pausing:
+    # these are the clients already mid-conversation, who are the reason a pause is not
+    # simply a silent flag flip.
+    open_requests = 0 if resume else ServiceLinkRequest.query.filter(
+        ServiceLinkRequest.service_id == service.id,
+        ServiceLinkRequest.status.in_(['open', 'claimed'])).count()
+    try:
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('service %s status change failed', service_id)
+        flash('That did not save. Try again.', 'danger')
+        return redirect(request.referrer or url_for('my_services'))
+    # Or it stays on the grid, in the search results and in the chatbot's provider
+    # list until the cache expires on its own - which is the entire visible effect of
+    # the button, so forgetting this makes it look like nothing happened.
+    invalidate_service_caches()
+    if resume:
+        flash(f'"{service.title}" is live again and clients can reach it.', 'success')
+    else:
+        message = (f'"{service.title}" is paused. It is off the services page and no new '
+                   f'client can reach it.')
+        if service.profile == 'ticket':
+            message += ' Tickets already bought stay valid - this only stops new sales.'
+        if open_requests:
+            message += (f' {open_requests} client request(s) are already open; an admin '
+                        f'will still see those so nobody is left waiting.')
+        flash(message, 'warning')
+        # An open request now points at a listing that cannot be reached, and the desk
+        # is where somebody is about to try linking a client to it.
+        if open_requests and not current_user.is_admin:
+            notify_admins_service_paused(service, open_requests)
+    return redirect(request.referrer or url_for('my_services'))
+
+
+@app.route('/services/<int:service_id>/delete', methods=['POST'])
+@login_required
+def service_delete(service_id):
+    """Delete one listing, but only when nothing points at it. Provider or admin."""
+    service = service_for_management(service_id)
+    blockers = service_removal_blockers(service)
+    if blockers:
+        # Refused rather than cascaded, and the alternative is named in the same
+        # breath, because the person pressing this wants the listing gone and needs to
+        # know the button that achieves it.
+        flash('That listing cannot be deleted: ' + '; '.join(blockers) +
+              '. Pause it instead - it disappears for clients and nothing is lost.',
+              'warning')
+        return redirect(request.referrer or url_for('my_services'))
+    title = service.title
+    try:
+        # Tiers go with it through the delete-orphan cascade on ServiceListing.tiers.
+        db.session.delete(service)
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('service %s delete failed', service_id)
+        flash('That did not delete. Try again, or pause the listing instead.', 'danger')
+        return redirect(request.referrer or url_for('my_services'))
+    invalidate_service_caches()
+    flash(f'"{title}" has been deleted.', 'success')
+    # Never back to the referrer here: on the service's own page that is a 404 now.
+    return redirect(url_for('admin_services') if current_user.is_admin
+                    else url_for('my_services'))
+
+
+def notify_admins_service_paused(service, open_requests):
+    """Tell admins a listing with live requests went away.
+
+    Failures are logged and swallowed: the pause itself is already committed, and a
+    notification that could not be written is not a reason to tell the provider their
+    listing is still live.
+    """
+    try:
+        for admin in User.query.filter_by(is_admin=True).limit(ADMIN_FANOUT_LIMIT).all():
+            create_customer_notification(
+                admin.id, 'A provider paused a service with open requests',
+                f'"{service.title}" was paused by its provider while {open_requests} '
+                f'request(s) were still open. Those clients are waiting on the linking '
+                f'desk and the service can no longer be reached.', 'service')
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('could not notify admins about paused service %s', service.id)
+
+
+
 @app.route('/admin/services/duty', methods=['POST'])
 @login_required
 @admin_required

@@ -26,9 +26,20 @@
             </p>
         </div>
         {% if current_user.is_authenticated %}
-        <a href="{{ url_for('create_service') }}" class="btn btn-success">
-            <i class="fas fa-plus me-1"></i>Offer a service
-        </a>
+        <div class="d-flex flex-wrap gap-2">
+            {#
+              Shown to every signed-in user rather than only to people who have listed
+              something, because finding out whether you have is the reason to press it.
+              Deciding that here would cost a count query on the services grid, which is
+              the page anonymous traffic lands on.
+            #}
+            <a href="{{ url_for('my_services') }}" class="btn btn-outline-secondary">
+                <i class="fas fa-screwdriver-wrench me-1"></i>My services
+            </a>
+            <a href="{{ url_for('create_service') }}" class="btn btn-success">
+                <i class="fas fa-plus me-1"></i>Offer a service
+            </a>
+        </div>
         {% endif %}
     </div>
 
