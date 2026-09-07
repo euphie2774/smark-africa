@@ -663,7 +663,9 @@
                     <div class="d-flex flex-wrap gap-2">
                         {% if service.is_active %}
                         <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
-                              onsubmit="return confirm('Stop offering &quot;{{ service.title|e }}&quot;?\n\nIt disappears from the services page and no new client can reach it. It can be switched back on at any time.');">
+                              onsubmit='return confirm({{ js_prompt(
+                                  "Stop offering \"" ~ service.title ~ "\"?", "",
+                                  "It disappears from the services page and no new client can reach it. It can be switched back on at any time.") }});'>
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <input type="hidden" name="state" value="paused">
                             <button class="btn btn-sm btn-warning">
@@ -672,7 +674,9 @@
                         </form>
                         {% else %}
                         <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
-                              {% if service.removal_pending or service.removal_cleared %}onsubmit="return confirm('Start offering &quot;{{ service.title|e }}&quot; again?\n\nThat cancels the removal request — it would have to be asked for again.');"{% endif %}>
+                              {% if service.removal_pending or service.removal_cleared %}onsubmit='return confirm({{ js_prompt(
+                                  "Start offering \"" ~ service.title ~ "\" again?", "",
+                                  "That cancels the removal request - it would have to be asked for again.") }});'{% endif %}>
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <input type="hidden" name="state" value="active">
                             <button class="btn btn-sm btn-success">
@@ -689,9 +693,37 @@
                           anyway and says why. The management pages, which already count for
                           every row in one grouped query, are where the reasons are spelled out.
                         #}
-                        {% if service.removal_cleared %}
+                        {#
+                          An admin's branch is separate from the owner's and comes first,
+                          because for an admin none of the stages gate anything: they can
+                          remove any listing, at any stage, including over clients still
+                          outstanding. Sharing the owner's branches would have shown them
+                          a disabled "Removal requested" badge on a listing they are
+                          entitled to take down this second - which is the state a scam
+                          report arrives in.
+
+                          This page deliberately does not count the outstanding clients to
+                          word the prompt; it is the busiest page in the services half and
+                          that would be two queries per view. /admin/services counts them
+                          for every row in one grouped query and names them on the button,
+                          so the specific wording lives there.
+                        #}
+                        {% if not is_owner %}
                         <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
-                              onsubmit="return confirm('Remove &quot;{{ service.title|e }}&quot; for good?\n\nAn admin has confirmed nothing is outstanding. This cannot be undone.');">
+                              onsubmit='return confirm({{ js_prompt(
+                                  "Remove \"" ~ service.title ~ "\" from the platform?", "",
+                                  "This cannot be undone. It goes even if clients are still outstanding on it - they stay owed and become yours to settle, and their orders, requests and threads stay readable. The provider and any affected clients are told.", "",
+                                  "All listings shows you what is outstanding before you decide.") }});'>
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                            <button class="btn btn-sm btn-outline-danger">
+                                <i class="fas fa-trash me-1"></i>Remove listing
+                            </button>
+                        </form>
+                        {% elif service.removal_cleared %}
+                        <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
+                              onsubmit='return confirm({{ js_prompt(
+                                  "Remove \"" ~ service.title ~ "\" for good?", "",
+                                  "An admin has confirmed nothing is outstanding. This cannot be undone.") }});'>
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <button class="btn btn-sm btn-danger">
                                 <i class="fas fa-trash me-1"></i>Delete for good
@@ -701,20 +733,14 @@
                         <span class="btn btn-sm btn-outline-secondary disabled">
                             <i class="fas fa-hourglass-half me-1"></i>Removal requested
                         </span>
-                        {% elif is_owner %}
+                        {% else %}
                         <form method="POST" action="{{ url_for('service_request_removal', service_id=service.id) }}"
-                              onsubmit="return confirm('Ask to remove &quot;{{ service.title|e }}&quot;?\n\nUse this once your last client is sorted and you have stopped offering it. It pauses straight away, and an admin checks nothing is still owed before you can delete it. If a client is still unsorted this will be refused and pausing is the option.');">
+                              onsubmit='return confirm({{ js_prompt(
+                                  "Ask to remove \"" ~ service.title ~ "\"?", "",
+                                  "Use this once your last client is sorted and you have stopped offering it. It pauses straight away, and an admin checks nothing is still owed before you can delete it. If a client is still unsorted this will be refused and pausing is the option.") }});'>
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <button class="btn btn-sm btn-outline-danger">
                                 <i class="fas fa-circle-check me-1"></i>Request removal
-                            </button>
-                        </form>
-                        {% else %}
-                        <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
-                              onsubmit="return confirm('Remove &quot;{{ service.title|e }}&quot;?\n\nThis is refused while any client is still unsorted, and while its record needs a confirmation the provider has not asked for. Pausing works either way.');">
-                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                            <button class="btn btn-sm btn-outline-danger">
-                                <i class="fas fa-trash me-1"></i>Delete
                             </button>
                         </form>
                         {% endif %}

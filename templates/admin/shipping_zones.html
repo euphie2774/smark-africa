@@ -211,7 +211,7 @@
                                     </form>
                                     <form method="POST" class="d-inline"
                                           action="{{ url_for('admin_delete_shipping_zone', zone_id=zone.id) }}"
-                                          onsubmit="return confirm('Delete zone {{ zone.name }}?');">
+                                          onsubmit='return confirm({{ js_prompt("Delete zone " ~ zone.name ~ "?") }});'>
                                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                                         <button class="btn btn-sm btn-outline-danger" title="Delete">
                                             <i class="fas fa-trash"></i>

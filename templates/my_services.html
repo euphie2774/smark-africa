@@ -108,7 +108,9 @@
 
                         {% if service.is_active %}
                         <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
-                              onsubmit="return confirm('Stop offering &quot;{{ service.title|e }}&quot;?\n\nIt disappears from the services page and no new client can reach it. You can switch it back on here at any time.');">
+                              onsubmit='return confirm({{ js_prompt(
+                                  "Stop offering \"" ~ service.title ~ "\"?", "",
+                                  "It disappears from the services page and no new client can reach it. You can switch it back on here at any time.") }});'>
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <input type="hidden" name="state" value="paused">
                             <button class="btn btn-sm btn-warning">
@@ -150,7 +152,9 @@
                         </span>
                         {% elif service.removal_cleared %}
                         <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
-                              onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot; for good?\n\nAn admin has confirmed nothing is outstanding. This cannot be undone - if you start offering it again you will have to list it afresh.');">
+                              onsubmit='return confirm({{ js_prompt(
+                                  "Delete \"" ~ service.title ~ "\" for good?", "",
+                                  "An admin has confirmed nothing is outstanding. This cannot be undone - if you start offering it again you will have to list it afresh.") }});'>
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <button class="btn btn-sm btn-danger">
                                 <i class="fas fa-trash me-1"></i>Delete for good
@@ -163,7 +167,9 @@
                         </span>
                         {% elif order_count or request_count %}
                         <form method="POST" action="{{ url_for('service_request_removal', service_id=service.id) }}"
-                              onsubmit="return confirm('Ask to remove &quot;{{ service.title|e }}&quot;?\n\nUse this once you have sorted your last client and are no longer offering it. It pauses straight away, and an admin checks nothing is still owed before you can delete it.');">
+                              onsubmit='return confirm({{ js_prompt(
+                                  "Ask to remove \"" ~ service.title ~ "\"?", "",
+                                  "Use this once you have sorted your last client and are no longer offering it. It pauses straight away, and an admin checks nothing is still owed before you can delete it.") }});'>
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <button class="btn btn-sm btn-outline-danger">
                                 <i class="fas fa-circle-check me-1"></i>Request removal
@@ -171,7 +177,9 @@
                         </form>
                         {% else %}
                         <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
-                              onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot; permanently?\n\nThis cannot be undone. No client has ever ordered or asked about this listing, so nothing else is affected.');">
+                              onsubmit='return confirm({{ js_prompt(
+                                  "Delete \"" ~ service.title ~ "\" permanently?", "",
+                                  "This cannot be undone. No client has ever ordered or asked about this listing, so nothing else is affected.") }});'>
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                             <button class="btn btn-sm btn-outline-danger">
                                 <i class="fas fa-trash me-1"></i>Delete

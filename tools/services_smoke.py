@@ -1827,12 +1827,14 @@ def check_two_stage_removal(provider_id, stranger_id, admin_id, customer_id):
           db.session.get(ServiceListing, busy_id).retired_at is None,
           db.session.get(ServiceListing, busy_id).retired_at)
 
-    # The same refusal for an admin. An admin confirming is a judgement about work off
-    # the platform, never permission to drop a paid order on the floor - so this is the
-    # check that the confirm button is a gate and not a bypass. The request is stamped
-    # directly here because the route refuses to stamp it, which is check one above:
-    # this builds the state an admin would be looking at if a client had arrived in the
-    # gap between the ask and the answer.
+    # An admin cannot *clear* it while a client is outstanding, which is a different
+    # thing from not being able to remove it. Clearance is the permission a provider
+    # spends, so granting it over an unsorted client would hand the provider a live
+    # Delete button on a listing somebody is mid-payment on. The admin's own removal is
+    # not gated - that is the override, checked further down. The request is stamped
+    # directly here because the route refuses to stamp it, which is check one above: this
+    # builds the state an admin would be looking at if a client had arrived in the gap
+    # between the ask and the answer.
     db.session.get(ServiceListing, busy_id).removal_requested_at = datetime.utcnow()
     db.session.commit()
     with as_user(admin_id) as client:
@@ -1841,16 +1843,10 @@ def check_two_stage_removal(provider_id, stranger_id, admin_id, customer_id):
         body = response.get_data(as_text=True)
     db.session.expire_all()
     busy = db.session.get(ServiceListing, busy_id)
-    check('an admin cannot confirm removal over an unsorted client either',
+    check('an admin cannot hand the provider a clearance over an unsorted client',
           busy.removal_cleared_at is None, busy.removal_cleared_at)
     check('and is told which client is outstanding',
           'still waiting on payment' in body, 'no such wording')
-    with as_user(admin_id) as client:
-        client.post(f'/services/{busy_id}/delete', follow_redirects=True)
-    db.session.expire_all()
-    check('and an admin delete is refused on it as well',
-          db.session.get(ServiceListing, busy_id) is not None
-          and db.session.get(ServiceListing, busy_id).retired_at is None)
 
     # -- the delete before the clearance ------------------------------------------
     with as_user(provider_id) as client:
@@ -2012,6 +2008,66 @@ def check_two_stage_removal(provider_id, stranger_id, admin_id, customer_id):
           db.session.get(ServiceListing, sorted_id).is_active)
     check('and the refusal says to list it again instead',
           'list the service again' in resumed_body, 'no such wording')
+
+    # -- the admin override -------------------------------------------------------
+    #
+    # still_busy is the listing the provider was refused on at the top of this check: an
+    # unpaid order on it, so a real outstanding client. An admin removes it anyway. This
+    # is the takedown for a listing that should not be up at all, where the reason it is
+    # urgent and the reason its clients are stuck are the same reason.
+    #
+    # The two halves worth asserting are that it goes, and that nothing of the client's
+    # goes with it. A takedown that took the unpaid order with it would destroy the record
+    # of the money the platform is holding, which is the one thing a dispute is worked
+    # from - and the order's FK is nullable=False with no cascade, so the alternative to a
+    # tombstone here is an IntegrityError rather than a tidy cascade.
+    unpaid_order_id = db.session.query(ServiceOrder.id).filter_by(
+        service_id=busy_id).scalar()
+    with as_user(provider_id) as client:
+        refused = client.post(f'/services/{busy_id}/delete', follow_redirects=True)
+        refused_body = refused.get_data(as_text=True)
+    db.session.expire_all()
+    check('the provider is still refused on a listing with an unsorted client',
+          db.session.get(ServiceListing, busy_id).retired_at is None)
+    check('and still told to pause it instead',
+          'Pause it instead' in refused_body, 'no such wording')
+
+    with as_user(admin_id) as client:
+        response = client.post(f'/services/{busy_id}/delete', follow_redirects=True)
+        override_body = response.get_data(as_text=True)
+    db.session.expire_all()
+    row = db.session.get(ServiceListing, busy_id)
+    check('an admin removes a listing over an outstanding client',
+          row is not None and row.retired_at is not None,
+          None if row is None else row.retired_at)
+    check('and the override is not a hard delete - the unpaid order still resolves',
+          db.session.get(ServiceOrder, unpaid_order_id) is not None
+          and db.session.get(ServiceOrder, unpaid_order_id).service is not None,
+          unpaid_order_id)
+    check('the admin is told which clients they have just taken on',
+          'still waiting on payment' in override_body, 'no such wording')
+    # Guarded on row, unlike the two checks above it that already report None themselves.
+    # If the tombstone ever regresses to a hard delete, row is None here, and an
+    # unguarded attribute read would end the script on an AttributeError - taking the
+    # notification and public-page checks below with it, so the run would report the
+    # regression as a crash rather than as the four failures it actually is.
+    check('and it needed no clearance, because clearance is what a provider spends',
+          row is not None and row.removal_cleared_at is None,
+          None if row is None else row.removal_cleared_at)
+    check('the provider is told it was removed over live clients, not that it was clean',
+          CustomerNotification.query.filter(
+              CustomerNotification.user_id == provider_id,
+              CustomerNotification.title == 'A service of yours was removed',
+              CustomerNotification.body.like('%while clients were still%')).count() == 1)
+    check('and the client waiting on it hears from the platform rather than a 404',
+          CustomerNotification.query.filter(
+              CustomerNotification.user_id == customer_id,
+              CustomerNotification.title
+              == 'A service you were using was removed').count() == 1)
+    with as_anonymous() as client:
+        body = client.get('/services').get_data(as_text=True)
+        check('an overridden listing is off the public page too',
+              f'{TAG} Busy Laundry' not in body, len(body))
     with as_user(admin_id) as client:
         body = client.get('/admin/services?status=retired').get_data(as_text=True)
         check('an admin can still find it, which is where a dispute is worked from',

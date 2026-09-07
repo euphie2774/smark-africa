@@ -79,7 +79,9 @@
                     {% if (invoice.amount_paid or 0) == 0 and invoice.status != 'cancelled' %}
                     <form method="POST" action="{{ url_for('admin_invoice_cancel', invoice_id=invoice.id) }}"
                           class="d-grid"
-                          onsubmit="return confirm('Cancel {{ invoice.invoice_number }}? The client\'s pay link stops working.');">
+                          onsubmit='return confirm({{ js_prompt(
+                              "Cancel " ~ invoice.invoice_number ~ "?",
+                              "The client\'s pay link stops working.") }});'>
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                         <button class="btn btn-outline-danger btn-sm">
                             <i class="fas fa-ban me-1"></i> Cancel this invoice

@@ -7,10 +7,12 @@ stopped paying sellers past row 100, one because a keystroke handler closed the 
 keyboard mid-word, one because Flask serves the whole static tree and the checks that
 guard a paid download live on a different URL, two because a services page told a concert
 ticket buyer there was no pickup and an unattended request told nobody at all, two because a
-public grid's cost was set by how well its raffles had sold, and three because removing a
-service for good has to refuse an unsorted client, wait for an admin, and keep a paid
-client's receipt resolvable - so all of
-them are exactly the kind of assertion that can be subtly inert and still print `[ok  ]`.
+public grid's cost was set by how well its raffles had sold, and four because removing a
+service for good has to refuse an unsorted client, wait for an admin, keep a paid client's
+receipt resolvable, and - when an admin overrides all of that to take down a listing that
+should never have been up - keep the record of the clients it was taken down over. So all
+of them are exactly the kind of assertion that can be subtly inert and still print
+`[ok  ]`.
 
 Each control names the smoke script that owns its check, so the first five run
 `tools/wiring_smoke.py`, the services checks run `tools/services_smoke.py`, and the
@@ -38,6 +40,7 @@ import io
 import os
 import subprocess
 import sys
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON = os.path.join(REPO, 'venv', 'Scripts', 'python.exe')
@@ -185,7 +188,8 @@ CONTROLS = [
         'name': 'a delete that skips the admin confirmation is caught',
         'file': 'main.py',
         'smoke': SERVICES_SMOKE,
-        'old': b'    if (orders or requests_seen) and not service.removal_cleared:\n',
+        'old': b'    if (orders or requests_seen) and not service.removal_cleared '
+               b'and not acting_as_admin:\n',
         'new': b'    if False:\n',
         'expect': 'without an admin confirming',
         'why': 'the admin is in the loop for the part the tables cannot answer. No '
@@ -215,11 +219,77 @@ CONTROLS = [
                'at nothing. The tombstone is not tidiness, it is the only way the row '
                'can go while the receipt survives',
     },
+    {
+        'name': 'an admin override that hard-deletes over live clients is caught',
+        'file': 'main.py',
+        'smoke': SERVICES_SMOKE,
+        # Not aimed at the blockers term in that expression, even though that term is
+        # what the check reads as guarding. Every blocker is also a row
+        # service_settled_history counts, so removing the term changes no outcome and
+        # would prove nothing; it is there as an assertion about that function rather
+        # than as live logic. What one edit *can* reach is the reading of the word
+        # "override" that treats it as licence to really delete - which is the mistake
+        # the button's own label invites.
+        'old': b'    tombstone = bool(orders or requests_seen or blockers)\n',
+        'new': b'    tombstone = bool(orders or requests_seen) and not acting_as_admin\n',
+        'expect': 'not a hard delete',
+        'why': 'an admin overriding live clients is the one path where a listing goes '
+               'while somebody is still owed on it, so it is the one path where the '
+               'tombstone is doing something no other check covers. Read "override" as '
+               '"really remove it" and the takedown for a scam destroys the unpaid order '
+               'that was the evidence of it. Those FKs are nullable=False with no '
+               'cascade, so the row either goes with the listing or the delete raises - '
+               'and the client the admin was told they had just taken on has nothing '
+               'left to point at',
+    },
 ]
 
 
 def md5(path):
     return hashlib.md5(io.open(path, 'rb').read()).hexdigest()
+
+
+def write_bytes(path, payload, attempts=5):
+    """Write payload to path, verify it landed, and raise loudly if it did not.
+
+    A plain write is not good enough here. This script's whole safety property is that
+    the patch it applies is gone again a few seconds later, and that property was lost
+    once for real: with the disk near full, Windows returned OSError(EINVAL) on the
+    write, the identical error took out the restore in the finally that was supposed to
+    undo it, and the working tree was left holding a deliberately sabotaged upload guard.
+    A silent half-restore here is worse than a crash, because the bug left behind was
+    chosen for being invisible.
+
+    So: write to a sibling temp file, flush and fsync it, os.replace it into position -
+    which is atomic on the same volume, so a reader never sees a half-written source
+    file - then read it back and compare. Retried a few times because the failure was
+    transient rather than absolute; raises rather than returning a flag, because there is
+    no sensible way to carry on over a file that will not hold its contents.
+    """
+    last = None
+    for attempt in range(attempts):
+        temp = '%s.ncrestore%d' % (path, attempt)
+        try:
+            with io.open(temp, 'wb') as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+            if io.open(path, 'rb').read() == payload:
+                return
+            last = 'read-back did not match what was written'
+        except OSError as exc:
+            last = exc
+            try:
+                if os.path.exists(temp):
+                    os.remove(temp)
+            except OSError:
+                pass
+        time.sleep(0.4 * (attempt + 1))
+    raise RuntimeError(
+        'could not write %s after %d attempts (%s). The working tree may still be '
+        'holding a control patch - check `git diff` before doing anything else.'
+        % (path, attempts, last))
 
 
 def run_smoke(script=SMOKE):
@@ -264,10 +334,19 @@ def main():
             continue
 
         try:
-            io.open(path, 'wb').write(raw.replace(control['old'], control['new']))
+            write_bytes(path, raw.replace(control['old'], control['new']))
             code, lines, blob = run_smoke(control.get('smoke', SMOKE))
         finally:
-            io.open(path, 'wb').write(raw)
+            # Retried and verified, not written once and hoped for. This restore failed
+            # for real: a near-full disk turned the write into OSError(EINVAL) halfway
+            # through the run, the same error took out the write in this finally, and the
+            # tree was left holding a deliberately broken upload guard - which is the one
+            # outcome this script must never have, because the patch it leaves behind is
+            # a bug somebody chose for being invisible. write_bytes raises only after it
+            # has tried repeatedly and read the file back, so a restore that cannot be
+            # made to stick stops the whole run loudly instead of continuing to the next
+            # control over a patched file.
+            write_bytes(path, raw)
 
         after = md5(path)
         restored = after == before

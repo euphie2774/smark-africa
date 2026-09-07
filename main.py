@@ -20,6 +20,9 @@ from flask_limiter.util import get_remote_address
 from flask_talisman import Talisman
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash
+# From markupsafe rather than flask: flask.Markup was removed in Flask 2.4, and this is
+# the same object flask re-exported all along.
+from markupsafe import Markup
 from sqlalchemy import func, extract, and_, or_, text, case, inspect as sa_inspect
 from sqlalchemy.orm import joinedload
 from sqlalchemy.exc import OperationalError, SQLAlchemyError, IntegrityError
@@ -2308,6 +2311,56 @@ def platform_clean_text(value):
 
 
 app.jinja_env.filters['platform_clean'] = platform_clean_text
+
+
+def js_prompt(*parts):
+    """Join text into one string safe to drop into confirm() inside an HTML attribute.
+
+    Written because the obvious form is wrong in a way that only shows up on somebody
+    else's data. A prompt built as
+
+        onsubmit="return confirm('Delete &quot;{{ service.title|e }}&quot;?')"
+
+    breaks the moment a title contains an apostrophe: |e writes &#39;, the HTML parser
+    decodes that to ' before JavaScript ever sees the attribute, and the quote ends the
+    string literal early - so the button silently stops working for the provider who
+    called their listing "Bob's Wash" and works for everybody else. A real newline from
+    join() leaves the literal unterminated the same way.
+
+    json.dumps escapes the quotes, the newlines and the backslashes, and returns the
+    surrounding double quotes with it - so the attribute itself must be single-quoted:
+
+        onsubmit='return confirm({{ js_prompt("Delete", title) }})'
+
+    The four characters json.dumps leaves alone are then escaped by hand, which is what
+    Flask's own tojson does and for the same reasons: ' would close that single-quoted
+    attribute, & starts an HTML entity the parser decodes before JavaScript runs, and
+    </script> inside a JSON string ends an inline script block. Escaping them as \\uXXXX
+    is invisible in the alert a human reads.
+
+    Marked safe deliberately: the escaping is done, and letting autoescape run over it
+    afterwards would put &quot; back into the text a human reads.
+
+    None and False are dropped, so a caller can pass a conditional line without branching
+    around it, but '' is kept and becomes a blank line - the paragraph breaks are most of
+    what makes a long confirm() readable, and a helper that ate them would have every
+    caller reaching back for '\n\n' by hand. A list or tuple is flattened one level, which
+    is the shape a caller holding blocker sentences already has.
+    """
+    lines = []
+    for part in parts:
+        if isinstance(part, (list, tuple)):
+            lines.extend(str(item) for item in part if item is not None and item is not False)
+        elif part is not None and part is not False:
+            lines.append(str(part))
+    encoded = json.dumps('\n'.join(lines))
+    for character, escape in (("'", '\\u0027'), ('&', '\\u0026'),
+                              ('<', '\\u003c'), ('>', '\\u003e')):
+        encoded = encoded.replace(character, escape)
+    return Markup(encoded)
+
+
+app.jinja_env.globals['js_prompt'] = js_prompt
 
 
 def platform_clean_href(value):
@@ -21920,16 +21973,30 @@ def admin_service_removal_clearance(service_id):
 def service_delete(service_id):
     """Stage three: the listing goes. Pressed by whoever listed it, or by an admin.
 
-    Three refusals and two outcomes.
+    Two refusals for a provider, two outcomes, and one override.
 
-    Refused if any client is still unsorted - by both roles, with no override, because
-    that is the rule: an unsorted client means pause is the only thing on offer.
-    Refused if the listing has history and no admin has confirmed it, because "no
-    pending unfinished work" covers work the platform cannot see - a laundry job paid
-    for this morning counts as a settled order here and is still a pile of shirts.
-    A listing with no history at all needs no clearance: nobody has ever been a client
-    of it, so there is nothing for an admin to have an opinion about, and a typo made
-    a minute ago should not need a queue.
+    A provider is refused if any client is still unsorted: that is the rule, and the
+    alternative is named in the refusal, because pausing achieves what they wanted.
+    They are also refused if the listing has history and no admin has confirmed it,
+    because "no pending unfinished work" covers work the platform cannot see - a laundry
+    job paid for this morning counts as a settled order here and is still a pile of
+    shirts. A listing with no history at all needs no clearance: nobody has ever been a
+    client of it, so there is nothing for an admin to have an opinion about, and a typo
+    made a minute ago should not need a queue.
+
+    An admin can remove any listing, including one with clients still outstanding, and
+    needs no clearance to do it - the clearance exists to let a *provider* delete, and an
+    admin asking themselves for permission is a loop with nobody else in it. This is the
+    takedown for a listing that should not be on the platform at all: a scam, an illegal
+    service, a provider who has stopped answering. Waiting for those clients to be sorted
+    would mean the listing stays up precisely while it is doing the damage.
+
+    What the override does not do is destroy anything a client is owed. An admin removing
+    over live clients always tombstones, never hard-deletes, whatever the history looks
+    like - those unpaid orders and open desk requests point at this row with
+    nullable=False and no cascade, so they have to keep resolving. The clients are told,
+    and so is the provider. The removal is reversible in the only sense that matters
+    afterwards: every order, request and thread is still there to work a dispute from.
 
     Then either the row goes or it is tombstoned. service_orders.service_id and
     service_link_requests.service_id are both nullable=False and neither cascades, so
@@ -21942,8 +22009,9 @@ def service_delete(service_id):
         flash('That listing has already been removed.', 'info')
         return redirect(url_for('admin_services') if current_user.is_admin
                         else url_for('my_services'))
+    acting_as_admin = current_user.is_admin
     blockers = service_unsorted_clients(service)
-    if blockers:
+    if blockers and not acting_as_admin:
         # Refused rather than cascaded, and the alternative is named in the same
         # breath, because the person pressing this wants the listing gone and needs to
         # know the button that achieves it.
@@ -21952,7 +22020,7 @@ def service_delete(service_id):
               'warning')
         return redirect(request.referrer or url_for('my_services'))
     orders, requests_seen = service_settled_history(service)
-    if (orders or requests_seen) and not service.removal_cleared:
+    if (orders or requests_seen) and not service.removal_cleared and not acting_as_admin:
         flash('Ask an admin to confirm this one first: %d order(s) and %d client '
               'request(s) are on its record, and an admin checks there is no '
               'unfinished work behind them before it goes. Use "Request removal".'
@@ -21960,7 +22028,15 @@ def service_delete(service_id):
         return redirect(request.referrer or url_for('my_services'))
     title = service.title
     provider_id = service.provider_id
-    tombstone = bool(orders or requests_seen)
+    # Anything with history is tombstoned rather than destroyed, which covers the admin
+    # override as well: every blocker is either a ServiceOrder row or a
+    # ServiceLinkRequest row on this listing, and service_settled_history counts all rows
+    # of both whatever their status, so a non-empty blockers list always means a non-zero
+    # count here. The blockers term is left in the expression as the assertion that this
+    # stays true - if service_settled_history is ever narrowed to settled rows only, the
+    # override would start hard-deleting the very clients it overrode, and those FKs are
+    # nullable=False with no cascade.
+    tombstone = bool(orders or requests_seen or blockers)
     try:
         if tombstone:
             service.retired_at = utcnow()
@@ -21975,15 +22051,25 @@ def service_delete(service_id):
         flash('That did not delete. Try again, or pause the listing instead.', 'danger')
         return redirect(request.referrer or url_for('my_services'))
     invalidate_service_caches()
-    if tombstone:
+    if blockers:
+        # Said back rather than swallowed: an admin who has just overridden live clients
+        # is the person who has to deal with them, and the numbers are the handover.
+        flash(f'"{title}" has been removed over outstanding clients: '
+              + '; '.join(blockers) +
+              '. Those are yours to settle now - every order, request and thread is '
+              'still readable, and the clients and the provider have been told.',
+              'warning')
+    elif tombstone:
         flash(f'"{title}" has been removed. It is gone from the services page, the '
               f'search and the chatbot. The {orders} order(s) and {requests_seen} '
               f'request(s) already on its record stay readable, so a past client can '
               f'still see what they paid for.', 'success')
     else:
         flash(f'"{title}" has been deleted.', 'success')
-    if current_user.is_admin and provider_id != current_user.id:
-        notify_provider_service_removed(provider_id, title)
+    if acting_as_admin and provider_id != current_user.id:
+        notify_provider_service_removed(provider_id, title, blockers)
+    if blockers:
+        notify_clients_service_removed(service_id, title)
     # Never back to the referrer here: on the service's own page that is a 404 now.
     return redirect(url_for('admin_services') if current_user.is_admin
                     else url_for('my_services'))
@@ -22072,21 +22158,80 @@ def notify_provider_removal_declined(service, note):
                          service.id)
 
 
-def notify_provider_service_removed(provider_id, title):
+def notify_provider_service_removed(provider_id, title, blockers=None):
     """Tell a provider an admin removed their listing without them pressing it.
 
     Only sent when the presser was not the provider. An admin can delete, and the
     provider finding out by noticing an absence is how a support ticket starts.
+
+    The two cases read differently on purpose. A removal with nothing outstanding is
+    housekeeping. A removal over live clients is a takedown, and the provider still owes
+    those people something even though the listing is gone - saying "nothing was
+    outstanding" there would be false, and would tell a provider mid-job to stop.
     """
+    if blockers:
+        body = (f'An admin removed "{title}" from the platform while clients were still '
+                f'outstanding on it: ' + '; '.join(blockers) + '. The listing is off the '
+                f'platform and cannot be restored, but those orders, requests and threads '
+                f'are still on your account. Contact support before doing anything about '
+                f'them.')
+    else:
+        body = (f'An admin removed "{title}" from the platform. Nothing was outstanding '
+                f'on it. Contact support if that was not expected.')
     try:
-        create_customer_notification(
-            provider_id, 'A service of yours was removed',
-            f'An admin removed "{title}" from the platform. Nothing was outstanding on '
-            f'it. Contact support if that was not expected.', 'service')
+        create_customer_notification(provider_id, 'A service of yours was removed', body,
+                                     'service')
         db.session.commit()
     except SQLAlchemyError:
         db.session.rollback()
         logger.exception('could not notify provider %s about removed service', provider_id)
+
+
+def notify_clients_service_removed(service_id, title):
+    """Tell the clients who were mid-something when a listing was taken down.
+
+    Only reached on the admin override, because that is the only path where a listing
+    goes while somebody is still owed on it. A client whose order sits unpaid or whose
+    request is open at the desk would otherwise discover it as a 404, which is the worst
+    version of this news: no explanation and nobody named to ask.
+
+    Bounded on purpose. A listing with more outstanding clients than ADMIN_FANOUT_LIMIT
+    is a support incident rather than a notification job, and a takedown must not turn
+    into an unbounded write inside a request. The ones past the cap are logged so they
+    are still findable.
+
+    Every failure is swallowed: the removal is committed already, and a notification that
+    could not be written is not a reason to leave a scam listing up.
+    """
+    try:
+        # Distinct users, not distinct rows - one client with three unpaid orders gets one
+        # message, and the DISTINCT happens in the database rather than by loading rows.
+        order_clients = [row[0] for row in db.session.query(
+            ServiceOrder.client_id).filter(
+            ServiceOrder.service_id == service_id,
+            db.or_(ServiceOrder.payment_status == 'pending',
+                   ServiceOrder.status == 'oversold_refund_due',
+                   ServiceOrder.payment_status == 'paid')).distinct().all()]
+        request_clients = [row[0] for row in db.session.query(
+            ServiceLinkRequest.client_id).filter(
+            ServiceLinkRequest.service_id == service_id,
+            ServiceLinkRequest.status.in_(SERVICE_LIVE_REQUEST_STATUSES)).distinct().all()]
+        client_ids = list(dict.fromkeys(order_clients + request_clients))
+        if len(client_ids) > ADMIN_FANOUT_LIMIT:
+            logger.warning('service %s removal left %d clients, notifying first %d',
+                           service_id, len(client_ids), ADMIN_FANOUT_LIMIT)
+            client_ids = client_ids[:ADMIN_FANOUT_LIMIT]
+        for client_id in client_ids:
+            create_customer_notification(
+                client_id, 'A service you were using was removed',
+                f'"{title}" has been taken off the platform by an admin. If you paid for '
+                f'anything on it, or a request of yours was still open, your record of it '
+                f'is intact and support can see it - contact support and it will be '
+                f'sorted. Do not pay the provider anything further.', 'service')
+        db.session.commit()
+    except SQLAlchemyError:
+        db.session.rollback()
+        logger.exception('could not notify clients about removed service %s', service_id)
 
 
 

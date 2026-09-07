@@ -15,10 +15,17 @@
   make: an order counts as settled the moment it is paid, and a laundry job paid this
   morning is still a pile of shirts.
 
-  What an admin cannot do is override. A client the platform can prove is outstanding -
-  an unpaid order, a refund owed, a ticket for an event still ahead, a request open at
-  the desk - blocks removal for both roles, and pausing stays the takedown: the listing
-  becomes unreachable while every order, thread and payment record stays joinable.
+  A client the platform can prove is outstanding - an unpaid order, a refund owed, a
+  ticket for an event still ahead, a request open at the desk - blocks the provider's
+  own removal, and pausing is what they have meanwhile: the listing becomes unreachable
+  while every order, thread and payment record stays joinable.
+
+  An admin is not blocked by that. The red Override button removes a listing over its
+  outstanding clients, because the reason to take a listing down urgently - a scam, an
+  illegal service, a provider gone quiet - is the same reason its clients are stuck, and
+  waiting for them to be sorted would keep it up exactly while it does the damage. The
+  clients are not dropped with it: an override always tombstones, the clients and the
+  provider are told, and the whole record stays there to work the dispute from.
 #}
 {% block title %}Service listings - {{ super() }}{% endblock %}
 
@@ -164,7 +171,9 @@
                         <div class="d-flex flex-wrap gap-2 justify-content-end">
                             {% if service.is_active %}
                             <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
-                                  onsubmit="return confirm('Take &quot;{{ service.title|e }}&quot; off the platform?\n\nClients can no longer reach it. Orders, threads and payment records are kept.');">
+                                  onsubmit='return confirm({{ js_prompt(
+                                      "Take \"" ~ service.title ~ "\" off the platform?", "",
+                                      "Clients can no longer reach it. Orders, threads and payment records are kept.") }});'>
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                                 <input type="hidden" name="state" value="paused">
                                 <button class="btn btn-sm btn-warning text-nowrap">
@@ -173,7 +182,9 @@
                             </form>
                             {% else %}
                             <form method="POST" action="{{ url_for('service_set_status', service_id=service.id) }}"
-                                  {% if service.removal_pending or service.removal_cleared %}onsubmit="return confirm('Put &quot;{{ service.title|e }}&quot; back in front of clients?\n\nIts provider asked for it to be removed. Restoring cancels that request, and the removal would have to be asked for again.');"{% endif %}>
+                                  {% if service.removal_pending or service.removal_cleared %}onsubmit='return confirm({{ js_prompt(
+                                      "Put \"" ~ service.title ~ "\" back in front of clients?", "",
+                                      "Its provider asked for it to be removed. Restoring cancels that request, and the removal would have to be asked for again.") }});'{% endif %}>
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                                 <input type="hidden" name="state" value="active">
                                 <button class="btn btn-sm btn-outline-success text-nowrap">
@@ -196,7 +207,10 @@
                             </span>
                             {% else %}
                             <form method="POST" action="{{ url_for('admin_service_removal_clearance', service_id=service.id) }}"
-                                  onsubmit="return confirm('Confirm &quot;{{ service.title|e }}&quot; can be removed?\n\nNothing is outstanding on the platform: {{ order_count }} order(s) and {{ request_count }} request(s) are all settled here. You are confirming there is no unfinished work behind them off the platform either.\n\nIts provider will then be able to delete it.');">
+                                  onsubmit='return confirm({{ js_prompt(
+                                      "Confirm \"" ~ service.title ~ "\" can be removed?", "",
+                                      "Nothing is outstanding on the platform: %d order(s) and %d request(s) are all settled here. You are confirming there is no unfinished work behind them off the platform either."|format(order_count, request_count), "",
+                                      "Its provider will then be able to delete it.") }});'>
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                                 <input type="hidden" name="decision" value="confirm">
                                 <button class="btn btn-sm btn-success text-nowrap">
@@ -212,24 +226,49 @@
                             {% endif %}
 
                             {#
-                              An admin's own delete. Unblocked and cleared listings only -
-                              the same two gates the provider's button has, because the
-                              rule is about the clients, not about who is pressing.
+                              An admin's own delete, on any listing. No clearance gate -
+                              that gate exists to let a *provider* delete, and an admin
+                              asking themselves for permission is a loop with nobody else
+                              in it. No blocker gate either: this is the takedown for a
+                              listing that should not be up at all, and waiting for its
+                              clients to be sorted would keep it up exactly while it is
+                              doing the damage.
+
+                              What changes with outstanding clients is the warning and the
+                              colour, because the consequence is different: those clients
+                              become this admin's problem the moment the button is pressed,
+                              and the route says so back to them afterwards. Nothing of
+                              theirs is destroyed - the route always tombstones here.
+                            #}
+                            {#
+                              The two prompts are built as lists and handed to js_prompt in
+                              one call, rather than as one conditional expression inside the
+                              call: an override warning and a housekeeping warning say
+                              genuinely different things, and reading which is which matters
+                              more here than saving four lines.
                             #}
                             {% if blocked %}
-                            <span class="small text-muted align-self-center text-nowrap"
-                                  title="{{ blocked|join('; ') }}">
-                                <i class="fas fa-lock"></i>
-                            </span>
-                            {% elif service.removal_cleared or not (order_count or request_count) %}
+                            {% set removal_lines = [
+                                'Remove "' ~ service.title ~ '" over %d outstanding client(s)?'|format(blocked|length), '',
+                                blocked|join('\n'), '',
+                                'Use this for a listing that should not be on the platform at all. Those clients stay owed and become yours to settle - their orders, requests and threads stay readable. The provider and the clients are told.'] %}
+                            {% elif order_count or request_count %}
+                            {% set removal_lines = [
+                                'Remove "' ~ service.title ~ '" now?', '',
+                                'This cannot be undone. Its %d order(s) and %d request(s) stay readable so past clients can still see what they paid for, but the listing is gone from the platform.'|format(order_count, request_count)] %}
+                            {% else %}
+                            {% set removal_lines = [
+                                'Remove "' ~ service.title ~ '" now?', '',
+                                'This cannot be undone. Nothing points at this listing, so nothing else is affected.'] %}
+                            {% endif %}
                             <form method="POST" action="{{ url_for('service_delete', service_id=service.id) }}"
-                                  onsubmit="return confirm('Remove &quot;{{ service.title|e }}&quot; now?\n\nThis cannot be undone. {% if order_count or request_count %}Its {{ order_count }} order(s) and {{ request_count }} request(s) stay readable so past clients can still see what they paid for, but the listing is gone from the platform.{% else %}Nothing points at this listing, so nothing else is affected.{% endif %}');">
+                                  onsubmit='return confirm({{ js_prompt(removal_lines) }});'>
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                <button class="btn btn-sm btn-outline-danger" title="Remove listing">
-                                    <i class="fas fa-trash"></i>
+                                <button class="btn btn-sm {{ 'btn-danger' if blocked else 'btn-outline-danger' }}"
+                                        title="{% if blocked %}Take down over {{ blocked|length }} outstanding client(s){% else %}Remove listing{% endif %}">
+                                    <i class="fas fa-trash"></i>{% if blocked %}<span class="ms-1">Override</span>{% endif %}
                                 </button>
                             </form>
-                            {% endif %}
                         </div>
 
                         {#
