@@ -2400,13 +2400,41 @@ canvas {
     height: auto;
 }
 
-/* Phone and tablet navigation sits directly above the footer in normal flow. */
+/* Reserve space for the fixed phone and tablet navigation. */
 .footer-navigation { display:none; justify-content:space-around; gap:.5rem; margin:3rem 0 0; padding:1rem; background:#14251f; border-top:1px solid #566b60; }
 @media screen and (max-width:1024px) {
-    .footer-navigation { display:flex; }
-    .footer-navigation + footer { margin-top:0 !important; }
+    body { padding-bottom:calc(81px + env(safe-area-inset-bottom)); }
+    .footer-navigation {
+        display:flex;
+        position:fixed;
+        inset:auto 0 0;
+        z-index:1030;
+        margin:0;
+        padding-bottom:calc(1rem + env(safe-area-inset-bottom));
+    }
+    .footer-navigation + footer { display:none; }
 }
 .footer-navigation a { display:flex; flex:1; flex-direction:column; align-items:center; gap:.35rem; color:#fff; text-decoration:none; min-height:48px; }
 .footer-navigation a:hover, .footer-navigation a[aria-current] { color:#f5c857; }
 .footer-navigation a:focus-visible { outline:3px solid #f5c857; outline-offset:4px; }
 .price-row label { width:100%; }
+
+/* Filters above the results leave the full row available for products. */
+.shop-layout { grid-template-columns:minmax(0, 1fr); }
+.shop-filter-dropdowns { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; }
+.shop-results { min-width:0; }
+.shop-grid { grid-template-columns:repeat(3, minmax(0, 1fr)); }
+@media (max-width:1024px) {
+    .shop-layout { max-width:100%; padding-inline:10px; }
+    .shop-grid { gap:8px; }
+    .shop-grid .product-media { height:auto; aspect-ratio:1; }
+    .shop-grid .product-copy { padding:6px; overflow-wrap:anywhere; }
+    .shop-grid .product-price { flex-wrap:wrap; }
+    .shop-grid .product-actions { grid-template-columns:1fr; }
+    .shop-grid .product-actions .btn { white-space:normal; }
+}
+@media (max-width:480px) {
+    .shop-grid .product-title { font-size:.75rem; }
+    .shop-grid .product-price span { font-size:.8rem; }
+    .shop-grid .product-actions .btn { font-size:.7rem; padding:6px 2px; }
+}

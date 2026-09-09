@@ -26,21 +26,28 @@
 </section>
 
 <div class="container shop-layout">
-    <aside class="shop-filter-panel">
-        <h2>Categories</h2>
-        <a href="{{ url_for('shop') }}" class="filter-link {{ 'active' if not current_category }}">All Products</a>
-        {% for cat in categories %}
-        <a href="{{ url_for('shop', category=cat.slug, type=current_type or None, sort=request.args.get('sort') or None) }}" class="filter-link {{ 'active' if current_category and current_category.id == cat.id }}">
-            {{ cat.name }}
-        </a>
-        {% endfor %}
-
-        <hr>
-        <h2>Type</h2>
-        <a href="{{ url_for('shop', category=current_category.slug if current_category else None, sort=request.args.get('sort') or None) }}" class="filter-link {{ 'active' if not current_type }}">All</a>
-        <a href="{{ url_for('shop', category=current_category.slug if current_category else None, type='digital', sort=request.args.get('sort') or None) }}" class="filter-link {{ 'active' if current_type == 'digital' }}">Digital</a>
-        <a href="{{ url_for('shop', category=current_category.slug if current_category else None, type='physical', sort=request.args.get('sort') or None) }}" class="filter-link {{ 'active' if current_type == 'physical' }}">Physical</a>
-    </aside>
+    <form class="shop-filter-dropdowns" action="{{ url_for('shop') }}" method="GET">
+        {% if request.args.get('search') %}<input type="hidden" name="search" value="{{ request.args.get('search') }}">{% endif %}
+        {% if request.args.get('sort') %}<input type="hidden" name="sort" value="{{ request.args.get('sort') }}">{% endif %}
+        <div>
+            <label for="shop-category" class="form-label">Categories</label>
+            <select id="shop-category" name="category" class="form-select" onchange="this.form.submit()">
+                <option value="">All Products</option>
+                {% for cat in categories %}
+                <option value="{{ cat.slug }}" {{ 'selected' if current_category and current_category.id == cat.id }}>{{ cat.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label for="shop-type" class="form-label">Type</label>
+            <select id="shop-type" name="type" class="form-select" onchange="this.form.submit()">
+                <option value="">All</option>
+                <option value="digital" {{ 'selected' if current_type == 'digital' }}>Digital</option>
+                <option value="physical" {{ 'selected' if current_type == 'physical' }}>Physical</option>
+            </select>
+        </div>
+        <noscript><button type="submit" class="btn btn-gold">Apply filters</button></noscript>
+    </form>
 
     <section class="shop-results">
         <div class="results-toolbar">
