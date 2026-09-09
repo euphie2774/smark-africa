@@ -75,6 +75,93 @@ def run():
                     raise AssertionError('Oversize answer accepted')
                 assert read_service_answers('laundry', {'detail_device_repair_devices': 'wrong category'}) == []
                 print('PASS: invalid prices, duplicate tiers, missing custom names and invalid category answers rejected')
+                from service_forms import read_price_items, request_summary, form_design, validate_design
+                from types import SimpleNamespace
+                from unittest.mock import patch
+                import json
+                import service_design_jobs
+                from models import ServiceCatalogueItem
+
+                menu = MultiDict({'service_key': 'food_delivery', 'title': 'Structured menu',
+                    'provider_phone': '0712345678', 'delivery_fee': '50',
+                    'item_name': 'Rice bowl', 'item_price': '125.50', 'item_unit': 'portion',
+                    'item_description': 'Large bowl'})
+                result = client.post('/services/create', data=menu)
+                assert result.status_code == 302
+                listing = ServiceListing.query.filter_by(title='Structured menu').one()
+                assert listing.price_items[0]['price'] == '125.50'
+                assert listing.price == 125.50
+                summary = request_summary(listing, {'quantity_0': '2', 'total': '1', 'request_destination': 'Gate B'})
+                assert '301.00' in summary and 'Gate B' in summary, summary
+                page = client.get(result.headers['Location']).get_data(as_text=True)
+                assert 'Rice bowl' in page and '125.50' in page and 'Large bowl' in page
+                for price in ['nan', 'inf', '-1', '1.001', '10000001', '']:
+                    invalid = MultiDict(menu)
+                    invalid['item_price'] = price
+                    try:
+                        read_price_items(invalid)
+                    except ValueError:
+                        pass
+                    else:
+                        raise AssertionError('Accepted invalid item price: ' + price)
+                for quantity in ['-1', '101', '1.5', 'bad']:
+                    try:
+                        request_summary(listing, {'quantity_0': quantity})
+                    except ValueError:
+                        pass
+                    else:
+                        raise AssertionError('Accepted invalid quantity')
+                result = client.post('/services/create', data={
+                    'service_key': 'events_tickets', 'title': 'One admission price',
+                    'provider_phone': '0712345678', 'ticket_mode': 'single',
+                    'single_ticket_price': '300.50', 'single_ticket_quantity': '40'})
+                assert result.status_code == 302
+                ticket = ServiceListing.query.filter_by(title='One admission price').one()
+                assert ticket.tiers[0].name == 'General admission' and ticket.tiers[0].price == 300.50
+                assert ticket.tiers[0].quantity_total == 40
+                print('PASS: menus persist, estimates ignore client totals, invalid amounts rejected, single-price tickets work')
+
+                future = ServiceCatalogueItem(key='pet_care', label='Pet care', fulfilment_profile='visit',
+                    is_active=True, seller_listable=True, form_profile_auto=True)
+                db.session.add(future)
+                db.session.commit()
+                main.invalidate_service_caches()
+                page = client.get('/services/create').get_data(as_text=True)
+                assert 'detail_pet_care_scope' in page
+                design = {'questions': [['pets', 'Animals accepted', 'Species and size limits']],
+                          'client_fields': [['animal', 'Animal and care needed']],
+                          'price_label': 'Care package', 'profile': 'visit'}
+                with patch.dict(os.environ, {'OPENAI_API_KEY': 'test-only'}), patch.object(
+                        service_design_jobs, 'generate_design', return_value=design) as generate:
+                    service_design_jobs.process_pending_designs()
+                    assert generate.called
+                assert future.form_design_status == 'ready'
+                main.invalidate_service_caches()
+                page = client.get('/services/create').get_data(as_text=True)
+                assert 'detail_pet_care_pets' in page
+                result = client.post('/services/create', data={'service_key': 'pet_care',
+                    'title': 'Pet sitting', 'provider_phone': '0712345678',
+                    'detail_pet_care_pets': 'Cats'})
+                assert result.status_code == 302
+                pet_listing = ServiceListing.query.filter_by(title='Pet sitting').one()
+                future.form_design_json = json.dumps(form_design('new', 'Other', 'session'))
+                db.session.commit()
+                assert pet_listing.service_design['client_fields'][0][0] == 'animal'
+                assert pet_listing.offering_answers[0]['value'] == 'Cats'
+                future.form_design_status = 'pending'
+                future.form_design_attempts = 2
+                db.session.commit()
+                with patch.dict(os.environ, {'OPENAI_API_KEY': 'test-only'}), patch.object(
+                        service_design_jobs, 'generate_design', side_effect=ValueError('Invalid AI response')):
+                    service_design_jobs.process_pending_designs()
+                assert future.form_design_status == 'failed'
+                assert future.form_design_attempts == 3
+                for path in ['/account', '/about']:
+                    response = client.get(path)
+                    assert response.status_code == 200, path
+                    assert 'Bottom navigation' in response.get_data(as_text=True)
+                assert 'Quick links' in client.get('/about').get_data(as_text=True)
+                print('PASS: future category fallback, AI design persistence, snapshot isolation, bounded retries and navigation')
         finally:
             with app.app_context():
                 db.session.remove()

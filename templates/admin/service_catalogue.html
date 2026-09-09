@@ -21,6 +21,9 @@
 {% block title %}Service catalogue - {{ super() }}{% endblock %}
 
 {% block content %}
+<div class="container pt-3"><p class="small text-muted">New categories receive a form immediately from their delivery profile. Background AI research refines the questions when AI is configured. Existing listings keep their original form.</p>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="retry_designs"><button class="btn btn-sm btn-outline-secondary">Retry failed AI form designs</button></form>
+<ul class="small mt-2">{% for row in rows if row.form_design_status not in ['built_in', 'ready'] %}<li>{{ row.label }}: {{ (row.form_design_status or 'pending')|replace('_', ' ') }}</li>{% endfor %}</ul></div>
 <div class="container py-4">
     <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
         <div>
@@ -64,8 +67,9 @@
                 <div class="col-12 col-md-4">
                     <label class="form-label small mb-1" for="newProfile">How it is offered</label>
                     <select class="form-select" id="newProfile" name="fulfilment_profile">
+                        <option value="auto" selected>Choose automatically with AI</option>
                         {% for name, spec in profiles.items() %}
-                        <option value="{{ name }}" {{ 'selected' if name == default_profile }}>
+                        <option value="{{ name }}" >
                             {{ spec.label }}
                         </option>
                         {% endfor %}

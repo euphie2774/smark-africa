@@ -1,0 +1,19 @@
+<section class="card border-0 shadow-sm mb-3" data-flow="request">
+  <div class="card-body">
+    <h2 class="h6">Price list</h2>
+    <p class="small text-muted">Add dishes, items or service options. Each row has its own price and billing unit. For a custom quote, leave this list empty and describe how you calculate charges above.</p>
+    {% set names = form.getlist('item_name') if form.getlist is defined else [] %}
+    <div id="priceRows">
+      {% for index in range([names|length, 1]|max) %}
+      <div class="row g-2 mb-3 price-row border-bottom pb-3">
+        <div class="col-12 col-sm-5"><label class="form-label small">Item / service<input class="form-control" name="item_name" maxlength="100" value="{{ names[index] if index < names|length else '' }}"></label></div>
+        <div class="col-6 col-sm-3"><label class="form-label small">Price (KSh)<input class="form-control" name="item_price" type="number" min="0" max="10000000" step="0.01" value="{{ form.getlist('item_price')[index] if index < names|length and index < form.getlist('item_price')|length else '' }}"></label></div>
+        <div class="col-6 col-sm-4"><label class="form-label small">Per<select class="form-select" name="item_unit">{% for unit in price_units %}<option value="{{ unit }}" {{ 'selected' if index < names|length and index < form.getlist('item_unit')|length and form.getlist('item_unit')[index] == unit }}>{{ unit }}</option>{% endfor %}</select></label></div>
+        <div class="col-10"><input class="form-control" name="item_description" maxlength="300" aria-label="Inclusions, portion size, duration or exclusions" placeholder="Portion size, duration, inclusions or exclusions" value="{{ form.getlist('item_description')[index] if index < names|length and index < form.getlist('item_description')|length else '' }}"></div>
+        <div class="col-2"><button class="btn btn-outline-danger remove-price" type="button" aria-label="Remove price row"><i class="fas fa-trash" aria-hidden="true"></i></button></div>
+      </div>
+      {% endfor %}
+    </div>
+    <button class="btn btn-sm btn-outline-primary" type="button" id="addPriceRow">Add item / service</button>
+  </div>
+</section>

@@ -100,7 +100,7 @@
                             <div class="col-12 col-sm-4">
                                 <label class="form-label" for="price">Price (KSh)</label>
                                 <input type="number" class="form-control" id="price" name="price"
-                                       min="0" step="10" value="{{ form.get('price', '') }}">
+                                       min="0" step="0.01" value="{{ form.get('price', '') }}">
                                 <div class="form-text">0 shows as “price on request”.</div>
                             </div>
                             <div class="col-12 col-sm-4" data-profiles="dropoff errand visit">
@@ -139,6 +139,7 @@
                     </div>
                 </div>
 
+                {% include "_service_prices.html" %}
                 {% for category_key, questions in service_questions.items() %}
                 <div class="card border-0 shadow-sm mb-3" data-category="{{ category_key }}">
                     <div class="card-body">
@@ -185,7 +186,16 @@
                         {% set tier_totals = form.getlist('tier_quantity') if form.getlist is defined else [] %}
                         {% set tier_caps = form.getlist('tier_max') if form.getlist is defined else [] %}
                         {% set tier_custom_names = form.getlist('tier_custom_name') if form.getlist is defined else [] %}
-                        <div id="tierRows">
+                        <label class="form-label">Ticket pricing
+<select class="form-select" name="ticket_mode" id="ticketMode">
+<option value="tiers" {{ 'selected' if form.get('ticket_mode', 'tiers') == 'tiers' }}>Ticket tiers</option>
+<option value="single" {{ 'selected' if form.get('ticket_mode') == 'single' }}>One price for all tickets</option>
+</select></label>
+<div id="singleTicketFields" class="row g-2 mb-3">
+<label class="col-sm-6">Ticket price (KSh)<input class="form-control" type="number" name="single_ticket_price" min="0.01" max="10000000" step="0.01" value="{{ form.get('single_ticket_price', '') }}"></label>
+<label class="col-sm-6">Capacity (0 = unlimited)<input class="form-control" type="number" name="single_ticket_quantity" min="0" step="1" value="{{ form.get('single_ticket_quantity', '0') }}"></label>
+</div>
+<div id="tierRows">
                             {% for index in range([tier_names|length, 3]|max) %}
                             <div class="row g-2 mb-2 tier-row">
                                 <div class="col-12 col-sm-4">
@@ -359,7 +369,7 @@
                             <div class="col-12 col-sm-6">
                                 <label class="form-label small mb-1" for="delivery_fee">Delivery fee (KSh)</label>
                                 <input type="number" class="form-control" id="delivery_fee"
-                                       name="delivery_fee" min="0" step="10"
+                                       name="delivery_fee" min="0" step="0.01"
                                        value="{{ form.get('delivery_fee', '') }}">
                             </div>
                             <div class="col-12 col-sm-6">
@@ -367,7 +377,7 @@
                                     Minimum order (KSh)
                                 </label>
                                 <input type="number" class="form-control" id="min_order_amount"
-                                       name="min_order_amount" min="0" step="10"
+                                       name="min_order_amount" min="0" step="0.01"
                                        value="{{ form.get('min_order_amount', '') }}">
                             </div>
                         </div>
@@ -446,7 +456,7 @@
                                 <div class="col-12 col-sm-6">
                                     <label class="form-label small mb-1" for="pickup_cost">Pickup cost (KSh)</label>
                                     <input type="number" class="form-control" id="pickup_cost"
-                                           name="pickup_cost" min="0" step="10"
+                                           name="pickup_cost" min="0" step="0.01"
                                            value="{{ form.get('pickup_cost', '') }}">
                                 </div>
                                 <div class="col-12 col-sm-6">
@@ -512,6 +522,7 @@
     // and there is one definition of the whitelist rather than a copy per template.
     var PROFILES = {{ profiles|tojson }};
     var picker = document.getElementById('service_key');
+    if (!picker) return;
     var blurb = document.getElementById('profileBlurb');
     var payNote = document.getElementById('payNote');
     var payNoteText = document.getElementById('payNoteText');
@@ -579,6 +590,8 @@
         cost.disabled = cost.disabled || document.getElementById('pickup_is_free').checked;
         syncTiers();
         if (spec) {
+            var design = {{ service_designs|tojson }}[picker.value];
+            document.querySelectorAll('[name="item_name"]').forEach(function (input) { input.placeholder = design.price_label; });
             var copy = COPY[name];
             document.querySelector('label[for="title"]').textContent = copy[0];
             document.getElementById('title').placeholder = picker.options[picker.selectedIndex].textContent.trim();
@@ -607,19 +620,38 @@
     }
 
     function syncTiers() {
+        var single = document.getElementById('ticketMode').value === 'single';
+        document.getElementById('singleTicketFields').classList.toggle('d-none', !single);
+        document.getElementById('singleTicketFields').querySelectorAll('input').forEach(function (input) { input.disabled = !single || chosenProfile() !== 'ticket'; });
+        document.getElementById('tierRows').classList.toggle('d-none', single);
+        document.getElementById('tierRows').querySelectorAll('input, select, button').forEach(function (input) { input.disabled = single || chosenProfile() !== 'ticket'; });
         var addButton = document.getElementById('addTierRow');
         if (addButton) {
-            addButton.disabled = chosenProfile() !== 'ticket' || document.querySelectorAll('.tier-row').length >= 12;
+            addButton.disabled = single || chosenProfile() !== 'ticket' || document.querySelectorAll('.tier-row').length >= 12;
         }
         document.querySelectorAll('.tier-row').forEach(function (row) {
             var custom = row.querySelector('[name="tier_custom_name"]');
             var isCustom = row.querySelector('[name="tier_name"]').value === 'Custom';
             custom.classList.toggle('d-none', !isCustom);
-            custom.disabled = chosenProfile() !== 'ticket' || !isCustom;
-            custom.required = isCustom && chosenProfile() === 'ticket';
+            custom.disabled = single || chosenProfile() !== 'ticket';
+            custom.required = !single && isCustom && chosenProfile() === 'ticket';
         });
     }
 
+    document.getElementById('ticketMode').addEventListener('change', syncTiers);
+    document.getElementById('addPriceRow').addEventListener('click', function () {
+        var rows = document.getElementById('priceRows');
+        if (rows.children.length >= 60) return;
+        var copy = rows.lastElementChild.cloneNode(true);
+        copy.querySelectorAll('input').forEach(function (input) { input.value = ''; });
+        rows.appendChild(copy);
+    });
+    document.getElementById('priceRows').addEventListener('click', function (event) {
+        var button = event.target.closest('.remove-price');
+        if (!button) return;
+        if (this.children.length > 1) button.closest('.price-row').remove();
+        else this.querySelectorAll('input').forEach(function (input) { input.value = ''; });
+    });
     if (picker) {
         picker.addEventListener('change', applyProfile);
         applyProfile();

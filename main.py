@@ -19894,7 +19894,7 @@ app.jinja_env.globals['support_whatsapp_url'] = support_whatsapp_url
 # A namedtuple cannot be expired, cannot lazy-load and cannot be mutated by one of
 # the four threads sharing a worker's cache.
 ServiceOption = namedtuple('ServiceOption',
-                           'key label emoji seller_listable profile')
+                           'key label emoji seller_listable profile form_design_json', defaults=[None])
 
 
 def service_catalogue(seller_only=False):
@@ -19929,7 +19929,7 @@ def _compute_service_catalogue():
     cached = tuple(ServiceOption(row.key, row.label, row.emoji or '',
                                  bool(row.seller_listable),
                                  (row.fulfilment_profile or '').strip().lower()
-                                 or seed_profile_for(row.key))
+                                 or seed_profile_for(row.key), row.form_design_json)
                    for row in rows)
     # Filled before the stripe is released so a waiter's re-read finds it.
     _service_catalogue_cache.set('rows', cached)
@@ -20741,6 +20741,11 @@ def flash_provider_notify_result(service, result):
               'warning')
 
 
+@app.route('/account')
+def account_page():
+    return render_template('account.html')
+
+
 @app.route('/services/<int:service_id>/contact-admin', methods=['POST'])
 @login_required
 @limiter.limit(SERVICE_REQUEST_RATE_LIMIT)
@@ -20771,6 +20776,14 @@ def service_contact_admin(service_id):
                                  'pick your ticket and pay.'}), 400
 
     note = (request.form.get('note') or (request.get_json(silent=True) or {}).get('note') or '').strip()[:1000]
+    from service_forms import request_summary
+    try:
+        details = request_summary(service, request.form if request.form else (request.get_json(silent=True) or {}))
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    note = '\n'.join(part for part in (details, note) if part)
+    if len(note) > 6000:
+        return jsonify({'success': False, 'error': 'Please shorten your request.'}), 400
     phone = (request.form.get('phone') or (request.get_json(silent=True) or {}).get('phone')
              or current_user.phone or '').strip()[:30]
 
@@ -20972,7 +20985,7 @@ def create_service():
     wins, and a blank address falls back to the coordinates the browser supplied,
     so a provider who cannot describe where they are still gets a pin.
     """
-    from service_forms import SERVICE_QUESTIONS, read_service_answers
+    from service_forms import SERVICE_QUESTIONS, read_service_answers, form_design, read_price_items, PRICE_UNITS
 
     is_admin_lister = current_user.is_admin
     storefront = None
@@ -20990,10 +21003,13 @@ def create_service():
                        'pay_to': spec['pay_to'], 'pay_when': spec['pay_when']}
                 for name, spec in SERVICE_FULFILMENT_PROFILES.items()}
 
+    designs = {row.key: form_design(row.key, row.label, row.profile, row.form_design_json) for row in options}
+
     def back(form_data):
         return render_template('create_service.html', options=options, fee=fee,
                                profiles=profiles, form=form_data,
-                               service_questions=SERVICE_QUESTIONS)
+                               service_questions={key: value['questions'] for key, value in designs.items()},
+                               service_designs=designs, price_units=PRICE_UNITS)
 
     if request.method == 'POST':
         title = (request.form.get('title', '') or '').strip()[:200]
@@ -21012,7 +21028,8 @@ def create_service():
 
         profile = allowed[service_key].profile or DEFAULT_SERVICE_PROFILE
         try:
-            offering_answers = read_service_answers(service_key, request.form)
+            offering_answers = read_service_answers(service_key, request.form, designs[service_key]['questions'])
+            price_items = read_price_items(request.form) if profile != 'ticket' else []
         except ValueError as exc:
             flash(str(exc), 'danger')
             return back(request.form)
@@ -21029,6 +21046,8 @@ def create_service():
             category=allowed[service_key].label,
             service_key=service_key,
             offering_details=json.dumps(offering_answers),
+            pricing_details=json.dumps(price_items),
+            form_snapshot=json.dumps(designs[service_key]),
             # Copied onto the row, not read through the catalogue: an admin retagging
             # a category later must not silently reshape listings providers have
             # already written, and the grid filter wants one indexed column rather
@@ -21044,6 +21063,8 @@ def create_service():
             is_admin_listing=is_admin_lister,
         )
         apply_service_profile_fields(service)
+        if price_items:
+            service.price = min(float(item['price']) for item in price_items)
         if tiers:
             # The grid reads `price` and never the tiers, so the lowest band is
             # written here. A min(tier.price) per card would be an N+1 on the one
@@ -21108,6 +21129,21 @@ def read_service_tiers():
     the whole listing because row four is empty is not a real complaint.
     """
     from math import isfinite
+
+    if request.form.get('ticket_mode') == 'single':
+        from werkzeug.datastructures import MultiDict
+        from service_forms import read_price_items
+        try:
+            items = read_price_items(MultiDict({'item_name': 'General admission',
+                'item_price': request.form.get('single_ticket_price', ''),
+                'item_unit': 'item', 'item_description': ''}))
+            price = float(items[0]['price'])
+            quantity = int(request.form.get('single_ticket_quantity') or '0')
+            if price <= 0 or quantity < 0:
+                raise ValueError('Invalid price or capacity')
+            return [{'name': 'General admission', 'price': price, 'quantity_total': quantity, 'max_per_order': 5}], ''
+        except (ValueError, IndexError):
+            return [], 'Enter a valid ticket price and whole-number capacity.'
 
     names = request.form.getlist('tier_name')
     custom_names = request.form.getlist('tier_custom_name')
@@ -22401,6 +22437,12 @@ def admin_service_catalogue():
     """Which services exist, and which of them a seller may list."""
     if request.method == 'POST':
         action = (request.form.get('action') or 'save').strip()
+        if action == 'retry_designs':
+            ServiceCatalogueItem.query.filter_by(form_design_status='failed').update({
+                'form_design_status': 'pending', 'form_design_attempts': 0})
+            db.session.commit()
+            flash('Failed form designs queued for retry.', 'success')
+            return redirect(url_for('admin_service_catalogue'))
         if action == 'add':
             label = (request.form.get('label', '') or '').strip()[:120]
             if not label:
@@ -22419,6 +22461,7 @@ def admin_service_catalogue():
                 profile = seed_profile_for(key)
             db.session.add(ServiceCatalogueItem(
                 key=key, label=label,
+                form_profile_auto=request.form.get('fulfilment_profile') == 'auto',
                 emoji=(request.form.get('emoji', '') or '').strip()[:16] or None,
                 seller_listable=bool(request.form.get('seller_listable')),
                 fulfilment_profile=profile,
@@ -22454,6 +22497,7 @@ def admin_service_catalogue():
             profile = (request.form.get(f'profile_{row.id}') or '').strip().lower()
             if profile in SERVICE_FULFILMENT_PROFILES:
                 row.fulfilment_profile = profile
+                row.form_profile_auto = False
             emoji = (request.form.get(f'emoji_{row.id}', '') or '').strip()[:16]
             if emoji:
                 row.emoji = emoji
@@ -23821,6 +23865,8 @@ def phase_two_schema_spec():
             ('event_starts_at', 'event_starts_at DATETIME'),
             ('event_venue', 'event_venue VARCHAR(200)'),
             ('offering_details', 'offering_details TEXT'),
+            ('pricing_details', 'pricing_details TEXT'),
+            ('form_snapshot', 'form_snapshot TEXT'),
             # Retiring a listing. No DEFAULT on any of them: NULL is the whole
             # meaning here - never asked, never cleared, never retired - and a
             # stamped default would read as an event that happened.
@@ -23831,6 +23877,10 @@ def phase_two_schema_spec():
             ('retired_at', 'retired_at DATETIME'),
         ],
         'service_catalogue_items': [
+            ('form_design_json', 'form_design_json TEXT'),
+            ('form_design_status', "form_design_status VARCHAR(20) DEFAULT 'pending'"),
+            ('form_design_attempts', 'form_design_attempts INTEGER DEFAULT 0'),
+            ('form_profile_auto', 'form_profile_auto BOOLEAN DEFAULT 0'),
             ('fulfilment_profile', "fulfilment_profile VARCHAR(20) DEFAULT 'dropoff'"),
         ],
         # A service order used to be a row with no payment behind it. These are what
@@ -24875,6 +24925,13 @@ def start_background_jobs():
     housekeeping_runner = leased_job('housekeeping', housekeeping_job,
                                      lease_ttl=housekeeping_hours * 1800)
 
+    def service_design_job():
+        with app.app_context():
+            from service_design_jobs import process_pending_designs
+            process_pending_designs()
+            invalidate_service_caches()
+
+    service_design_runner = leased_job('service_form_designs', service_design_job, lease_ttl=180)
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
     except ImportError:
@@ -24888,12 +24945,16 @@ def start_background_jobs():
                 market_runner()
                 housekeeping_runner()
                 view_flush_job()
+                service_design_runner()
 
         thread = threading.Thread(target=loop, name='market-price-cache-refresh', daemon=True)
         thread.start()
         return thread
 
     scheduler = BackgroundScheduler(timezone='Africa/Nairobi')
+    scheduler.add_job(service_design_runner, 'interval', minutes=1,
+                      id='service_form_designs', replace_existing=True,
+                      max_instances=1, coalesce=True)
     scheduler.add_job(
         market_runner,
         'interval',

@@ -1,0 +1,23 @@
+﻿{% extends 'base.html' %}
+{% block title %}Account - {{ super() }}{% endblock %}
+{% block content %}
+<div class="container py-5">
+  <h1 class="h3">Your account</h1>
+  {% if current_user.is_authenticated %}
+  <p>Signed in as {{ current_user.username }}.</p>
+  <div class="list-group mb-4">
+    <a class="list-group-item list-group-item-action" href="{{ url_for('orders') }}">Orders and tracking</a>
+    <a class="list-group-item list-group-item-action" href="{{ url_for('my_services') }}">My services</a>
+    <a class="list-group-item list-group-item-action" href="{{ url_for('seller_apply') }}">Seller hub</a>
+    <a class="list-group-item list-group-item-action" href="{{ url_for('customer_rewards_card') }}">Rewards card and credits</a>
+    <a class="list-group-item list-group-item-action" href="{{ url_for('notifications') }}">Notifications</a>
+  </div>
+  {% else %}
+  <p>Sign in to manage your orders and services.</p>
+  <a class="btn btn-primary" href="{{ url_for('login') }}">Sign in</a>
+  <a class="btn btn-outline-primary" href="{{ url_for('register') }}">Create account</a>
+  {% endif %}
+  <p class="mt-4"><a href="{{ url_for('about') }}">About us and quick links</a></p>
+</div>
+{% endblock %}
+

@@ -1,0 +1,16 @@
+{% if service.price_items %}
+<fieldset class="mb-3">
+  <legend class="h6">Choose items or services</legend>
+  {% for item in service.price_items %}
+  <label class="d-flex align-items-center justify-content-between gap-2 mb-2">
+    <span>{{ item.name }} <small class="d-block text-muted">KSh {{ item.price }} / {{ item.unit }}</small></span>
+    <input class="form-control service-quantity" style="width:85px" name="quantity_{{ loop.index0 }}" type="number" min="0" max="100" step="1" value="0" data-cents="{{ (item.price|float * 100)|round|int }}" aria-label="Quantity for {{ item.name }}">
+  </label>
+  {% endfor %}
+  <p class="small mb-1" id="serviceEstimate" aria-live="polite" data-delivery="{{ ((service.delivery_fee or 0) * 100)|round|int if service.profile == 'errand' else 0 }}">Select quantities to see an estimate.</p>
+  <p class="small text-muted">Availability, purchase expenses and any extra work must be confirmed before payment. Minimum order: KSh {{ service.min_order_amount or 0 }}.</p>
+</fieldset>
+{% endif %}
+{% for key, label in service.service_design.client_fields %}
+<label class="form-label small d-block">{{ label }}<input class="form-control" name="request_{{ key }}" maxlength="200"></label>
+{% endfor %}

@@ -195,6 +195,13 @@
                 </div>
             </div>
 
+            {% if service.price_items %}
+            <section class="card border-0 shadow-sm mb-3"><div class="card-body">
+            <h2 class="h6">Menu and service prices</h2><div class="table-responsive"><table class="table">
+            <thead><tr><th>Item / service</th><th>Price (KSh)</th><th>Per</th></tr></thead><tbody>
+            {% for item in service.price_items %}<tr><td>{{ item.name }}<small class="d-block text-muted">{{ item.description }}</small></td><td>{{ item.price }}</td><td>{{ item.unit }}</td></tr>{% endfor %}
+            </tbody></table></div></div></section>
+            {% endif %}
             {% if service.offering_answers %}
             <div class="card border-0 shadow-sm mb-3">
                 <div class="card-body">
@@ -396,12 +403,13 @@
 
                     {% else %}
                     <form id="contactForm">
+                        {% include "_service_request_fields.html" %}
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                         <div class="mb-2">
                             <label class="form-label small mb-1" for="svcNote">What do you need?</label>
                             <textarea class="form-control" id="svcNote" name="note" rows="3"
                                       maxlength="1000"
-                                      placeholder="e.g. 2 kg of laundry, collected today from Hostel B"></textarea>
+                                      placeholder="Additional instructions or questions about this service"></textarea>
                         </div>
                         <div class="mb-2">
                             <label class="form-label small mb-1" for="svcPhone">Your phone</label>
@@ -779,6 +787,15 @@
 {% block scripts %}
 <script>
 (function () {
+    var estimate = document.getElementById('serviceEstimate');
+    function updateEstimate() {
+        var subtotal = 0;
+        document.querySelectorAll('.service-quantity').forEach(function (input) {
+            subtotal += Number(input.dataset.cents) * Math.max(0, Math.min(100, Number(input.value) || 0));
+        });
+        if (estimate) estimate.textContent = 'Items: KSh ' + (subtotal / 100).toFixed(2) + ' + delivery: KSh ' + (Number(estimate.dataset.delivery) / 100).toFixed(2) + ' = estimate: KSh ' + ((subtotal + Number(estimate.dataset.delivery)) / 100).toFixed(2);
+    }
+    document.querySelectorAll('.service-quantity').forEach(function (input) { input.addEventListener('input', updateEstimate); });
     var form = document.getElementById('contactForm');
     var openBtn = document.getElementById('openThreadBtn');
     var message = document.getElementById('contactMsg');

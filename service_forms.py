@@ -22,13 +22,157 @@ SERVICE_QUESTIONS = {
 }
 
 
-def read_service_answers(service_key, form):
+def read_service_answers(service_key, form, questions=None):
     """Only accept questions belonging to this category; preserve labels on save."""
     answers = []
-    for key, label, _ in SERVICE_QUESTIONS.get(service_key, ()):
+    for key, label, _ in (questions if questions is not None else SERVICE_QUESTIONS.get(service_key, ())):
         value = (form.get('detail_' + service_key + '_' + key, '') or '').strip()
         if len(value) > 1000:
             raise ValueError(f'{label} must be 1,000 characters or fewer.')
         if value:
             answers.append({'label': label, 'value': value})
     return answers
+
+
+# A price is always paired with a unit; money is validated on the server.
+PRICE_LABELS = {
+    'food_delivery': 'Dish / portion', 'grocery': 'Grocery item / pack',
+    'printing': 'Print / finishing option', 'laundry': 'Item / treatment',
+    'device_repair': 'Repair / diagnosis', 'campus_errands': 'Errand / trip',
+    'books_stationery': 'Book / stationery item', 'cyber_services': 'Task',
+    'cleaning': 'Cleaning package', 'barber_beauty': 'Treatment / style',
+    'parcel_courier': 'Delivery option', 'student_gigs': 'Deliverable / package',
+    'tutoring': 'Lesson / subject', 'fitness': 'Class / coaching',
+    'health_wellness': 'Consultation', 'career': 'Support package',
+    'accommodation': 'Room / property',
+}
+PRICE_UNITS = ('item', 'portion', 'kg', 'page', 'trip', 'km', 'hour', 'session',
+               'visit', 'night', 'day', 'week', 'month', 'task', 'package')
+CLIENT_FIELDS = {
+    'ticket': [],
+    'dropoff': [('work', 'Items, quantities and work needed'), ('handover', 'Drop-off or collection location'), ('deadline', 'Preferred completion date')],
+    'errand': [('pickup', 'Pickup / shop location'), ('destination', 'Delivery address and landmark'), ('deadline', 'Delivery time / deadline'), ('budget', 'Purchase budget and substitution instructions')],
+    'visit': [('appointment', 'Preferred appointment date and time'), ('location', 'At the provider or your address'), ('scope', 'Treatment / work and requirements')],
+    'session': [('scope', 'Goals and deliverables'), ('appointment', 'Preferred date and duration'), ('format', 'Online or in person')],
+    'tenancy': [('arrival', 'Move-in date and length of stay'), ('occupants', 'Number of occupants'), ('viewing', 'Preferred viewing time')],
+}
+
+CLIENT_BY_SERVICE = {
+    'printing': [('documents', 'Page count, copies and paper size'), ('finish', 'Colour, double-sided and finishing'), ('handover', 'Collection or delivery and deadline')],
+    'laundry': [('items', 'Items, approximate weight and treatment'), ('care', 'Care instructions / stains'), ('handover', 'Collection address and return time')],
+    'food_delivery': [('destination', 'Delivery address and landmark'), ('deadline', 'Preferred delivery time'), ('diet', 'Dietary requirements / allergies to confirm with the provider')],
+    'grocery': [('destination', 'Delivery address and time'), ('substitutions', 'Substitutions allowed and spending limit')],
+    'parcel_courier': [('pickup', 'Pickup address and contact'), ('destination', 'Destination address and contact'), ('parcel', 'Contents, weight and dimensions'), ('deadline', 'Delivery deadline and handling needs')],
+    'campus_errands': [('task', 'Errand and instructions'), ('pickup', 'Pickup / shopping location'), ('destination', 'Destination and deadline'), ('budget', 'Purchase budget; receipt and substitution requirements')],
+    'device_repair': [('device', 'Device model and fault'), ('diagnosis', 'Symptoms and prior repairs (no passwords)'), ('handover', 'Drop-off or collection preference')],
+    'books_stationery': [('items', 'Titles, editions or supplies and quantities'), ('condition', 'New or used preference'), ('handover', 'Collection or delivery preference')],
+    'cyber_services': [('task', 'Task and number of pages / documents'), ('output', 'Required format and deadline'), ('handover', 'How you will submit documents (no passwords)')],
+    'cleaning': [('scope', 'Rooms, approximate area and cleaning needed'), ('location', 'Address and access instructions'), ('appointment', 'Preferred date and time'), ('supplies', 'Equipment / supplies available')],
+    'barber_beauty': [('treatment', 'Treatment / style and preferences'), ('appointment', 'Preferred appointment date and time'), ('location', 'At the salon or your address')],
+    'tutoring': [('subject', 'Subject, level and learning goals'), ('appointment', 'Preferred schedule and lesson length'), ('format', 'Online or in person; individual or group')],
+    'fitness': [('activity', 'Activity and experience level'), ('appointment', 'Preferred schedule and session length'), ('format', 'Individual or group; venue preference')],
+    'health_wellness': [('service', 'Type of consultation requested'), ('appointment', 'Preferred appointment date and time'), ('format', 'In person or remote (discuss private health details with the provider)')],
+    'career': [('support', 'CV review, interview preparation or other support'), ('goals', 'Target role and requested deliverables'), ('deadline', 'Deadline and preferred session format')],
+    'student_gigs': [('scope', 'Deliverables, format and scope'), ('deadline', 'Deadline and milestones'), ('requirements', 'Materials and acceptance criteria')],
+}
+
+
+def form_design(key, label, profile, stored=None):
+    """Versioned data, never executable markup; fallback works without AI/network."""
+    import json
+    if stored:
+        try:
+            return validate_design(json.loads(stored))
+        except (ValueError, TypeError, KeyError):
+            pass
+    return {'version': 1, 'questions': SERVICE_QUESTIONS.get(key, [
+        ('scope', f'What your {label} service includes', 'Deliverables, exclusions and client requirements'),
+        ('timing', 'Availability and completion', 'Booking, preparation time and how completion is confirmed'),
+        ('charges', 'Charges and cancellation terms', 'Price unit, minimum charge, extras and cancellation terms')]),
+        'client_fields': CLIENT_BY_SERVICE.get(key, CLIENT_FIELDS.get(profile, CLIENT_FIELDS['dropoff'])),
+        'price_label': PRICE_LABELS.get(key, 'Service / package')}
+
+
+def validate_design(data):
+    import re
+    if not isinstance(data, dict):
+        raise ValueError('Invalid form design')
+    result = {'version': 1}
+    for name, width in [('questions', 3), ('client_fields', 2)]:
+        rows = data.get(name)
+        if not isinstance(rows, list) or not (0 if name == 'client_fields' else 1) <= len(rows) <= 8:
+            raise ValueError('Invalid question count')
+        seen = set()
+        for row in rows:
+            if (not isinstance(row, (list, tuple)) or len(row) != width
+                    or not all(isinstance(x, str) and 0 < len(x) <= 200 for x in row)
+                    or not re.fullmatch(r'[a-z][a-z0-9_]{0,39}', row[0]) or row[0] in seen):
+                raise ValueError('Invalid question')
+            seen.add(row[0])
+        result[name] = rows
+    label = data.get('price_label')
+    if not isinstance(label, str) or not 1 <= len(label) <= 80:
+        raise ValueError('Invalid price label')
+    result['price_label'] = label
+    if 'profile' in data:
+        if data['profile'] not in CLIENT_FIELDS:
+            raise ValueError('Invalid delivery profile')
+        result['profile'] = data['profile']
+    return result
+
+
+def read_price_items(form):
+    from decimal import Decimal, InvalidOperation
+    names = form.getlist('item_name')
+    prices, units, descriptions = [form.getlist('item_' + key) for key in ('price', 'unit', 'description')]
+    if len(names) > 60 or any(len(values) != len(names) for values in (prices, units, descriptions)):
+        raise ValueError('Use up to 60 complete price rows.')
+    rows, seen = [], set()
+    for name, price, unit, description in zip(names, prices, units, descriptions):
+        name, description = name.strip(), description.strip()
+        if not name and not price and not description:
+            continue
+        if not name or len(name) > 100 or len(description) > 300 or unit not in PRICE_UNITS:
+            raise ValueError('Each price row needs an item name, valid unit and short description.')
+        try:
+            amount = Decimal(price)
+            if not amount.is_finite() or amount < 0 or amount > 10000000 or amount != amount.quantize(Decimal('0.01')):
+                raise ValueError('Use a price between 0 and 10,000,000 with at most two decimals.')
+        except InvalidOperation:
+            raise ValueError('Every item needs a valid price.') from None
+        identity = (name.casefold(), unit)
+        if identity in seen:
+            raise ValueError('Duplicate item and unit. Give different portions or packages distinct names.')
+        seen.add(identity)
+        rows.append({'name': name, 'price': str(amount.quantize(Decimal('0.01'))), 'unit': unit, 'description': description})
+    return rows
+
+
+def request_summary(service, form):
+    """Calculate from saved rates, never from a total supplied by the browser."""
+    from decimal import Decimal
+    lines, subtotal = [], Decimal('0')
+    for index, item in enumerate(service.price_items):
+        raw = form.get('quantity_' + str(index), '0') or '0'
+        try:
+            quantity = int(raw)
+        except (ValueError, TypeError):
+            raise ValueError('Quantities must be whole numbers.') from None
+        if not 0 <= quantity <= 100:
+            raise ValueError('Choose a quantity between 0 and 100.')
+        if quantity:
+            amount = Decimal(item['price']) * quantity
+            subtotal += amount
+            lines.append(f"{quantity} x {item['name']} / {item['unit']}: KSh {amount:.2f}")
+    if lines:
+        if subtotal < Decimal(str(service.min_order_amount or 0)):
+            raise ValueError('Selected items are below the minimum order amount.')
+        delivery = Decimal(str(service.delivery_fee or 0)) if service.profile == 'errand' else Decimal('0')
+        lines.append(f'Items: KSh {subtotal:.2f}; delivery: KSh {delivery:.2f}; estimate: KSh {subtotal + delivery:.2f}. Confirm availability and extras before payment.')
+    for key, label in service.service_design['client_fields']:
+        value = (form.get('request_' + key) or '').strip()
+        if len(value) > 200:
+            raise ValueError(f'{label} must be 200 characters or fewer.')
+        if value:
+            lines.append(f'{label}: {value}')
+    return '\n'.join(lines)

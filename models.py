@@ -2073,6 +2073,21 @@ class ServiceListing(db.Model):
     available_from = db.Column(db.DateTime)             # tenancy
     event_starts_at = db.Column(db.DateTime)            # ticket
     event_venue = db.Column(db.String(200))             # ticket
+    pricing_details = db.Column(db.Text)
+    form_snapshot = db.Column(db.Text)
+
+    @property
+    def price_items(self):
+        try:
+            return json.loads(self.pricing_details or '[]')
+        except (ValueError, TypeError):
+            return []
+
+    @property
+    def service_design(self):
+        from service_forms import form_design
+        return form_design(self.service_key, self.category, self.profile, self.form_snapshot)
+
     offering_details = db.Column(db.Text)  # JSON category-specific questions and answers
 
     @property
@@ -2375,6 +2390,10 @@ class ServiceCatalogueItem(db.Model):
     only ever queried once per worker per TTL.
     """
     __tablename__ = 'service_catalogue_items'
+    form_design_json = db.Column(db.Text)
+    form_design_status = db.Column(db.String(20), default='pending')
+    form_design_attempts = db.Column(db.Integer, default=0)
+    form_profile_auto = db.Column(db.Boolean, default=False)
     __table_args__ = (
         db.Index('ix_service_catalogue_active_order', 'is_active', 'sort_order'),
     )
