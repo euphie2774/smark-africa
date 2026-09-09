@@ -276,6 +276,13 @@
     </div>
     {% endif %}
 
+    <!-- Phone and tablet navigation -->
+    <nav class="footer-navigation" aria-label="Bottom navigation">
+        {% for endpoint, icon, label in [('home', 'house', 'Home'), ('cart', 'cart-shopping', 'Cart'), ('shop', 'store', 'Shop'), ('account_page', 'user', 'Account')] %}
+        <a href="{{ url_for(endpoint) }}" {{ 'aria-current=page' if request.endpoint == endpoint }}><i class="fas fa-{{ icon }}" aria-hidden="true"></i><span>{{ label }}</span></a>
+        {% endfor %}
+    </nav>
+
     <!-- Footer -->
     <footer class="bg-dark text-light py-4 mt-5">
         <div class="container">
@@ -299,11 +306,6 @@
                 &copy; 2025 SMARKAFRICA. All rights reserved.
             </div>
         </div>
-    <nav class="footer-navigation" aria-label="Bottom navigation">
-{% for endpoint, icon, label in [('home', 'house', 'Home'), ('cart', 'cart-shopping', 'Cart'), ('shop', 'store', 'Shop'), ('account_page', 'user', 'Account')] %}
-<a href="{{ url_for(endpoint) }}" {{ 'aria-current=page' if request.endpoint == endpoint }}><i class="fas fa-{{ icon }}" aria-hidden="true"></i><span>{{ label }}</span></a>
-{% endfor %}
-</nav>
     </footer>
 
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>

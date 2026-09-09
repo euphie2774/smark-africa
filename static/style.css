@@ -2400,8 +2400,12 @@ canvas {
     height: auto;
 }
 
-/* Navigation is reached with the footer, and never covers page content. */
-.footer-navigation { display:flex; justify-content:space-around; gap:.5rem; margin:1.5rem auto -1.5rem; padding:1rem 1rem calc(1rem + env(safe-area-inset-bottom)); background:#14251f; border-top:1px solid #566b60; }
+/* Phone and tablet navigation sits directly above the footer in normal flow. */
+.footer-navigation { display:none; justify-content:space-around; gap:.5rem; margin:3rem 0 0; padding:1rem; background:#14251f; border-top:1px solid #566b60; }
+@media screen and (max-width:1024px) {
+    .footer-navigation { display:flex; }
+    .footer-navigation + footer { margin-top:0 !important; }
+}
 .footer-navigation a { display:flex; flex:1; flex-direction:column; align-items:center; gap:.35rem; color:#fff; text-decoration:none; min-height:48px; }
 .footer-navigation a:hover, .footer-navigation a[aria-current] { color:#f5c857; }
 .footer-navigation a:focus-visible { outline:3px solid #f5c857; outline-offset:4px; }
