@@ -20972,6 +20972,8 @@ def create_service():
     wins, and a blank address falls back to the coordinates the browser supplied,
     so a provider who cannot describe where they are still gets a pin.
     """
+    from service_forms import SERVICE_QUESTIONS, read_service_answers
+
     is_admin_lister = current_user.is_admin
     storefront = None
     if not is_admin_lister:
@@ -20990,7 +20992,8 @@ def create_service():
 
     def back(form_data):
         return render_template('create_service.html', options=options, fee=fee,
-                               profiles=profiles, form=form_data)
+                               profiles=profiles, form=form_data,
+                               service_questions=SERVICE_QUESTIONS)
 
     if request.method == 'POST':
         title = (request.form.get('title', '') or '').strip()[:200]
@@ -21008,6 +21011,11 @@ def create_service():
             return back(request.form)
 
         profile = allowed[service_key].profile or DEFAULT_SERVICE_PROFILE
+        try:
+            offering_answers = read_service_answers(service_key, request.form)
+        except ValueError as exc:
+            flash(str(exc), 'danger')
+            return back(request.form)
         spec = service_profile_spec(profile)
         tiers, tier_error = read_service_tiers() if 'tiers' in spec['fields'] else ([], '')
         if tier_error:
@@ -21020,6 +21028,7 @@ def create_service():
             description=(request.form.get('description', '') or '').strip(),
             category=allowed[service_key].label,
             service_key=service_key,
+            offering_details=json.dumps(offering_answers),
             # Copied onto the row, not read through the catalogue: an admin retagging
             # a category later must not silently reshape listings providers have
             # already written, and the grid filter wants one indexed column rather
@@ -21098,30 +21107,41 @@ def read_service_tiers():
     skipped rather than rejected - the form ships with blank spare rows, and refusing
     the whole listing because row four is empty is not a real complaint.
     """
+    from math import isfinite
+
     names = request.form.getlist('tier_name')
+    custom_names = request.form.getlist('tier_custom_name')
     prices = request.form.getlist('tier_price')
     totals = request.form.getlist('tier_quantity')
     caps = request.form.getlist('tier_max')
     rows = []
     for index, raw_name in enumerate(names):
         name = (raw_name or '').strip()[:60]
+        if name == 'Custom':
+            name = (custom_names[index] if index < len(custom_names) else '').strip()[:60]
+            if not name:
+                return [], 'Enter a name for the custom ticket tier.'
         try:
             price = float((prices[index] if index < len(prices) else '') or 0)
         except (TypeError, ValueError):
             price = 0.0
+        if not isfinite(price):
+            return [], 'Each ticket tier needs a valid price.'
         if not name and price <= 0:
             continue
         if not name:
             return [], 'Every price band needs a name - Regular, VIP, and so on.'
-        if price <= 0:
+        if round(price, 2) <= 0:
             return [], f'Give "{name}" a price. A ticket is bought, not negotiated.'
+        if any(row['name'].casefold() == name.casefold() for row in rows):
+            return [], f'Ticket tier "{name}" is repeated. Use a different name for each tier.'
         try:
             total = max(0, int(float((totals[index] if index < len(totals) else '') or 0)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             total = 0
         try:
             cap = int(float((caps[index] if index < len(caps) else '') or 0)) or 5
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             cap = 5
         rows.append({'name': name, 'price': round(price, 2),
                      'quantity_total': total, 'max_per_order': max(1, min(cap, 50))})
@@ -23800,6 +23820,7 @@ def phase_two_schema_spec():
             ('available_from', 'available_from DATETIME'),
             ('event_starts_at', 'event_starts_at DATETIME'),
             ('event_venue', 'event_venue VARCHAR(200)'),
+            ('offering_details', 'offering_details TEXT'),
             # Retiring a listing. No DEFAULT on any of them: NULL is the whole
             # meaning here - never asked, never cleared, never retired - and a
             # stamped default would read as an event that happened.
@@ -24999,4 +25020,3 @@ if __name__ == '__main__':
     # Production uses gunicorn (see gunicorn.conf.py)
     app.logger.info('Starting SMARKAFRICA on http://127.0.0.1:5000')
     app.run(host='0.0.0.0', port=5000, debug=True)
-

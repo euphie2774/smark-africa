@@ -195,6 +195,19 @@
                 </div>
             </div>
 
+            {% if service.offering_answers %}
+            <div class="card border-0 shadow-sm mb-3">
+                <div class="card-body">
+                    <h3 class="h6">How this service is offered</h3>
+                    <dl class="mb-0">
+                        {% for answer in service.offering_answers %}
+                        <dt>{{ answer.label }}</dt>
+                        <dd style="white-space:pre-line">{{ answer.value }}</dd>
+                        {% endfor %}
+                    </dl>
+                </div>
+            </div>
+            {% endif %}
             {% if service.description %}
             <div class="card border-0 shadow-sm">
                 <div class="card-body">

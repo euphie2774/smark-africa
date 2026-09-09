@@ -2073,6 +2073,17 @@ class ServiceListing(db.Model):
     available_from = db.Column(db.DateTime)             # tenancy
     event_starts_at = db.Column(db.DateTime)            # ticket
     event_venue = db.Column(db.String(200))             # ticket
+    offering_details = db.Column(db.Text)  # JSON category-specific questions and answers
+
+    @property
+    def offering_answers(self):
+        try:
+            rows = json.loads(self.offering_details or '[]')
+        except (ValueError, TypeError):
+            return []
+        return [row for row in rows if isinstance(row, dict)
+                and isinstance(row.get('label'), str)
+                and isinstance(row.get('value'), str)] if isinstance(rows, list) else []
 
     # --- retiring a listing for good --------------------------------------
     # Pausing and deleting are not the same fact, and neither is "the provider is

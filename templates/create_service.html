@@ -103,7 +103,7 @@
                                        min="0" step="10" value="{{ form.get('price', '') }}">
                                 <div class="form-text">0 shows as “price on request”.</div>
                             </div>
-                            <div class="col-12 col-sm-4">
+                            <div class="col-12 col-sm-4" data-profiles="dropoff errand visit">
                                 <label class="form-label" for="price_type">Pricing</label>
                                 <select class="form-select" id="price_type" name="price_type">
                                     {% for value, label in [('fixed', 'Fixed price'), ('hourly', 'Hourly rate'),
@@ -113,7 +113,7 @@
                                     {% endfor %}
                                 </select>
                             </div>
-                            <div class="col-12 col-sm-4">
+                            <div class="col-12 col-sm-4" data-profiles="dropoff errand session">
                                 <label class="form-label" for="delivery_days">Turnaround (days)</label>
                                 <input type="number" class="form-control" id="delivery_days"
                                        name="delivery_days" min="0" max="60"
@@ -138,6 +138,22 @@
                         </div>
                     </div>
                 </div>
+
+                {% for category_key, questions in service_questions.items() %}
+                <div class="card border-0 shadow-sm mb-3" data-category="{{ category_key }}">
+                    <div class="card-body">
+                        <h2 class="h6">How you offer this service</h2>
+                        {% for key, label, hint in questions %}
+                        <div class="mb-3">
+                            <label class="form-label" for="detail_{{ category_key }}_{{ key }}">{{ label }}</label>
+                            <textarea class="form-control" rows="2" maxlength="1000"
+                                      id="detail_{{ category_key }}_{{ key }}" name="detail_{{ category_key }}_{{ key }}"
+                                      placeholder="{{ hint }}">{{ form.get('detail_' ~ category_key ~ '_' ~ key, '') if form.get('service_key') == category_key else '' }}</textarea>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endfor %}
 
                 {# --- Ticketed events -------------------------------------- #}
                 <div class="card border-0 shadow-sm mb-3" data-field="tiers">
@@ -168,18 +184,28 @@
                         {% set tier_prices = form.getlist('tier_price') if form.getlist is defined else [] %}
                         {% set tier_totals = form.getlist('tier_quantity') if form.getlist is defined else [] %}
                         {% set tier_caps = form.getlist('tier_max') if form.getlist is defined else [] %}
+                        {% set tier_custom_names = form.getlist('tier_custom_name') if form.getlist is defined else [] %}
                         <div id="tierRows">
                             {% for index in range([tier_names|length, 3]|max) %}
                             <div class="row g-2 mb-2 tier-row">
                                 <div class="col-12 col-sm-4">
-                                    <input class="form-control form-control-sm" name="tier_name"
-                                           maxlength="60" placeholder="Band name (e.g. VIP)"
-                                           aria-label="Band name"
-                                           value="{{ tier_names[index] if index < tier_names|length else '' }}">
+                                    {% set tier_name = tier_names[index] if index < tier_names|length else '' %}
+                                    <select class="form-select form-select-sm" name="tier_name" aria-label="Ticket tier">
+                                        <option value="">Choose a ticket tier</option>
+                                        {% for name in ['Regular', 'VIP', 'VVIP', 'Early Bird', 'Student', 'Group', 'Custom'] %}
+                                        <option value="{{ name }}" {{ 'selected' if tier_name == name }}>{{ name }}</option>
+                                        {% endfor %}
+                                        {% if tier_name and tier_name not in ['Regular', 'VIP', 'VVIP', 'Early Bird', 'Student', 'Group', 'Custom'] %}
+                                        <option selected value="{{ tier_name }}">{{ tier_name }}</option>
+                                        {% endif %}
+                                    </select>
+                                    <input class="form-control form-control-sm mt-1" name="tier_custom_name"
+                                           maxlength="60" placeholder="Custom tier name" aria-label="Custom tier name"
+                                           value="{{ tier_custom_names[index] if index < tier_custom_names|length else '' }}">
                                 </div>
                                 <div class="col-4 col-sm-3">
                                     <input type="number" class="form-control form-control-sm" name="tier_price"
-                                           min="1" step="10" placeholder="Price" aria-label="Price"
+                                           min="0.01" step="0.01" placeholder="Price (KSh)" aria-label="Tier price (KSh)"
                                            value="{{ tier_prices[index] if index < tier_prices|length else '' }}">
                                 </div>
                                 <div class="col-4 col-sm-3">
@@ -192,11 +218,14 @@
                                            min="1" max="50" step="1" placeholder="Max" aria-label="Max per order"
                                            value="{{ tier_caps[index] if index < tier_caps|length else '' }}">
                                 </div>
+                                <div class="col-12 text-end">
+                                    <button type="button" class="btn btn-sm btn-outline-danger remove-tier">Remove tier</button>
+                                </div>
                             </div>
                             {% endfor %}
                         </div>
                         <button type="button" class="btn btn-sm btn-outline-secondary" id="addTierRow">
-                            <i class="fas fa-plus me-1"></i>Add another band
+                            <i class="fas fa-plus me-1"></i>Add another ticket tier (up to 12)
                         </button>
                         <div class="form-text">
                             <strong>Seats</strong> — leave blank or 0 for unlimited.
@@ -488,6 +517,9 @@
     var payNoteText = document.getElementById('payNoteText');
     var DEFAULT_BLURB = blurb ? blurb.innerHTML : '';
     var details = document.getElementById('serviceDetails');
+    var previousProfile = null;
+    var rateUnits = {};
+    var submittedRateUnit = {{ form.get('rate_unit', '')|tojson }};
     var COPY = {
         ticket: ['Event title', 'Describe the event, programme and what each ticket includes.', 'Price (KSh)'],
         dropoff: ['Service title', 'Describe the work you accept, what is included and how items are returned.', 'Starting price (KSh)'],
@@ -509,6 +541,13 @@
         var spec = name ? PROFILES[name] : null;
         var fields = spec ? spec.fields : [];
         if (!details) { return; }
+        var rateUnit = document.getElementById('rate_unit');
+        if (previousProfile) { rateUnits[previousProfile] = rateUnit.value; }
+        if (name !== previousProfile && fields.indexOf('rate_unit') !== -1) {
+            rateUnit.value = rateUnits[name] || submittedRateUnit || (name === 'tenancy' ? 'month' : 'session');
+        }
+        submittedRateUnit = '';
+        previousProfile = name;
         details.hidden = !spec;
         details.disabled = !spec;
         document.getElementById('categoryPrompt').hidden = !!spec;
@@ -523,6 +562,12 @@
             var wanted = group.getAttribute('data-flow');
             group.classList.toggle('d-none', !spec || spec.flow !== wanted);
         });
+        document.querySelectorAll('[data-category]').forEach(function (group) {
+            group.classList.toggle('d-none', group.getAttribute('data-category') !== picker.value);
+        });
+        document.querySelectorAll('[data-profiles]').forEach(function (group) {
+            group.classList.toggle('d-none', group.getAttribute('data-profiles').split(' ').indexOf(name) === -1);
+        });
 
         // Hidden controls must neither validate nor submit values from another category.
         var pickupFields = document.getElementById('pickupFields');
@@ -532,6 +577,7 @@
         });
         var cost = document.getElementById('pickup_cost');
         cost.disabled = cost.disabled || document.getElementById('pickup_is_free').checked;
+        syncTiers();
         if (spec) {
             var copy = COPY[name];
             document.querySelector('label[for="title"]').textContent = copy[0];
@@ -560,6 +606,20 @@
         }
     }
 
+    function syncTiers() {
+        var addButton = document.getElementById('addTierRow');
+        if (addButton) {
+            addButton.disabled = chosenProfile() !== 'ticket' || document.querySelectorAll('.tier-row').length >= 12;
+        }
+        document.querySelectorAll('.tier-row').forEach(function (row) {
+            var custom = row.querySelector('[name="tier_custom_name"]');
+            var isCustom = row.querySelector('[name="tier_name"]').value === 'Custom';
+            custom.classList.toggle('d-none', !isCustom);
+            custom.disabled = chosenProfile() !== 'ticket' || !isCustom;
+            custom.required = isCustom && chosenProfile() === 'ticket';
+        });
+    }
+
     if (picker) {
         picker.addEventListener('change', applyProfile);
         applyProfile();
@@ -568,9 +628,21 @@
     document.getElementById('addTierRow')?.addEventListener('click', function () {
         var rows = document.getElementById('tierRows');
         if (!rows || !rows.lastElementChild) { return; }
+        if (rows.children.length >= 12) { return; }
         var copy = rows.lastElementChild.cloneNode(true);
         copy.querySelectorAll('input').forEach(function (input) { input.value = ''; });
+        copy.querySelectorAll('select').forEach(function (select) { select.value = ''; });
         rows.appendChild(copy);
+        applyProfile();
+    });
+    document.getElementById('tierRows')?.addEventListener('change', syncTiers);
+    document.getElementById('tierRows')?.addEventListener('click', function (event) {
+        var button = event.target.closest('.remove-tier');
+        if (!button) { return; }
+        var row = button.closest('.tier-row');
+        if (this.children.length > 1) { row.remove(); }
+        else { row.querySelectorAll('input, select').forEach(function (control) { control.value = ''; }); }
+        syncTiers();
     });
 
     document.getElementById('pickup_required')?.addEventListener('change', function () {
