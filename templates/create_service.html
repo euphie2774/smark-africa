@@ -67,6 +67,15 @@
                             </div>
                         </div>
 
+                    </div>
+                </div>
+
+                <p id="categoryPrompt" class="text-muted">Choose a category above to open its service form.</p>
+                <noscript><style>#serviceDetails[hidden] { display: block; } #categoryPrompt { display: none; }</style></noscript>
+                <fieldset id="serviceDetails" hidden>
+                    <legend id="serviceFormHeading" class="h5" aria-live="polite">Service details</legend>
+                <div class="card border-0 shadow-sm mb-3">
+                    <div class="card-body">
                         <div class="mb-3">
                             <label class="form-label" for="title">Title</label>
                             <input class="form-control" id="title" name="title" maxlength="200" required
@@ -459,6 +468,7 @@
                 <button type="submit" class="btn btn-success btn-lg w-100">
                     <i class="fas fa-check me-2"></i>List this service
                 </button>
+                </fieldset>
             </form>
             {% endif %}
         </div>
@@ -477,6 +487,15 @@
     var payNote = document.getElementById('payNote');
     var payNoteText = document.getElementById('payNoteText');
     var DEFAULT_BLURB = blurb ? blurb.innerHTML : '';
+    var details = document.getElementById('serviceDetails');
+    var COPY = {
+        ticket: ['Event title', 'Describe the event, programme and what each ticket includes.', 'Price (KSh)'],
+        dropoff: ['Service title', 'Describe the work you accept, what is included and how items are returned.', 'Starting price (KSh)'],
+        errand: ['Delivery or errand title', 'Describe what you deliver, order limits and expected delivery times.', 'Service price (KSh)'],
+        visit: ['Appointment or visit title', 'Describe treatments or tasks, visit duration and how clients book.', 'Price per visit (KSh)'],
+        session: ['Session or project title', 'Describe your expertise, session length and what the client receives.', 'Rate (KSh)'],
+        tenancy: ['Property or room title', 'Describe the rooms, amenities, rent inclusions and tenancy terms.', 'Rent (KSh)']
+    };
 
     function chosenProfile() {
         if (!picker) { return null; }
@@ -488,18 +507,38 @@
     function applyProfile() {
         var name = chosenProfile();
         var spec = name ? PROFILES[name] : null;
-        // Nothing chosen yet: show everything rather than an empty form, so a
-        // provider can read what they are about to be asked.
-        var fields = spec ? spec.fields : null;
+        var fields = spec ? spec.fields : [];
+        if (!details) { return; }
+        details.hidden = !spec;
+        details.disabled = !spec;
+        document.getElementById('categoryPrompt').hidden = !!spec;
+        document.getElementById('serviceFormHeading').textContent = spec
+            ? picker.options[picker.selectedIndex].textContent.trim() + ' details' : 'Service details';
 
         document.querySelectorAll('[data-field]').forEach(function (group) {
             var wanted = group.getAttribute('data-field');
-            group.classList.toggle('d-none', !!fields && fields.indexOf(wanted) === -1);
+            group.classList.toggle('d-none', fields.indexOf(wanted) === -1);
         });
         document.querySelectorAll('[data-flow]').forEach(function (group) {
             var wanted = group.getAttribute('data-flow');
-            group.classList.toggle('d-none', !!spec && spec.flow !== wanted);
+            group.classList.toggle('d-none', !spec || spec.flow !== wanted);
         });
+
+        // Hidden controls must neither validate nor submit values from another category.
+        var pickupFields = document.getElementById('pickupFields');
+        pickupFields.classList.toggle('d-none', !document.getElementById('pickup_required').checked);
+        details.querySelectorAll('input, select, textarea, button').forEach(function (control) {
+            control.disabled = !spec || !!control.closest('.d-none');
+        });
+        var cost = document.getElementById('pickup_cost');
+        cost.disabled = cost.disabled || document.getElementById('pickup_is_free').checked;
+        if (spec) {
+            var copy = COPY[name];
+            document.querySelector('label[for="title"]').textContent = copy[0];
+            document.getElementById('title').placeholder = picker.options[picker.selectedIndex].textContent.trim();
+            document.getElementById('description').placeholder = copy[1];
+            document.querySelector('label[for="price"]').textContent = copy[2];
+        }
 
         if (blurb) {
             blurb.innerHTML = spec ? ('<strong>' + spec.label + '.</strong> ' + spec.blurb)
@@ -535,14 +574,14 @@
     });
 
     document.getElementById('pickup_required')?.addEventListener('change', function () {
-        document.getElementById('pickupFields')?.classList.toggle('d-none', !this.checked);
+        applyProfile();
     });
 
     document.getElementById('pickup_is_free')?.addEventListener('change', function () {
         var cost = document.getElementById('pickup_cost');
         if (!cost) { return; }
-        cost.disabled = this.checked;
         if (this.checked) { cost.value = ''; }
+        applyProfile();
     });
 
     document.getElementById('useMyLocation')?.addEventListener('click', function () {
