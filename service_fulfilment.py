@@ -122,13 +122,12 @@ def register_service_routes(app, notify, invalidate, reconcile_payment):
         return render_template('event_ticket_sales.html', service=service, pagination=pagination, admissions=grouped)
 
     @app.route('/services/orders/<int:order_id>/ticket-status', methods=['POST'])
+    @app.route('/services/orders/<int:order_id>/admin-status', methods=['POST'])
     @login_required
     def change_ticket_status(order_id):
         if not current_user.is_admin:
             abort(403)
         order = db.session.get(ServiceOrder, order_id) or abort(404)
-        if order.service.profile != 'ticket':
-            abort(400)
         action = request.form.get('action')
         reason = (request.form.get('reason') or '').strip()[:300]
         reference = (request.form.get('reference') or '').strip()[:100]
@@ -142,9 +141,12 @@ def register_service_routes(app, notify, invalidate, reconcile_payment):
             order.status = action
             db.session.add(TicketOrderAction(order_id=order.id, admin_id=current_user.id, action=action,
                 reason=reason, reference=reference or None))
-            notify(order.client_id, 'Ticket order updated', f'Order #{order.id}: {action}. {reason}', 'service')
+            notify(order.client_id, 'Service order updated', f'Order #{order.id}: {action}. {reason}', 'service')
         db.session.commit()
-        flash('Ticket status saved. Entry checks use the updated database status.', 'success')
+        flash('Order status saved.', 'success')
+        if order.service.profile != 'ticket':
+            row = ServiceLinkRequest.query.filter_by(service_order_id=order.id).first()
+            return redirect(url_for('service_conversation', request_id=row.id) if row else url_for('service_detail', service_id=order.service_id))
         return redirect(url_for('event_ticket_sales', service_id=order.service_id))
     def quote_version(row):
         return hashlib.sha256(f'{row.id}:{row.quoted_amount}:{row.quote_description}'.encode()).hexdigest()
@@ -306,7 +308,29 @@ def register_service_routes(app, notify, invalidate, reconcile_payment):
         if row.status == 'closed':
             return jsonify(success=False, error='This request is closed.'), 409
         action = request.form.get('action')
-        if action == 'confirm' and row.client_id == current_user.id:
+        if action in ('pickup_schedule', 'pickup_collect', 'pickup_return') and row.pickup_requested and row.status == 'linked' and (current_user.is_admin or current_user.id == row.service.provider_id):
+            previous, following = {'pickup_schedule': ('requested', 'scheduled'), 'pickup_collect': ('scheduled', 'collected'), 'pickup_return': ('collected', 'returned')}[action]
+            if action == 'pickup_return' and row.service.profile == 'errand':
+                following = 'delivered'
+            values = {'pickup_status': following}
+            if action == 'pickup_schedule':
+                window = (request.form.get('pickup_window') or '').strip()
+                if not window or len(window) > 200:
+                    return jsonify(success=False, error='Enter the agreed collection date and time.'), 400
+                values['pickup_window'] = window
+            elif action == 'pickup_collect':
+                values['picked_up_at'] = datetime.utcnow()
+            else:
+                values['returned_at'] = datetime.utcnow()
+                values['provider_completed_at'] = datetime.utcnow()
+            changed = ServiceLinkRequest.query.filter_by(id=row.id, pickup_status=previous, status='linked').update(values, synchronize_session=False)
+            if not changed:
+                db.session.rollback()
+                return jsonify(success=False, error='This pickup stage has already changed. Refresh the conversation.'), 409
+            db.session.refresh(row)
+            thread_message(row, f'Pickup status: {following}. Collection window: {row.pickup_window}.')
+            notify(row.client_id, 'Pickup progress updated', f'{row.service.title}: {following}.', 'service')
+        elif action == 'confirm' and row.client_id == current_user.id:
             if not row.client_confirmed_at:
                 row.client_confirmed_at = datetime.utcnow()
                 thread_message(row, 'Client confirmed: I received this service and am satisfied. Please review and close the request.')

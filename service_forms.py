@@ -22,6 +22,28 @@ SERVICE_QUESTIONS = {
 }
 
 
+def supports_pickup(key, profile, design=None):
+    if profile not in ('dropoff', 'errand'):
+        return False
+    if key in SERVICE_QUESTIONS:
+        return key in ('laundry', 'printing', 'device_repair', 'books_stationery', 'parcel_courier')
+    return bool((design or {}).get('pickup_supported', profile == 'dropoff'))
+
+
+def read_location(form):
+    from math import isfinite
+    raw_lat, raw_lng = form.get('location_lat'), form.get('location_lng')
+    if raw_lat in (None, '') and raw_lng in (None, ''):
+        return None, None
+    try:
+        lat, lng = float(raw_lat), float(raw_lng)
+        if not isfinite(lat) or not isfinite(lng) or not -90 <= lat <= 90 or not -180 <= lng <= 180:
+            raise ValueError()
+        return lat, lng
+    except (ValueError, TypeError):
+        raise ValueError('Choose a valid map pin or enter both latitude and longitude within their valid ranges.') from None
+
+
 def read_service_answers(service_key, form, questions=None):
     """Only accept questions belonging to this category; preserve labels on save."""
     answers = []
@@ -133,6 +155,10 @@ def validate_design(data):
     if not isinstance(label, str) or not 1 <= len(label) <= 80:
         raise ValueError('Invalid price label')
     result['price_label'] = label
+    if 'pickup_supported' in data:
+        if not isinstance(data['pickup_supported'], bool):
+            raise ValueError('Invalid pickup capability')
+        result['pickup_supported'] = data['pickup_supported']
     if 'profile' in data:
         if data['profile'] not in CLIENT_FIELDS:
             raise ValueError('Invalid delivery profile')
@@ -167,9 +193,26 @@ def read_price_items(form, allowed_units=PRICE_UNITS):
     return rows
 
 
+def pickup_request_details(service, form):
+    from decimal import Decimal
+    method = form.get('handover_method') or ('dropoff' if service.has_field('pickup') else 'none')
+    if method not in ('dropoff', 'pickup', 'none'):
+        raise ValueError('Choose a valid handover method.')
+    if method != 'pickup':
+        return method, '', '', Decimal('0')
+    if not service.has_field('pickup') or not service.pickup_required:
+        raise ValueError('This provider does not offer pickup. Arrange drop-off at the listed location.')
+    address = (form.get('pickup_address') or '').strip()
+    window = (form.get('pickup_window') or '').strip()
+    if not address or not window or len(address) > 200 or len(window) > 200:
+        raise ValueError('Add a pickup address and preferred collection window, up to 200 characters each.')
+    return method, address, window, Decimal('0') if service.pickup_is_free else Decimal(str(service.pickup_cost or 0))
+
+
 def request_summary(service, form):
     """Calculate from saved rates, never from a total supplied by the browser."""
     from decimal import Decimal
+    method, address, window, pickup_fee = pickup_request_details(service, form)
     lines, subtotal = [], Decimal('0')
     for index, item in enumerate(service.price_items):
         raw = form.get('quantity_' + str(index), '0') or '0'
@@ -187,7 +230,13 @@ def request_summary(service, form):
         if subtotal < Decimal(str(service.min_order_amount or 0)):
             raise ValueError('Selected items are below the minimum order amount.')
         delivery = Decimal(str(service.delivery_fee or 0)) if service.profile == 'errand' else Decimal('0')
-        lines.append(f'Items: KSh {subtotal:.2f}; delivery: KSh {delivery:.2f}; estimate: KSh {subtotal + delivery:.2f}. Confirm availability and extras before payment.')
+        handover_charge = f'; pickup: KSh {pickup_fee:.2f}' if method == 'pickup' else ''
+        lines.append(f'Items: KSh {subtotal:.2f}; delivery: KSh {delivery:.2f}{handover_charge}; estimate: KSh {subtotal + delivery + pickup_fee:.2f}. Confirm availability and extras before payment.')
+    if method == 'pickup':
+        scope = 'Pickup and return' if service.pickup_return_included else 'Pickup'
+        lines.append(f'{scope} requested: {address}; preferred window: {window}; fee: KSh {pickup_fee:.2f}.')
+    elif service.has_field('pickup'):
+        lines.append('Client will bring items to the listed location; no pickup charge.')
     for key, label in service.service_design['client_fields']:
         value = (form.get('request_' + key) or '').strip()
         if len(value) > 200:

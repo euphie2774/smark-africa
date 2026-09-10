@@ -2035,6 +2035,7 @@ class ServiceListing(db.Model):
     # Pickup. Drives the third field of the chatbot's provider line, which is why
     # eta is free text: "today" and "tomorrow" are what a provider actually says.
     pickup_required = db.Column(db.Boolean, default=False)
+    pickup_return_included = db.Column(db.Boolean, default=False)
     pickup_is_free = db.Column(db.Boolean, default=False)
     pickup_cost = db.Column(db.Float, default=0.0)
     pickup_eta = db.Column(db.String(60))
@@ -2189,6 +2190,9 @@ class ServiceListing(db.Model):
         rather than `service.profile in ('dropoff', 'errand')` so adding a profile
         is one edit to the table above and none to the templates.
         """
+        if field == 'pickup':
+            from service_forms import supports_pickup
+            return supports_pickup(self.service_key, self.profile, self.service_design)
         return profile_has_field(self.profile, field)
 
     @property
@@ -2238,6 +2242,9 @@ class ServiceListing(db.Model):
         if not self.pickup_required:
             return 'No pickup offered, take to the location as directed'
         when = (self.pickup_eta or '').strip()
+        if self.pickup_return_included:
+            charge = 'free' if self.pickup_is_free or not self.pickup_cost else f'KES {self.pickup_cost:,.0f} total'
+            return f'Pickup and return: {charge}' + (f' · {when}' if when else '')
         if self.pickup_is_free:
             return f'free pickup {when}'.strip()
         if self.pickup_cost and self.pickup_cost > 0:
@@ -2492,6 +2499,12 @@ class ServiceLinkRequest(db.Model):
     status = db.Column(db.String(30), default='open')
     client_note = db.Column(db.Text)
     client_confirmed_at = db.Column(db.DateTime)
+    pickup_requested = db.Column(db.Boolean, default=False)
+    pickup_address = db.Column(db.String(200))
+    pickup_status = db.Column(db.String(20))
+    pickup_window = db.Column(db.String(200))
+    picked_up_at = db.Column(db.DateTime)
+    returned_at = db.Column(db.DateTime)
     provider_completed_at = db.Column(db.DateTime)
     quoted_amount = db.Column(db.Float)
     quote_description = db.Column(db.String(500))

@@ -29,6 +29,12 @@ Choose a category at `/services/create`. Each link opens a server-rendered form 
 
 Providers can mark linked requests ready. Customers can confirm receipt and satisfaction; this records a timestamp and notifies the assigned admin (or the admin desk when unassigned). Admins can close completed requests in the conversation or desk. An accepted platform quote must be paid before closure. Completion and admission consumption use atomic database guards.
 
+Physical service forms include an address, county and interactive entrance-pin picker, with address lookup, manual coordinates and optional device location. Repair and printing clients can view the selected pin and open it in maps. Latitude/longitude pairs are validated, including valid zero coordinates; unsupported profiles ignore location fields. Address lookup is explicitly approximate so the seller can correct the pin. Map rendering follows the [Leaflet API](https://leafletjs.com/reference.html) and retains OpenStreetMap attribution.
+
+Pickup switches are available for laundry, repair, printing, books/stationery and parcel couriers. They default off, and are absent from food, groceries, tickets, remote work and appointments. New category designs can declare pickup support only within appropriate delivery profiles. Sellers specify collection/return charges and collection windows. Clients choose drop-off or an offered pickup, enter an address/window, and see the fee in the estimate. The request stores this choice. Providers/admins can move it through scheduled, collected and returned/delivered stages; timestamps, conversation messages and client notifications document progress. Unsupported or disabled pickup requests are rejected server-side.
+
+There is no customer refund action. Admins can record exceptional completed refunds for service orders with a reason, transaction reference and explicit confirmation. This is a refund record and revokes ticket access where applicable; money must be returned through the payment provider. Closing a refunded service request preserves its refund status.
+
 ## Ticket security
 
 Each paid seat receives its own 256-bit random nonce and signed, event-bound QR payload. The printable wallet and QR routes require buyer/admin authentication. Service callbacks are independently verified using the existing authenticated Daraja checkout query before settlement. An unsigned success payload alone cannot issue tickets. Buyer payment polling retries verification at most once per order every 30 seconds if a callback could not be verified. A capacity or buyer-limit conflict records `oversold_refund_due`, issues no admission and notifies admins.
@@ -47,7 +53,7 @@ The existing M-Pesa integration rounds charges to whole shillings; the form disc
 
 ## Conversations and product discovery
 
-Authorised admins can read every service conversation and reply through the same thread, including conversations assigned to another admin. Support access is disclosed in the conversation, and admin messages are labelled. Reading does not publish an online-presence indicator. Users should keep discussions and platform payments in the app; oversight cannot guarantee a seller will never attempt off-platform contact.
+Authorised admins can read every service conversation and reply through the same thread, including conversations assigned to another admin. Conversations and provider invitations do not announce admin viewing, and reading does not publish an online-presence indicator. Admin replies are explicitly labelled Admin in both conversation views. Users should keep discussions and platform payments in the app; oversight cannot guarantee a seller will never attempt off-platform contact.
 
 Home and Shop search inputs show up to eight active product-name suggestions after two characters, with a 200 ms debounce, stale-response cancellation, keyboard navigation and accessible combobox labels. Prefix matches rank ahead of contained-name and related-term matches. Category/type filters are retained. Literal `%` and `_` are escaped in suggestion queries. All suggestion labels use DOM text rather than injected HTML.
 

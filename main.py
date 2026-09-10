@@ -20806,9 +20806,10 @@ def service_contact_admin(service_id):
                                  'pick your ticket and pay.'}), 400
 
     note = (request.form.get('note') or (request.get_json(silent=True) or {}).get('note') or '').strip()[:1000]
-    from service_forms import request_summary
+    from service_forms import request_summary, pickup_request_details
     try:
         details = request_summary(service, request.form if request.form else (request.get_json(silent=True) or {}))
+        handover, pickup_address, pickup_window, _ = pickup_request_details(service, request.form if request.form else (request.get_json(silent=True) or {}))
     except ValueError as exc:
         return jsonify({'success': False, 'error': str(exc)}), 400
     note = '\n'.join(part for part in (details, note) if part)
@@ -20836,6 +20837,8 @@ def service_contact_admin(service_id):
     link_request = ServiceLinkRequest(
         service_id=service.id, client_id=current_user.id, assigned_admin_id=admin_id,
         status='open', client_note=note, client_phone=phone,
+        pickup_requested=handover == 'pickup', pickup_address=pickup_address or None,
+        pickup_window=pickup_window or None, pickup_status='requested' if handover == 'pickup' else None,
         # The channel records how it was routed, so "how often was nobody at the
         # desk" stays answerable from the table. It is not visible to the client.
         channel='platform' if admin_id else 'whatsapp',
@@ -21015,7 +21018,7 @@ def create_service():
     wins, and a blank address falls back to the coordinates the browser supplied,
     so a provider who cannot describe where they are still gets a pin.
     """
-    from service_forms import SERVICE_QUESTIONS, read_service_answers, form_design, read_price_items, price_units_for
+    from service_forms import SERVICE_QUESTIONS, read_service_answers, form_design, read_price_items, price_units_for, supports_pickup, read_location
 
     is_admin_lister = current_user.is_admin
     storefront = None
@@ -21041,6 +21044,7 @@ def create_service():
             return render_template('choose_service.html', options=options, profiles=profiles)
         return render_template('create_service.html', options=options, selected=selected,
                                design=designs[selected.key], spec=service_profile_spec(selected.profile), fee=fee,
+                               pickup_supported=supports_pickup(selected.key, selected.profile, designs[selected.key]),
                                profiles=profiles, form=form_data,
                                service_questions={key: value['questions'] for key, value in designs.items()},
                                service_designs=designs, price_units=price_units_for(selected.key, selected.profile))
@@ -21070,6 +21074,21 @@ def create_service():
             flash(str(exc), 'danger')
             return back(request.form)
         spec = service_profile_spec(profile)
+        if 'location' in spec['fields']:
+            try:
+                read_location(request.form)
+            except ValueError as exc:
+                flash(str(exc), 'danger')
+                return back(request.form)
+        if supports_pickup(service_key, profile, designs[service_key]) and request.form.get('pickup_required') and not request.form.get('pickup_is_free'):
+            from decimal import Decimal, InvalidOperation
+            try:
+                pickup_charge = Decimal(request.form.get('pickup_cost') or '0')
+                if not pickup_charge.is_finite() or not 0 <= pickup_charge <= 10000000 or pickup_charge != pickup_charge.quantize(Decimal('0.01')):
+                    raise ValueError()
+            except (InvalidOperation, ValueError):
+                flash('Enter a valid pickup fee with at most two decimal places.', 'danger')
+                return back(request.form)
         if profile == 'ticket' and (not form_datetime('event_starts_at') or not (request.form.get('event_venue') or '').strip()):
             flash('Add a valid event start time and venue or online platform.', 'danger')
             return back(request.form)
@@ -21255,10 +21274,11 @@ def apply_service_profile_fields(service):
         service.location_lat = None
         service.location_lng = None
 
-    if 'pickup' in fields:
+    if service.has_field('pickup'):
         apply_service_pickup(service)
     else:
         service.pickup_required = False
+        service.pickup_return_included = False
         service.pickup_is_free = False
         service.pickup_cost = 0.0
         service.pickup_eta = None
@@ -21304,8 +21324,8 @@ def apply_service_location(service):
     """Typed address wins; a blank one falls back to the device's coordinates."""
     label = (request.form.get('location_label', '') or '').strip()[:200]
     county = (request.form.get('location_county', '') or '').strip()[:100]
-    lat = form_float('location_lat', 0) or None
-    lng = form_float('location_lng', 0) or None
+    from service_forms import read_location
+    lat, lng = read_location(request.form)
     service.location_lat = lat
     service.location_lng = lng
     service.location_county = county or None
@@ -21329,6 +21349,7 @@ def apply_service_pickup(service):
     """
     required = bool(request.form.get('pickup_required'))
     service.pickup_required = required
+    service.pickup_return_included = required and bool(request.form.get('pickup_return_included'))
     if not required:
         service.pickup_is_free = False
         service.pickup_cost = 0.0
@@ -22507,7 +22528,7 @@ def admin_service_request_action(request_id, action):
             create_customer_notification(
                 service.provider_id, 'You can now chat with the client',
                 f'An admin linked a client to "{service.title}". Open the request '
-                f'thread to reply. An admin can see this conversation.', 'service')
+                f'thread to reply.', 'service')
         flash('Marked as linked and both sides notified.', 'success')
     elif action == 'close':
         if link_request.service_order and not link_request.service_order.is_paid:
@@ -22522,7 +22543,7 @@ def admin_service_request_action(request_id, action):
         if was != 'closed':
             create_customer_notification(link_request.client_id, 'Service request closed',
                 f'An admin closed request #{link_request.id}. Thank you for using the service.', 'service')
-            if link_request.service_order:
+            if link_request.service_order and link_request.service_order.status not in ('cancelled', 'refunded', 'oversold_refund_due'):
                 link_request.service_order.status = 'completed'
                 link_request.service_order.completed_at = now
                 link_request.service.orders_completed = (link_request.service.orders_completed or 0) + 1
@@ -23995,6 +24016,7 @@ def phase_two_schema_spec():
             ('location_lat', 'location_lat FLOAT'),
             ('location_lng', 'location_lng FLOAT'),
             ('pickup_required', 'pickup_required BOOLEAN DEFAULT 0'),
+            ('pickup_return_included', 'pickup_return_included BOOLEAN DEFAULT 0'),
             ('pickup_is_free', 'pickup_is_free BOOLEAN DEFAULT 0'),
             ('pickup_cost', 'pickup_cost FLOAT DEFAULT 0'),
             ('pickup_eta', 'pickup_eta VARCHAR(60)'),
@@ -24061,6 +24083,12 @@ def phase_two_schema_spec():
             ('payment_checked_at', 'payment_checked_at DATETIME'),
         ],
         'service_link_requests': [
+            ('pickup_requested', 'pickup_requested BOOLEAN DEFAULT 0'),
+            ('pickup_address', 'pickup_address VARCHAR(200)'),
+            ('pickup_status', 'pickup_status VARCHAR(20)'),
+            ('pickup_window', 'pickup_window VARCHAR(200)'),
+            ('picked_up_at', 'picked_up_at DATETIME'),
+            ('returned_at', 'returned_at DATETIME'),
             ('client_confirmed_at', 'client_confirmed_at DATETIME'),
             ('provider_completed_at', 'provider_completed_at DATETIME'),
             ('quoted_amount', 'quoted_amount FLOAT'),

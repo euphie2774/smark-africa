@@ -21,6 +21,7 @@
   is offered. And no copy anywhere tells a client whether an admin is on duty.
 #}
 {% block title %}{{ service.title }} - {{ super() }}{% endblock %}
+{% block head %}{% if service.has_field('location') and service.location_lat is not none and service.location_lng is not none %}{% include '_service_map_assets.html' %}{% endif %}{% endblock %}
 
 {% block content %}
 <div class="container py-4">
@@ -121,6 +122,7 @@
                                href="https://www.openstreetmap.org/?mlat={{ service.location_lat }}&mlon={{ service.location_lng }}#map=16/{{ service.location_lat }}/{{ service.location_lng }}">
                                 view on map
                             </a>
+                            <div class="rounded border mt-2" data-service-location-view data-lat="{{ service.location_lat }}" data-lng="{{ service.location_lng }}" role="region" aria-label="Service location map" style="height:240px;z-index:0"></div>
                             {% endif %}
                         </li>
                         {% endif %}
@@ -811,13 +813,30 @@
         }, 5000);
     }
     var estimate = document.getElementById('serviceEstimate');
+    var handover = document.getElementById('serviceHandover');
     function updateEstimate() {
         var subtotal = 0;
         document.querySelectorAll('.service-quantity').forEach(function (input) {
             subtotal += Number(input.dataset.cents) * Math.max(0, Math.min(100, Number(input.value) || 0));
         });
+        {% if service.has_field('pickup') %}
+        var pickupFee = handover && handover.value === 'pickup' ? Number(handover.dataset.pickupCents) : 0;
+        if (estimate) estimate.textContent = 'Items: KSh ' + (subtotal / 100).toFixed(2) + ' + delivery: KSh ' + (Number(estimate.dataset.delivery) / 100).toFixed(2) + ' + pickup: KSh ' + (pickupFee / 100).toFixed(2) + ' = estimate: KSh ' + ((subtotal + Number(estimate.dataset.delivery) + pickupFee) / 100).toFixed(2);
+        {% else %}
         if (estimate) estimate.textContent = 'Items: KSh ' + (subtotal / 100).toFixed(2) + ' + delivery: KSh ' + (Number(estimate.dataset.delivery) / 100).toFixed(2) + ' = estimate: KSh ' + ((subtotal + Number(estimate.dataset.delivery)) / 100).toFixed(2);
+        {% endif %}
     }
+    {% if service.has_field('pickup') %}
+    if (handover) {
+        function updateHandover() {
+            var group = document.getElementById('servicePickupRequest'), enabled = handover.value === 'pickup';
+            group.hidden = !enabled;
+            group.querySelectorAll('input').forEach(function (input) { input.disabled = !enabled; input.required = enabled; });
+            updateEstimate();
+        }
+        handover.addEventListener('change', updateHandover); updateHandover();
+    }
+    {% endif %}
     document.querySelectorAll('.service-quantity').forEach(function (input) { input.addEventListener('input', updateEstimate); });
     var form = document.getElementById('contactForm');
     var openBtn = document.getElementById('openThreadBtn');
@@ -866,7 +885,7 @@
         var html = head;
         rows.forEach(function (row) {
             var mine = !row.from_admin && !row.from_provider;
-            var who = row.from_provider ? 'Provider' : (row.from_admin ? 'Support' : '');
+            var who = row.from_admin ? 'Admin' : (row.from_provider ? 'Provider' : '');
             html += '<div class="d-flex mb-2 ' + (mine ? 'justify-content-end' : '') + '">' +
                 '<div class="px-2 py-1 rounded small ' +
                 (mine ? 'bg-primary text-white'

@@ -11,6 +11,16 @@
   <p class="small text-muted">Availability, purchase expenses and any extra work must be confirmed before payment. Minimum order: KSh {{ service.min_order_amount or 0 }}.</p>
 </fieldset>
 {% endif %}
+{% if service.has_field('pickup') %}
+<fieldset class="mb-3"><legend class="h6">Handover</legend>
+{% if service.pickup_required %}
+<label class="form-label d-block">Choose how we receive your items<select class="form-select" name="handover_method" id="serviceHandover" data-pickup-cents="{{ ((0 if service.pickup_is_free else service.pickup_cost or 0) * 100)|round|int }}"><option value="dropoff">I will bring them to the listed location</option><option value="pickup">{{ 'Provider pickup and return' if service.pickup_return_included else 'Provider pickup' }} — KSh {{ '%.2f'|format(0 if service.pickup_is_free else service.pickup_cost or 0) }}</option></select></label>
+<div id="servicePickupRequest" hidden><label class="form-label d-block">Pickup address and landmark<input class="form-control" name="pickup_address" maxlength="200"></label><label class="form-label d-block">Preferred collection date and time<input class="form-control" name="pickup_window" maxlength="200"></label></div>
+{% else %}<p class="small">Bring your items to the provider's location. Pickup is not offered.</p>{% endif %}
+</fieldset>
+{% endif %}
 {% for key, label in service.service_design.client_fields %}
+{% if not (key == 'handover' and service.has_field('pickup')) %}
 <label class="form-label small d-block">{{ label }}<input class="form-control" name="request_{{ key }}" maxlength="200"></label>
+{% endif %}
 {% endfor %}

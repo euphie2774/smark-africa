@@ -252,6 +252,48 @@ def run():
                 for path in ['/services/requests', '/account', '/my-tickets', '/admin/services']:
                     assert client.get(path).status_code == 200, path
                 print('PASS: quote acceptance, amount preservation, readiness gate, client confirmation, admin closure and idempotency')
+                service.pickup_required = True; service.pickup_return_included = True; service.pickup_cost = 75
+                service.location_lat = 0; service.location_lng = 36
+                db.session.commit()
+                login(buyer)
+                page = client.get(f'/services/{service.id}').get_data(as_text=True)
+                assert 'data-service-location-view' in page and 'Provider pickup and return' in page
+                with patch.object(main, 'notify_service_provider', return_value={}), patch.object(main, 'handoff_service_request_to_whatsapp', return_value={}):
+                    response = client.post(f'/services/{service.id}/contact-admin', data={'handover_method':'pickup', 'pickup_address':'Test entrance', 'pickup_window':'Friday 10am'})
+                assert response.status_code == 200
+                pickup_row = db.session.get(ServiceLinkRequest, response.json['request_id'])
+                assert pickup_row.pickup_requested and pickup_row.pickup_status == 'requested' and 'fee: KSh 75.00' in pickup_row.client_note
+                login(admin)
+                client.post(f'/admin/services/requests/{pickup_row.id}/link')
+                login(stranger)
+                assert client.post(f'/services/requests/{pickup_row.id}/progress', data={'action':'pickup_collect'}).status_code == 403
+                login(provider)
+                assert client.post(f'/services/requests/{pickup_row.id}/progress', data={'action':'pickup_return'}).status_code == 409
+                assert client.post(f'/services/requests/{pickup_row.id}/progress', data={'action':'pickup_schedule','pickup_window':'Friday 11am'}).status_code == 200
+                assert client.post(f'/services/requests/{pickup_row.id}/progress', data={'action':'pickup_collect'}).status_code == 200
+                assert pickup_row.picked_up_at and pickup_row.pickup_status == 'collected'
+                assert client.post(f'/services/requests/{pickup_row.id}/progress', data={'action':'pickup_return'}).status_code == 200
+                assert pickup_row.returned_at and pickup_row.provider_completed_at and pickup_row.pickup_status == 'returned'
+                login(buyer)
+                assert client.post(f'/services/orders/{order_id}/admin-status', data={'action':'refunded','reason':'test'}).status_code == 403
+                login(admin)
+                assert client.post(f'/services/orders/{order_id}/admin-status', data={'action':'refunded','reason':'Exceptional refund','reference':'REF-SERVICE','refund_confirmed':'yes'}).status_code == 302
+                assert row.service_order.status == 'refunded'
+                from service_forms import pickup_request_details, read_location
+                service.pickup_required = False
+                try:
+                    pickup_request_details(service, {'handover_method':'pickup','pickup_address':'Test','pickup_window':'Friday'})
+                    raise AssertionError('Pickup was accepted while disabled')
+                except ValueError:
+                    pass
+                for coordinates in ({'location_lat':'91','location_lng':'0'}, {'location_lat':'0'}, {'location_lat':'nan','location_lng':'0'}):
+                    try:
+                        read_location(coordinates)
+                        raise AssertionError('Invalid map pin accepted')
+                    except ValueError:
+                        pass
+                assert read_location({'location_lat':'0','location_lng':'0'}) == (0, 0)
+                print('PASS: service maps, pickup fees and staged collection/return, disabled-pickup rejection and admin-only service refunds')
                 from models import Product
                 db.session.add_all([
                     Product(name='Campus USB drive', slug='suggest-usb', description='Portable files', selling_price=100, is_active=True),

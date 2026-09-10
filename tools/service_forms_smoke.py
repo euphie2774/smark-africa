@@ -42,11 +42,20 @@ def run():
                     if category == 'events_tickets':
                         assert 'name="pickup_required"' not in category_html
                         assert 'name="item_name"' not in category_html
+                    if category in ('printing', 'device_repair', 'laundry'):
+                        assert 'data-service-location-editor' in category_html and 'name="pickup_required"' in category_html
+                    if category in ('events_tickets', 'food_delivery', 'grocery', 'cyber_services', 'tutoring', 'career'):
+                        assert 'name="pickup_required"' not in category_html
                     data = MultiDict({'service_key': category, 'title': 'Form test ' + category,
                                       'provider_phone': '0712345678', 'price': '250'})
                     for key, label, hint in questions:
                         data['detail_' + category + '_' + key] = 'Details for ' + label
                     data['detail_unrelated'] = 'Must not be stored'
+                    if category in ('printing', 'device_repair', 'laundry'):
+                        data['location_lat'] = '0'
+                        data['location_lng'] = '36'
+                    if category == 'laundry':
+                        data.update({'pickup_required':'on', 'pickup_return_included':'1', 'pickup_cost':'75'})
                     if category == 'food_delivery':
                         data.update({'item_name': 'Rice bowl', 'item_price': '250', 'item_unit': 'portion', 'item_description': 'Regular portion'})
                     if category == 'events_tickets':

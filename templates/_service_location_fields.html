@@ -1,0 +1,11 @@
+<fieldset class="mt-2" data-service-location-editor data-geocode-url="{{ url_for('api_geo_search') }}">
+<legend class="h6">{{ 'Property location' if selected.profile == 'tenancy' else 'Service location' }}</legend>
+<label class="form-label d-block">{{ 'Property address' if selected.profile == 'tenancy' else 'Business address and entrance / landmark' }}<input class="form-control" name="location_label" maxlength="200" value="{{ form.get('location_label', '') }}"></label>
+<label class="form-label d-block">County<input class="form-control" name="location_county" maxlength="100" value="{{ form.get('location_county', '') }}"></label>
+<div class="d-flex flex-wrap gap-2 mb-2"><button type="button" class="btn btn-outline-primary" data-find-address>Find this address</button><button type="button" class="btn btn-outline-secondary" data-use-location>Use my current location</button><button type="button" class="btn btn-outline-secondary" data-clear-location>Clear pin</button></div>
+<p class="small text-muted">The pin is public. Place it at the entrance clients should use. Address search can be approximate; click the map or drag the pin to correct it.</p>
+<div class="service-location-map rounded border mb-2" data-location-map role="region" aria-label="Choose the service location on the map" style="height:300px;z-index:0"></div>
+<p class="small" data-location-status role="status">Choose a pin, use your location, or enter coordinates below.</p>
+<div class="row g-2"><label class="col-sm-6">Latitude<input class="form-control" type="number" name="location_lat" min="-90" max="90" step="any" value="{{ form.get('location_lat', '') }}"></label><label class="col-sm-6">Longitude<input class="form-control" type="number" name="location_lng" min="-180" max="180" step="any" value="{{ form.get('location_lng', '') }}"></label></div>
+<a class="d-none mt-2" data-location-link target="_blank" rel="noopener noreferrer">Open this pin in maps</a>
+</fieldset>
