@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block title %}Your tickets - {{ super() }}{% endblock %}
+{% block content %}
+<div class="container py-4" style="max-width:900px">
+<div class="d-flex justify-content-between align-items-center mb-4"><div><p class="text-success text-uppercase small mb-1">Payment confirmed</p><h1 class="h3">Your event tickets</h1></div><button class="btn btn-outline-primary d-print-none" onclick="window.print()">Print / save PDF</button></div>
+<p>Each QR admits one person once. Keep it private and present it to the event organiser at entry.</p>
+{% for ticket in tickets %}
+<article class="card shadow-sm mb-4 border-success" style="break-inside:avoid"><div class="card-body p-4"><div class="row align-items-center g-4">
+<div class="col-sm-8"><span class="badge bg-success mb-3">{{ 'Checked in' if ticket.checked_in_at else 'Valid admission' }}</span><h2 class="h4">{{ order.service.title }}</h2>
+<p class="mb-2">{{ order.service.event_venue }}<br>{{ order.service.event_starts_at.strftime('%d %b %Y at %H:%M') if order.service.event_starts_at else 'See event details' }}</p>
+<p class="fw-bold">{{ order.tier.name if order.tier else 'General admission' }} · {% if ticket.allocated_seat is not none %}Seat {{ ticket.allocated_seat }}{% else %}Unseated admission &middot; Ticket #{{ ticket.id }}{% endif %}</p>
+<p class="small text-muted mb-1">Booked by {{ order.client.username }} · Order #{{ order.id }}</p><code>SA-{{ ticket.id }}-{{ ticket.nonce[:8]|upper }}</code>
+</div><div class="col-sm-4 text-center"><img src="{{ url_for('service_ticket_qr', admission_id=ticket.id) }}" alt="Secure admission QR for ticket {{ ticket.seat_number }}" width="200" height="200" style="max-width:100%;height:auto"></div>
+</div></div></article>
+{% endfor %}
+<a class="d-print-none" href="{{ url_for('service_detail', service_id=order.service_id) }}">Back to event</a>
+</div>
+{% endblock %}

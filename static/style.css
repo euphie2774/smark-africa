@@ -2438,3 +2438,14 @@ canvas {
     .shop-grid .product-price span { font-size:.8rem; }
     .shop-grid .product-actions .btn { font-size:.7rem; padding:6px 2px; }
 }
+
+/* Keep service-form labels readable against light cards in the marketplace theme. */
+#listingForm .form-label, .service-workflow .form-label { color:#243f31; }
+#listingForm input::placeholder, #listingForm textarea::placeholder { color:#b8cbbf; opacity:1; }
+@media print { nav, footer, .navbar, .footer-navigation { display:none !important; } }
+
+/* Product suggestions stay outside the rounded search form's clipping area. */
+.product-suggestions { max-width: 920px; max-height: 320px; overflow-y: auto; background: #fff; color: #192832; border: 1px solid #d8dde2; border-radius: 12px; box-shadow: 0 8px 24px #17252d20; margin-top: 6px; }
+.product-suggestions[hidden] { display: none; }
+.product-suggestions a { display: block; padding: 12px 20px; color: #192832; text-decoration: none; border-bottom: 1px solid #edf0f2; }
+.product-suggestions a:hover, .product-suggestions a[aria-selected="true"] { background: #edf6f1; color: #115636; }

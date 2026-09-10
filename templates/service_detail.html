@@ -277,6 +277,9 @@
                     </h6>
                 </div>
                 <div class="card-body">
+                    {% if service.ticket_review_status != 'approved' %}
+                    <div class="alert alert-warning">{{ 'This event was not approved for sale.' if service.ticket_review_status == 'rejected' else 'This event is awaiting admin verification. Ticket sales will open after approval.' }}</div>
+                    {% endif %}
                     {% if not tiers %}
                     <p class="small text-muted mb-0">
                         No tickets are on sale for this event yet.
@@ -297,13 +300,12 @@
                     {% else %}
                     {% for tier in tiers %}
                     {% set left = tier.seats_left %}
-                    {% set cap = tier.max_per_order or 5 %}
-                    {% set cap = cap if left is none else [cap, left]|min %}
+                    {% set cap = [tier.max_per_order or 50, 50, service.ticket_buyer_limit or 50]|min %}
                     <div class="border rounded p-2 mb-2">
                         <div class="d-flex justify-content-between align-items-baseline">
                             <div>
                                 <strong>{{ tier.name }}</strong>
-                                {% if left is not none %}
+                                {% if (is_owner or current_user.is_admin) and left is not none %}
                                 <span class="badge {{ 'bg-danger' if left == 0 else ('bg-warning text-dark' if left < 10 else 'bg-light text-dark') }} ms-1">
                                     {% if left == 0 %}Sold out{% else %}{{ left }} left{% endif %}
                                 </span>
@@ -311,11 +313,11 @@
                             </div>
                             <span class="fw-bold text-success">KSh {{ "{:,.0f}".format(tier.price) }}</span>
                         </div>
-                        {% if is_owner %}
+                        {% if is_owner or current_user.is_admin %}
                         <div class="small text-muted mt-1">
-                            {{ tier.quantity_sold or 0 }} sold{% if tier.quantity_total %} of {{ tier.quantity_total }}{% endif %}
+                            {{ tier.quantity_sold or 0 }} tickets issued{% if tier.quantity_total %} &middot; {{ left }} seats remaining of {{ tier.quantity_total }}{% else %} &middot; Unlimited admission{% endif %}
                         </div>
-                        {% elif cap > 0 %}
+                        {% elif cap > 0 and service.ticket_review_status == 'approved' %}
                         <form method="POST" class="d-flex gap-2 mt-2"
                               action="{{ url_for('buy_service_ticket', service_id=service.id) }}">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
@@ -337,10 +339,11 @@
                         {% endif %}
                     </div>
                     {% endfor %}
+                    {% if is_owner or current_user.is_admin %}<a class="btn btn-outline-primary mt-2" href="{{ url_for('event_ticket_sales', service_id=service.id) }}">Ticket sales and admission records</a>{% endif %}
                     {% if not is_owner %}
                     <p class="small text-muted mb-0">
                         You pay on the platform with M-Pesa and your ticket code appears here
-                        straight away. Nothing to arrange with anybody.
+                        after payment confirmation. Each admission has its own secure QR code.
                     </p>
                     {% endif %}
                     {% endif %}
@@ -388,7 +391,7 @@
                         Sign in to request this
                     </a>
                     <div class="text-center small text-muted mt-2">
-                        Or <a href="{{ whatsapp_url }}" target="_blank" rel="noopener">message us on WhatsApp</a>.
+                        Requests and conversations stay in your platform account so support can assist.
                     </div>
 
                     {% elif open_request %}
@@ -396,10 +399,7 @@
                         <i class="fas fa-hourglass-half me-1"></i>
                         You already have an open request on this service.
                     </div>
-                    <button class="btn btn-outline-primary w-100" type="button"
-                            data-thread="{{ open_request.id }}" id="openThreadBtn">
-                        Open the conversation
-                    </button>
+                    <a class="btn btn-outline-primary w-100" href="{{ url_for('service_conversation', request_id=open_request.id) }}">Open conversation and service status</a>
 
                     {% else %}
                     <form id="contactForm">
@@ -502,7 +502,7 @@
               exists to say no is worse than no button.
             #}
             {% if direct_contact and current_user.is_authenticated and not is_owner
-                  and service.price and spec.flow != 'buy' and not service.pays_provider_direct %}
+                  and service.price and not service.price_items and spec.flow != 'buy' and not service.pays_provider_direct %}
             <div class="card border-0 shadow-sm mb-3">
                 <div class="card-body">
                     <h6 class="mb-2"><i class="fas fa-shield-halved me-1"></i>Pay through the platform</h6>
@@ -557,10 +557,10 @@
                         {% if order.is_paid %}
                         <div class="mt-1">
                             <span class="badge bg-success">Paid</span>
-                            {% if order.ticket_code %}
+                            {% if order.ticket_code and order.status != 'oversold_refund_due' %}
                             <div class="mt-1">
                                 Ticket code:
-                                <code class="fs-6 user-select-all">{{ order.ticket_code }}</code>
+                                <a class="btn btn-success btn-sm" href="{{ url_for('service_ticket_wallet', order_id=order.id) }}">Open secure tickets</a>
                                 <div class="text-muted">Show this at the gate.</div>
                             </div>
                             {% endif %}
@@ -648,6 +648,10 @@
               gate decides what renders, never what is permitted.
             #}
             {% set is_owner = current_user.is_authenticated and current_user.id == service.provider_id %}
+            {% if service.profile == 'ticket' and current_user.is_authenticated and current_user.is_admin %}
+            <section class="card card-body mb-3"><h2 class="h6">Verify event listing</h2><p class="small">Check organiser authority, event details, ticket allocation and refund terms before opening sales.</p>
+            <form method="post" action="{{ url_for('review_service_ticket', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-success" name="decision" value="approve">Approve ticket sales</button><button class="btn btn-outline-danger" name="decision" value="reject">Reject / stop sales</button></form></section>
+            {% endif %}
             {% if is_owner or (current_user.is_authenticated and current_user.is_admin) %}
             <div class="card border-warning-subtle mt-3">
                 <div class="card-body">
@@ -787,6 +791,25 @@
 {% block scripts %}
 <script>
 (function () {
+    // A successful callback unlocks the paid admission without a manual refresh.
+    var pendingPayments = [
+      {% for order in my_orders if not order.is_paid and order.payment_status != 'failed' and order.checkout_request_id %}
+      {{ url_for('service_payment_status', order_id=order.id)|tojson }},
+      {% endfor %}
+    ];
+    if (pendingPayments.length) {
+        var polls = 0;
+        var paymentPoll = setInterval(function () {
+            if (document.hidden) return;
+            if (++polls > 90) { clearInterval(paymentPoll); return; }
+            pendingPayments.forEach(function (url) {
+                fetch(url).then(function (r) { if (!r.ok) throw Error(); return r.json(); }).then(function (data) {
+                    if (data.ticket_url) { clearInterval(paymentPoll); window.location.href = data.ticket_url; }
+                    else if (data.payment_status === 'paid' || data.payment_status === 'failed') { clearInterval(paymentPoll); window.location.reload(); }
+                }).catch(function () {});
+            });
+        }, 5000);
+    }
     var estimate = document.getElementById('serviceEstimate');
     function updateEstimate() {
         var subtotal = 0;
@@ -929,7 +952,7 @@
                     // desk, and the routing to WhatsApp happens behind the client.
                     say(data.reply || 'An admin will reply here shortly.', 'success');
                     form.classList.add('d-none');
-                    if (data.request_id) { showThread(data.request_id); }
+                    if (data.request_id) { window.location.href = {{ url_for('service_conversation', request_id=0)|tojson }}.replace('/0', '/' + data.request_id); }
                 })
                 .catch(function () {
                     say('We could not reach the server. Check your connection and try again.', 'danger');

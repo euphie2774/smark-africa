@@ -1,4 +1,4 @@
-﻿{% extends 'base.html' %}
+{% extends 'base.html' %}
 {% block title %}Account - {{ super() }}{% endblock %}
 {% block content %}
 <div class="container py-5">
@@ -6,6 +6,8 @@
   {% if current_user.is_authenticated %}
   <p>Signed in as {{ current_user.username }}.</p>
   <div class="list-group mb-4">
+    <a class="list-group-item list-group-item-action" href="{{ url_for('my_event_tickets') }}">My event tickets</a>
+    <a class="list-group-item list-group-item-action" href="{{ url_for('service_requests_inbox') }}">Service requests and conversations</a>
     <a class="list-group-item list-group-item-action" href="{{ url_for('orders') }}">Orders and tracking</a>
     <a class="list-group-item list-group-item-action" href="{{ url_for('my_services') }}">My services</a>
     <a class="list-group-item list-group-item-action" href="{{ url_for('seller_apply') }}">Seller hub</a>

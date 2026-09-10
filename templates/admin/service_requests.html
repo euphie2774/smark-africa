@@ -29,6 +29,7 @@
             </p>
         </div>
         <div class="d-flex flex-wrap gap-2">
+            <a href="{{ url_for('service_requests_inbox') }}" class="btn btn-outline-primary">All service conversations</a>
             <a href="{{ url_for('admin_service_catalogue') }}" class="btn btn-outline-secondary">
                 <i class="fas fa-list-check me-1"></i>Catalogue
             </a>
@@ -191,6 +192,8 @@
                     {% endif %}
                     {% endif %}
 
+                    {% if row.client_confirmed_at %}<div class="alert alert-success py-2">Client confirmed receipt and satisfaction. Ready for closure review.</div>{% elif row.provider_completed_at %}<div class="alert alert-info py-2">Provider marked the service ready.</div>{% endif %}
+                    <a class="btn btn-sm btn-primary mb-2" href="{{ url_for('service_conversation', request_id=row.id) }}">Open full conversation, quote and completion</a>
                     <div class="small text-muted mb-2">
                         Routed to:
                         <strong>{{ row.assigned_admin.username if row.assigned_admin else 'anyone on duty' }}</strong>

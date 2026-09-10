@@ -22,7 +22,7 @@
         </div>
 
         <form class="market-search" action="{{ url_for('shop') }}" method="GET">
-            <input type="search" name="search" placeholder="Search phones, books, downloads, accessories..." aria-label="Search products">
+            <input type="search" name="search" data-product-suggestions="{{ url_for('product_search_suggestions') }}" placeholder="Search phones, books, downloads, accessories..." aria-label="Search products">
             <button type="submit"><i class="fas fa-search me-2"></i>Search</button>
         </form>
 

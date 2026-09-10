@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block title %}Event check-in - {{ super() }}{% endblock %}
+{% block content %}
+<div class="container py-5" style="max-width:600px"><div class="card shadow-sm"><div class="card-body p-4">
+<p class="small text-muted">Organiser check-in</p><h1 class="h4">{{ service.title }}</h1>
+{% if result %}<div class="alert {{ 'alert-success' if result == 'Admission confirmed.' else 'alert-danger' }}">{{ result }}</div>{% endif %}
+<p>{{ admission.order.tier.name if admission.order.tier else 'General admission' }} · {% if admission.allocated_seat is not none %}Seat {{ admission.allocated_seat }}{% else %}Unseated ticket #{{ admission.id }}{% endif %}</p><p>Booked by {{ admission.order.client.username }}</p>
+{% if admission.checked_in_at %}<div class="alert alert-warning">Already checked in at {{ admission.checked_in_at.strftime('%d %b %Y %H:%M:%S') }}. This ticket cannot be used again.</div>
+{% elif state == 'Valid' %}<p class="text-success">Paid ticket verified for this event.</p><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-success w-100">Admit this person</button></form>{% endif %}
+</div></div></div>
+{% endblock %}

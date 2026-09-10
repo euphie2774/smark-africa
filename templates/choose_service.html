@@ -1,0 +1,3 @@
+{% extends 'base.html' %}
+{% block title %}Choose a service to offer - {{ super() }}{% endblock %}
+{% block content %}<div class="container py-4"><h1 class="h3">What would you like to offer?</h1><p class="text-muted">Choose a service to open its listing form.</p><div class="row g-3">{% for row in options %}<div class="col-sm-6 col-lg-4"><a class="card card-body text-decoration-none h-100 shadow-sm" href="{{ url_for('create_service', service=row.key) }}"><span class="fs-3">{{ row.emoji }}</span><h2 class="h5 mt-2">{{ row.label }}</h2><span class="small text-muted">{{ profiles[row.profile].label }}</span></a></div>{% else %}<p>No services are open for listing yet.</p>{% endfor %}</div></div>{% endblock %}

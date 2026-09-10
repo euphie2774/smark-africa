@@ -2074,6 +2074,10 @@ class ServiceListing(db.Model):
     event_starts_at = db.Column(db.DateTime)            # ticket
     event_venue = db.Column(db.String(200))             # ticket
     pricing_details = db.Column(db.Text)
+    ticket_review_status = db.Column(db.String(20), default='pending')
+    ticket_buyer_limit = db.Column(db.Integer, default=0)
+    ticket_reviewed_at = db.Column(db.DateTime)
+    ticket_reviewed_by_id = db.Column(db.Integer, db.ForeignKey('users.id'))
     form_snapshot = db.Column(db.Text)
 
     @property
@@ -2166,6 +2170,11 @@ class ServiceListing(db.Model):
     @property
     def profile(self):
         """This listing's profile name, resolved, never blank."""
+        # Old ticket listings were saved with the laundry default. Ticket identity
+        # must win over that stale field, including listings predating service keys.
+        if self.service_key == 'events_tickets' or (self.category or '').strip().lower() in {
+                'event tickets & campus events', 'events & tickets', 'event tickets', 'tickets'}:
+            return 'ticket'
         name = (self.fulfilment_profile or '').strip().lower()
         return name if name in SERVICE_FULFILMENT_PROFILES else DEFAULT_SERVICE_PROFILE
 
@@ -2184,10 +2193,14 @@ class ServiceListing(db.Model):
 
     @property
     def pays_provider_direct(self):
+        if self.profile == 'ticket':
+            return False
         return (self.pay_to or self.profile_spec['pay_to']) == 'provider'
 
     @property
     def pays_upfront(self):
+        if self.profile == 'ticket':
+            return True
         return (self.pay_when or self.profile_spec['pay_when']) == 'upfront'
 
     @property
@@ -2294,7 +2307,7 @@ class ServicePriceTier(db.Model):
     # worse default than not capping.
     quantity_total = db.Column(db.Integer, default=0)
     quantity_sold = db.Column(db.Integer, default=0)
-    max_per_order = db.Column(db.Integer, default=5)
+    max_per_order = db.Column(db.Integer, default=0)
     is_active = db.Column(db.Boolean, default=True)
     sort_order = db.Column(db.Integer, default=100)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -2322,7 +2335,7 @@ class ServicePriceTier(db.Model):
             wanted = int(quantity or 0)
         except (TypeError, ValueError):
             return False
-        if wanted < 1 or wanted > max(1, self.max_per_order or 5):
+        if wanted < 1 or wanted > min(50, self.max_per_order or 50):
             return False
         left = self.seats_left
         return left is None or wanted <= left
@@ -2367,6 +2380,8 @@ class ServiceOrder(db.Model):
     tier_id = db.Column(db.Integer, db.ForeignKey('service_price_tiers.id'))
     quantity = db.Column(db.Integer, default=1)
     ticket_code = db.Column(db.String(24), index=True)
+    ticket_seat_start = db.Column(db.Integer)
+    payment_checked_at = db.Column(db.DateTime)
 
     service = db.relationship('ServiceListing', lazy=True)
     client = db.relationship('User', foreign_keys=[client_id], lazy=True)
@@ -2376,6 +2391,36 @@ class ServiceOrder(db.Model):
     @property
     def is_paid(self):
         return (self.payment_status or '') == 'paid'
+
+
+class TicketAdmission(db.Model):
+    """One admission per paid seat; database consumption defeats copied QR codes."""
+    __tablename__ = 'ticket_admissions'
+    __table_args__ = (db.UniqueConstraint('order_id', 'seat_number', name='uq_ticket_order_seat'),)
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey('service_orders.id'), nullable=False, index=True)
+    seat_number = db.Column(db.Integer, nullable=False)
+    nonce = db.Column(db.String(64), nullable=False, unique=True)
+    issued_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    checked_in_at = db.Column(db.DateTime)
+    checked_in_by_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    order = db.relationship('ServiceOrder', lazy=True)
+
+    @property
+    def allocated_seat(self):
+        start = self.order.ticket_seat_start
+        return start + self.seat_number - 1 if start is not None else None
+
+
+class TicketOrderAction(db.Model):
+    __tablename__ = 'ticket_order_actions'
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey('service_orders.id'), nullable=False, index=True)
+    admin_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    action = db.Column(db.String(20), nullable=False)
+    reason = db.Column(db.String(300), nullable=False)
+    reference = db.Column(db.String(100))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 
 class ServiceCatalogueItem(db.Model):
@@ -2446,6 +2491,13 @@ class ServiceLinkRequest(db.Model):
     # open | claimed | linked | closed | whatsapp_redirected
     status = db.Column(db.String(30), default='open')
     client_note = db.Column(db.Text)
+    client_confirmed_at = db.Column(db.DateTime)
+    provider_completed_at = db.Column(db.DateTime)
+    quoted_amount = db.Column(db.Float)
+    quote_description = db.Column(db.String(500))
+    quote_accepted_at = db.Column(db.DateTime)
+    service_order_id = db.Column(db.Integer, db.ForeignKey('service_orders.id'))
+    service_order = db.relationship('ServiceOrder', lazy=True)
     client_phone = db.Column(db.String(30))
     channel = db.Column(db.String(20), default='platform')  # platform | whatsapp
     created_at = db.Column(db.DateTime, default=datetime.utcnow)

@@ -142,8 +142,9 @@
                                 <select class="form-select form-select-sm" name="profile_{{ row.id }}"
                                         aria-label="{{ row.label }} fulfilment profile">
                                     {% set current = row.fulfilment_profile or default_profile %}
+                                    <option value="auto" {{ 'selected' if row.form_profile_auto }}>Automatic service research</option>
                                     {% for name, spec in profiles.items() %}
-                                    <option value="{{ name }}" {{ 'selected' if name == current }}>
+                                    <option value="{{ name }}" {{ 'selected' if name == current and not row.form_profile_auto }}>
                                         {{ spec.label }}
                                     </option>
                                     {% endfor %}

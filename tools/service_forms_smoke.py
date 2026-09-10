@@ -30,16 +30,28 @@ def run():
                 response = client.get('/services/create')
                 assert response.status_code == 200, response.status_code
                 html = response.get_data(as_text=True)
-                assert 'Choose a ticket tier' in html and 'value="VVIP"' in html
+                assert 'Choose a service' in html and 'service=events_tickets' in html
                 assert set(SERVICE_QUESTIONS) == set(SERVICE_PROFILE_BY_KEY)
                 for category, questions in SERVICE_QUESTIONS.items():
-                    assert f'data-category="{category}"' in html
+                    category_html = client.get('/services/create?service=' + category).get_data(as_text=True)
+                    if os.environ.get('SERVICE_PREVIEW_DIR'):
+                        preview = Path(os.environ['SERVICE_PREVIEW_DIR'])
+                        preview.mkdir(parents=True, exist_ok=True)
+                        (preview / (category + '.html')).write_text(category_html, encoding='utf-8')
+                    assert f'data-category="{category}"' in category_html
+                    if category == 'events_tickets':
+                        assert 'name="pickup_required"' not in category_html
+                        assert 'name="item_name"' not in category_html
                     data = MultiDict({'service_key': category, 'title': 'Form test ' + category,
                                       'provider_phone': '0712345678', 'price': '250'})
                     for key, label, hint in questions:
                         data['detail_' + category + '_' + key] = 'Details for ' + label
                     data['detail_unrelated'] = 'Must not be stored'
+                    if category == 'food_delivery':
+                        data.update({'item_name': 'Rice bowl', 'item_price': '250', 'item_unit': 'portion', 'item_description': 'Regular portion'})
                     if category == 'events_tickets':
+                        data['event_starts_at'] = '2026-12-01T18:00'
+                        data['event_venue'] = 'Main hall'
                         data.setlist('tier_name', ['Regular', 'VIP', 'VVIP', 'Custom'])
                         data.setlist('tier_custom_name', ['', '', '', 'Backstage'])
                         data.setlist('tier_price', ['100', '500.50', '1000', '1500'])
@@ -114,11 +126,19 @@ def run():
                 result = client.post('/services/create', data={
                     'service_key': 'events_tickets', 'title': 'One admission price',
                     'provider_phone': '0712345678', 'ticket_mode': 'single',
-                    'single_ticket_price': '300.50', 'single_ticket_quantity': '40'})
+                    'single_ticket_price': '300.50', 'single_ticket_quantity': '40', 'ticket_buyer_limit': '4',
+                    'event_starts_at': '2026-12-01T18:00', 'event_venue': 'Main hall'})
                 assert result.status_code == 302
                 ticket = ServiceListing.query.filter_by(title='One admission price').one()
                 assert ticket.tiers[0].name == 'General admission' and ticket.tiers[0].price == 300.50
                 assert ticket.tiers[0].quantity_total == 40
+                assert ticket.ticket_buyer_limit == 4 and ticket.tiers[0].max_per_order == 0
+                with app.test_request_context(method='POST', data={'ticket_mode':'single', 'single_ticket_price':'100'}):
+                    tiers, error = main.read_service_tiers()
+                    assert not error and tiers[0]['quantity_total'] == 0 and tiers[0]['max_per_order'] == 0
+                for field in ('tier_quantity', 'tier_max'):
+                    with app.test_request_context(method='POST', data={'tier_name':'VIP', 'tier_price':'100', field:'1.5'}):
+                        assert main.read_service_tiers()[1]
                 print('PASS: menus persist, estimates ignore client totals, invalid amounts rejected, single-price tickets work')
 
                 future = ServiceCatalogueItem(key='pet_care', label='Pet care', fulfilment_profile='visit',
@@ -126,7 +146,7 @@ def run():
                 db.session.add(future)
                 db.session.commit()
                 main.invalidate_service_caches()
-                page = client.get('/services/create').get_data(as_text=True)
+                page = client.get('/services/create?service=pet_care').get_data(as_text=True)
                 assert 'detail_pet_care_scope' in page
                 design = {'questions': [['pets', 'Animals accepted', 'Species and size limits']],
                           'client_fields': [['animal', 'Animal and care needed']],
@@ -137,7 +157,7 @@ def run():
                     assert generate.called
                 assert future.form_design_status == 'ready'
                 main.invalidate_service_caches()
-                page = client.get('/services/create').get_data(as_text=True)
+                page = client.get('/services/create?service=pet_care').get_data(as_text=True)
                 assert 'detail_pet_care_pets' in page
                 result = client.post('/services/create', data={'service_key': 'pet_care',
                     'title': 'Pet sitting', 'provider_phone': '0712345678',

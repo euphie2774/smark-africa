@@ -3,7 +3,7 @@
 SERVICE_QUESTIONS = {
     'printing': [('print_options', 'Printing options', 'Black and white or colour, paper sizes, binding and finishing'), ('file_submission', 'How clients submit work', 'Upload, email or bring documents; accepted file formats'), ('price_basis', 'How printing is charged', 'Per page, copy or bound document; minimum quantities')],
     'laundry': [('laundry_items', 'Items and treatments accepted', 'Clothes, bedding, dry cleaning, ironing'), ('price_basis', 'How laundry is charged', 'Per kg, item or load; minimum weight'), ('return_method', 'How clean items are returned', 'Client collection or delivery; packaging included')],
-    'food_delivery': [('menu', 'Meals and portions', 'Available dishes, portion sizes and dietary options'), ('ordering', 'Ordering and delivery times', 'Made to order or scheduled meals; order cutoff'), ('price_basis', 'Meal pricing', 'Per meal or meal plan; what is included')],
+    'food_delivery': [('menu', 'Dietary information and allergens', 'Ingredients, allergens, vegetarian or other dietary options'), ('ordering', 'Preparation and delivery times', 'Minutes to prepare, operating hours and order cutoff'), ('price_basis', 'Packaging and substitutions', 'Packaging charges, included extras and what happens when a dish is unavailable')],
     'accommodation': [('property_type', 'Room or property type', 'Bedsitter, single room, shared hostel; capacity'), ('amenities', 'Amenities and rent inclusions', 'Water, electricity, Wi-Fi, furniture and shared facilities'), ('tenancy_terms', 'Stay and tenancy terms', 'Minimum stay, occupancy rules and additional charges')],
     'device_repair': [('devices', 'Devices and faults handled', 'Phone or laptop brands; screen, battery or software repairs'), ('diagnosis', 'Diagnosis and quotation', 'Inspection fee, approval before repairs and parts charges'), ('warranty', 'Repair warranty', 'Warranty period and what is covered')],
     'campus_errands': [('errand_types', 'Errands offered', 'Collections, shopping, document delivery'), ('instructions', 'What clients need to provide', 'Pickup and destination details, list of items and deadlines'), ('price_basis', 'How errands are charged', 'Per trip, distance or time; purchase costs charged separately')],
@@ -13,7 +13,7 @@ SERVICE_QUESTIONS = {
     'barber_beauty': [('treatments', 'Treatments and styles', 'Haircuts, braids, nails, makeup and other treatments'), ('duration', 'Typical appointment length', 'Time needed for each treatment'), ('price_basis', 'Treatment pricing', 'Per treatment or package; products included or extra')],
     'grocery': [('products', 'Groceries available', 'Produce, household essentials and available quantities'), ('substitutions', 'Substitution policy', 'How unavailable items and price changes are agreed'), ('ordering', 'Order preparation', 'Order cutoff, shopping time and packaging')],
     'parcel_courier': [('parcel_limits', 'Parcel limits', 'Maximum weight and dimensions; excluded items'), ('delivery_speed', 'Delivery options', 'Same day, next day or scheduled; collection cutoff'), ('handling', 'Packaging and delivery confirmation', 'Packaging requirements, fragile items and proof of delivery')],
-    'events_tickets': [('admission', 'Admission and entry rules', 'Age limits, ID requirements and entry times'), ('ticket_inclusions', 'What each tier includes', 'Regular entry, VIP seating, VVIP access or refreshments')],
+    'events_tickets': [('admission', 'Admission and entry rules', 'Age limits, ID requirements and entry times'), ('ticket_inclusions', 'What each ticket includes', 'Entry, seating, access or refreshments'), ('organiser', 'Organiser and authority to sell', 'Organiser name and how admins can verify your allocation'), ('refund_policy', 'Cancellation, postponement and refund terms', 'What ticket holders receive if the event changes or is cancelled')],
     'student_gigs': [('deliverables', 'Work and deliverables', 'Tasks offered, output formats and what the client receives'), ('working_method', 'How the work is delivered', 'Remote or in person; milestones and client requirements'), ('revisions', 'Revisions and scope', 'Included revisions, deadlines and extra work charges')],
     'tutoring': [('subjects', 'Subjects and levels', 'Subjects, syllabus and learner level'), ('lesson_format', 'Lesson format', 'Online or in person; individual or group; group size'), ('lesson_duration', 'Lesson length and materials', 'Session duration, materials and practice work included')],
     'fitness': [('activities', 'Activities and coaching', 'Personal training, classes, sports coaching'), ('session_format', 'Session format', 'Individual or group, session length and class schedule'), ('equipment', 'Equipment and requirements', 'Equipment provided, what to bring and experience level')],
@@ -48,6 +48,25 @@ PRICE_LABELS = {
 }
 PRICE_UNITS = ('item', 'portion', 'kg', 'page', 'trip', 'km', 'hour', 'session',
                'visit', 'night', 'day', 'week', 'month', 'task', 'package')
+PRICE_UNITS_BY_SERVICE = {
+    'printing': ('page', 'item', 'package'), 'laundry': ('kg', 'item', 'package'),
+    'food_delivery': ('portion', 'item', 'package'), 'grocery': ('item', 'kg', 'package'),
+    'accommodation': ('month', 'night', 'week', 'day'), 'device_repair': ('task', 'item', 'package'),
+    'campus_errands': ('trip', 'km', 'hour', 'task'), 'books_stationery': ('item', 'package'),
+    'cyber_services': ('page', 'task', 'hour'), 'cleaning': ('visit', 'hour', 'package'),
+    'barber_beauty': ('session', 'visit', 'package'), 'parcel_courier': ('trip', 'kg', 'km', 'package'),
+    'student_gigs': ('task', 'hour', 'package'), 'tutoring': ('session', 'hour', 'package'),
+    'fitness': ('session', 'hour', 'month', 'package'), 'health_wellness': ('session', 'visit'),
+    'career': ('task', 'session', 'package'),
+}
+
+
+def price_units_for(key, profile):
+    return PRICE_UNITS_BY_SERVICE.get(key, {
+        'ticket': ('item',), 'dropoff': ('item', 'task', 'package'),
+        'errand': ('trip', 'km', 'item', 'hour'), 'visit': ('visit', 'session', 'hour'),
+        'session': ('session', 'hour', 'package'), 'tenancy': ('month', 'night', 'week', 'day'),
+    }.get(profile, ('item', 'task', 'package')))
 CLIENT_FIELDS = {
     'ticket': [],
     'dropoff': [('work', 'Items, quantities and work needed'), ('handover', 'Drop-off or collection location'), ('deadline', 'Preferred completion date')],
@@ -121,7 +140,7 @@ def validate_design(data):
     return result
 
 
-def read_price_items(form):
+def read_price_items(form, allowed_units=PRICE_UNITS):
     from decimal import Decimal, InvalidOperation
     names = form.getlist('item_name')
     prices, units, descriptions = [form.getlist('item_' + key) for key in ('price', 'unit', 'description')]
@@ -132,7 +151,7 @@ def read_price_items(form):
         name, description = name.strip(), description.strip()
         if not name and not price and not description:
             continue
-        if not name or len(name) > 100 or len(description) > 300 or unit not in PRICE_UNITS:
+        if not name or len(name) > 100 or len(description) > 300 or unit not in allowed_units:
             raise ValueError('Each price row needs an item name, valid unit and short description.')
         try:
             amount = Decimal(price)

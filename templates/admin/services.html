@@ -144,7 +144,7 @@
                         <span class="badge bg-dark">Removed</span>
                         <div class="small text-muted text-nowrap">{{ service.retired_at.strftime('%d %b %Y') }}</div>
                         {% elif service.is_active %}
-                        <span class="badge bg-success">Live</span>
+                        <span class="badge bg-success">Live</span>{% if service.profile == 'ticket' %}<div>Ticket review: {{ service.ticket_review_status }}</div>{% endif %}
                         {% else %}
                         <span class="badge bg-secondary">Paused</span>
                         {% endif %}

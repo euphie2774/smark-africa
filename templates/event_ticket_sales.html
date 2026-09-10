@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block title %}Ticket sales - {{ super() }}{% endblock %}
+{% block content %}
+<div class="container py-4">
+<h1 class="h3">{{ service.title }}: ticket sales</h1>
+<p>Private organiser records. Every scan checks the current payment and admission status. Cancelled and refunded seat numbers are kept reserved and never reassigned.</p>
+<div class="row g-3 mb-4">{% for tier in service.tiers %}<div class="col-md-4"><section class="card card-body"><h2 class="h5">{{ tier.name }}</h2><p>{{ tier.quantity_sold or 0 }} tickets issued<br>{% if tier.is_unlimited %}Unlimited unseated admission{% else %}{{ tier.seats_left }} remaining / {{ tier.quantity_total }} seats{% endif %}</p></section></div>{% endfor %}</div>
+{% for order in pagination.items %}<section class="card card-body mb-3">
+<h2 class="h5">Order #{{ order.id }} · {{ order.client.username }}</h2>
+<p>{{ order.tier.name if order.tier else 'General admission' }} · {{ order.quantity }} tickets · KSh {{ '%.2f'|format(order.amount) }}<br>Payment: <strong>{{ order.payment_status }}</strong> · Order: <strong>{{ order.status|replace('_', ' ') }}</strong></p>
+{% for admission in admissions.get(order.id, []) %}<div class="border-top py-2">Ticket #{{ admission.id }} · {% if admission.allocated_seat is not none %}Seat {{ admission.allocated_seat }}{% else %}Unseated{% endif %} · <strong>{{ admission_state(admission) }}</strong>{% if admission.checked_in_at %} · Entry recorded {{ admission.checked_in_at.strftime('%d %b %Y %H:%M:%S') }} UTC{% endif %}</div>{% else %}<p>No admission issued.</p>{% endfor %}
+{% if current_user.is_admin and order.status != 'refunded' %}<details class="mt-3"><summary>Manage ticket status</summary><form method="post" action="{{ url_for('change_ticket_status', order_id=order.id) }}" class="mt-2">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label class="form-label">Action<select class="form-select" name="action"><option value="cancelled">Cancel / revoke entry</option>{% if order.is_paid %}<option value="refunded">Record a completed refund</option>{% endif %}</select></label>
+<label class="form-label">Reason<input class="form-control" name="reason" maxlength="300" required></label>
+<label class="form-label">Refund transaction reference (required for a refund)<input class="form-control" name="reference" maxlength="100"></label>
+<label class="d-block my-2"><input type="checkbox" name="refund_confirmed" value="yes"> I verified the money has already been refunded. This form records it; it does not send money.</label>
+<button class="btn btn-outline-danger">Save status and notify buyer</button></form></details>{% endif %}
+</section>{% else %}<p>No ticket orders yet.</p>{% endfor %}
+<nav aria-label="Ticket sales pages">{% if pagination.has_prev %}<a class="btn btn-outline-primary" href="{{ url_for('event_ticket_sales', service_id=service.id, page=pagination.prev_num) }}">Previous</a>{% endif %} {% if pagination.has_next %}<a class="btn btn-outline-primary" href="{{ url_for('event_ticket_sales', service_id=service.id, page=pagination.next_num) }}">Next</a>{% endif %}</nav>
+</div>
+{% endblock %}

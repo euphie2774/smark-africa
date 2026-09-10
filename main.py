@@ -6294,6 +6294,11 @@ SEMANTIC_SEARCH_MIN_RESULTS = int_env('SEMANTIC_SEARCH_MIN_RESULTS', 3)
 # whole normalised query and as substrings of it, so "cheap bluetooth jammer"
 # hits the same entry as "bluetooth jammer".
 DEFAULT_SEARCH_CONCEPTS = {
+    'rainy weather': ['waterproof', 'rain boots', 'umbrella', 'raincoat'],
+    'running shoes': ['trainers', 'running sneakers'],
+    'wireless headphones': ['bluetooth headphones', 'earbuds', 'airpods'],
+    'long battery life': ['powerbank', 'battery pack', '6000mah', '5000mah'],
+    'school supplies': ['notebook', 'stationery', 'pens', 'backpack'],
     'bluetooth jammer': ['esp32', 'nrf24', 'deauther'],
     'wifi jammer': ['esp32', 'deauther', 'nodemcu'],
     'signal blocker': ['esp32', 'nrf24'],
@@ -6625,6 +6630,36 @@ def _compute_product_search_ids(key, target, search, category_slug, product_type
     elif target == 'shared':
         cache.set(key, ids, timeout=int(Setting.get('product_search_cache_seconds', '300') or 300))
     return ids
+
+
+@app.route('/api/products/suggestions')
+@limiter.limit('120 per minute')
+def product_search_suggestions():
+    term = normalise_search_text(request.args.get('q', ''))
+    if not 2 <= len(term) <= 80:
+        return jsonify(suggestions=[])
+    escaped = term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    prefix = Product.name.ilike(escaped + '%', escape='\\')
+    contains = Product.name.ilike('%' + escaped + '%', escape='\\')
+    # No model calls while typing: known meaning-based expansions are immediate.
+    related = concept_expansion(term)[:5]
+    clauses = [contains]
+    for word in related:
+        word = word.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        clauses.append(Product.name.ilike('%' + word + '%', escape='\\'))
+    query = Product.query.filter(Product.is_active.is_(True), or_(*clauses))
+    category = (request.args.get('category') or '')[:100]
+    if category:
+        query = query.join(Category).filter(Category.slug == category)
+    kind = request.args.get('type')
+    if kind in ('digital', 'physical'):
+        query = query.filter(Product.is_digital.is_(kind == 'digital'))
+    products = query.order_by(case((prefix, 0), (contains, 1), else_=2),
+        Product.name.asc(), Product.id.asc()).limit(8).all()
+    response = jsonify(suggestions=[{'id': p.id, 'name': p.name,
+        'url': url_for('product_page', slug=p.slug)} for p in products])
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 def paginate_cached_ids(model, ids, page=1, per_page=12, options=None):
@@ -9982,7 +10017,7 @@ def check_payment(order_id):
 
 @app.route('/mpesa/callback', methods=['POST'])
 @csrf.exempt  # M-Pesa callbacks can't include CSRF tokens
-@limiter.limit("100 per hour")  # Rate limit callbacks
+@limiter.limit("6000 per hour")  # Provider callbacks share source addresses during busy events
 def mpesa_callback():
     """
     Daraja API callback endpoint for STK Push results
@@ -10032,16 +10067,11 @@ def mpesa_callback():
                     # Idempotent inside finalize_paid_service_order, so a replayed
                     # callback - which Safaricom does send - takes no second seat and
                     # writes no second revenue row.
-                    finalize_paid_service_order(service_order, receipt, paid_amount)
+                    if not service_order.is_paid and not reconcile_service_payment(service_order, receipt, paid_amount):
+                        return jsonify({'ResultCode': 1, 'ResultDesc': 'Payment verification pending'}), 503
                 elif service_order.payment_status == 'pending':
-                    service_order.payment_status = 'failed'
-                    service_order.status = 'payment_failed'
-                    try:
-                        db.session.commit()
-                    except SQLAlchemyError:
-                        db.session.rollback()
-                        logger.exception('service order %s failure not recorded',
-                                         service_order.id)
+                    # A caller cannot cancel a payment by posting a forged failure.
+                    reconcile_service_payment(service_order)
                 return jsonify({'ResultCode': 0, 'ResultDesc': 'Success'})
 
         # Initialised before the success branch, not inside it. settle_invoice_stk
@@ -19928,8 +19958,8 @@ def _compute_service_catalogue():
         ServiceCatalogueItem.label.asc()).limit(200).all()
     cached = tuple(ServiceOption(row.key, row.label, row.emoji or '',
                                  bool(row.seller_listable),
-                                 (row.fulfilment_profile or '').strip().lower()
-                                 or seed_profile_for(row.key), row.form_design_json)
+                                 ('ticket' if row.key == 'events_tickets' else ((row.fulfilment_profile or '').strip().lower()
+                                 or seed_profile_for(row.key))), row.form_design_json)
                    for row in rows)
     # Filled before the stripe is released so a waiter's re-read finds it.
     _service_catalogue_cache.set('rows', cached)
@@ -20547,7 +20577,7 @@ def service_detail(service_id):
         open_request = ServiceLinkRequest.query.filter(
             ServiceLinkRequest.service_id == service.id,
             ServiceLinkRequest.client_id == current_user.id,
-            ServiceLinkRequest.status.in_(('open', 'claimed')),
+            ServiceLinkRequest.status.in_(('open', 'claimed', 'linked')),
         ).order_by(ServiceLinkRequest.created_at.desc()).first()
     # Two separate variables for the same column, because they answer two
     # different questions and must never be confused for one another.
@@ -20985,7 +21015,7 @@ def create_service():
     wins, and a blank address falls back to the coordinates the browser supplied,
     so a provider who cannot describe where they are still gets a pin.
     """
-    from service_forms import SERVICE_QUESTIONS, read_service_answers, form_design, read_price_items, PRICE_UNITS
+    from service_forms import SERVICE_QUESTIONS, read_service_answers, form_design, read_price_items, price_units_for
 
     is_admin_lister = current_user.is_admin
     storefront = None
@@ -21006,10 +21036,14 @@ def create_service():
     designs = {row.key: form_design(row.key, row.label, row.profile, row.form_design_json) for row in options}
 
     def back(form_data):
-        return render_template('create_service.html', options=options, fee=fee,
+        selected = next((row for row in options if row.key == form_data.get('service_key')), None)
+        if not selected:
+            return render_template('choose_service.html', options=options, profiles=profiles)
+        return render_template('create_service.html', options=options, selected=selected,
+                               design=designs[selected.key], spec=service_profile_spec(selected.profile), fee=fee,
                                profiles=profiles, form=form_data,
                                service_questions={key: value['questions'] for key, value in designs.items()},
-                               service_designs=designs, price_units=PRICE_UNITS)
+                               service_designs=designs, price_units=price_units_for(selected.key, selected.profile))
 
     if request.method == 'POST':
         title = (request.form.get('title', '') or '').strip()[:200]
@@ -21029,11 +21063,16 @@ def create_service():
         profile = allowed[service_key].profile or DEFAULT_SERVICE_PROFILE
         try:
             offering_answers = read_service_answers(service_key, request.form, designs[service_key]['questions'])
-            price_items = read_price_items(request.form) if profile != 'ticket' else []
+            price_items = read_price_items(request.form, price_units_for(service_key, profile)) if profile != 'ticket' else []
+            if service_key == 'food_delivery' and not price_items:
+                raise ValueError('Add at least one dish and its price to your menu.')
         except ValueError as exc:
             flash(str(exc), 'danger')
             return back(request.form)
         spec = service_profile_spec(profile)
+        if profile == 'ticket' and (not form_datetime('event_starts_at') or not (request.form.get('event_venue') or '').strip()):
+            flash('Add a valid event start time and venue or online platform.', 'danger')
+            return back(request.form)
         tiers, tier_error = read_service_tiers() if 'tiers' in spec['fields'] else ([], '')
         if tier_error:
             flash(tier_error, 'danger')
@@ -21048,6 +21087,7 @@ def create_service():
             offering_details=json.dumps(offering_answers),
             pricing_details=json.dumps(price_items),
             form_snapshot=json.dumps(designs[service_key]),
+            ticket_review_status='approved' if is_admin_lister else 'pending',
             # Copied onto the row, not read through the catalogue: an admin retagging
             # a category later must not silently reshape listings providers have
             # already written, and the grid filter wants one indexed column rather
@@ -21104,7 +21144,7 @@ def create_service():
         else:
             flash('Service listed. Clients will reach you through an admin.', 'success')
         return redirect(url_for('service_detail', service_id=service.id))
-    return back({})
+    return back({'service_key': request.args.get('service', '')})
 
 
 def form_datetime(name):
@@ -21130,6 +21170,13 @@ def read_service_tiers():
     """
     from math import isfinite
 
+    try:
+        buyer_limit = int(request.form.get('ticket_buyer_limit') or 0)
+        if not 0 <= buyer_limit <= 1000000:
+            raise ValueError()
+    except ValueError:
+        return [], 'Enter a whole-number buyer limit, or leave it blank.'
+
     if request.form.get('ticket_mode') == 'single':
         from werkzeug.datastructures import MultiDict
         from service_forms import read_price_items
@@ -21139,9 +21186,9 @@ def read_service_tiers():
                 'item_unit': 'item', 'item_description': ''}))
             price = float(items[0]['price'])
             quantity = int(request.form.get('single_ticket_quantity') or '0')
-            if price <= 0 or quantity < 0:
+            if price <= 0 or not 0 <= quantity <= 1000000:
                 raise ValueError('Invalid price or capacity')
-            return [{'name': 'General admission', 'price': price, 'quantity_total': quantity, 'max_per_order': 5}], ''
+            return [{'name': 'General admission', 'price': price, 'quantity_total': quantity, 'max_per_order': 0}], ''
         except (ValueError, IndexError):
             return [], 'Enter a valid ticket price and whole-number capacity.'
 
@@ -21172,15 +21219,14 @@ def read_service_tiers():
         if any(row['name'].casefold() == name.casefold() for row in rows):
             return [], f'Ticket tier "{name}" is repeated. Use a different name for each tier.'
         try:
-            total = max(0, int(float((totals[index] if index < len(totals) else '') or 0)))
-        except (TypeError, ValueError, OverflowError):
-            total = 0
-        try:
-            cap = int(float((caps[index] if index < len(caps) else '') or 0)) or 5
-        except (TypeError, ValueError, OverflowError):
-            cap = 5
+            total = int((totals[index] if index < len(totals) else '') or 0)
+            cap = int((caps[index] if index < len(caps) else '') or 0)
+            if not 0 <= total <= 1000000 or not 0 <= cap <= 1000000:
+                raise ValueError()
+        except (TypeError, ValueError):
+            return [], 'Seats and buyer limits must be whole numbers, or blank for no limit.'
         rows.append({'name': name, 'price': round(price, 2),
-                     'quantity_total': total, 'max_per_order': max(1, min(cap, 50))})
+                     'quantity_total': total, 'max_per_order': cap})
     if len(rows) > 12:
         return [], 'Twelve price bands is the most one listing can carry.'
     return rows, ''
@@ -21196,6 +21242,8 @@ def apply_service_profile_fields(service):
     returning None rather than "No pickup offered" on the four profiles that have no
     pickup concept.
     """
+    if service.profile == 'ticket' and 'ticket_buyer_limit' in request.form:
+        service.ticket_buyer_limit = int(request.form.get('ticket_buyer_limit') or 0)
     fields = service.profile_spec['fields']
 
     if 'location' in fields:
@@ -21310,6 +21358,10 @@ def start_service_payment(order, phone):
     callback is the sole place that may mark it paid, take revenue or move a seat
     count - see finalize_paid_service_order.
     """
+    if order.is_paid:
+        return True, 'Payment is already confirmed.'
+    if order.checkout_request_id and order.payment_status == 'pending':
+        return True, 'A payment is already pending. Complete the existing M-Pesa prompt while we verify its status.'
     if not phone:
         return False, 'Add an M-Pesa phone number to pay.'
     result = stk_push(phone, order.amount, service_order_reference(order))
@@ -21327,6 +21379,31 @@ def start_service_payment(order, phone):
     if detail and detail not in message:
         message = f'{message}: {detail}'
     return False, f'Payment could not be started: {message}'
+
+
+def reconcile_service_payment(order, receipt='', amount=None):
+    """Only authenticated Daraja query results may settle a service payment."""
+    if order.is_paid:
+        return True
+    checkout_id = order.checkout_request_id
+    if not checkout_id:
+        return False
+    result = check_payment_status(checkout_id) or {}
+    if result.get('CheckoutRequestID') != checkout_id:
+        return False
+    code = str(result.get('ResultCode', ''))
+    if code == '0':
+        # The checkout was created server-side for this order's immutable amount.
+        expected = max(1, int(round(float(order.amount))))
+        return finalize_paid_service_order(order,
+            result.get('MpesaReceiptNumber') or receipt, expected if amount is None else amount)
+    if code in ('1032', '1037', '1', '2001'):
+        ServiceOrder.query.filter(ServiceOrder.id == order.id, ServiceOrder.payment_status != 'paid',
+            ServiceOrder.status.notin_(['cancelled', 'refunded'])).update(
+            {'payment_status': 'failed', 'status': 'payment_failed'}, synchronize_session=False)
+        db.session.commit()
+        db.session.refresh(order)
+    return False
 
 
 def generate_ticket_code():
@@ -21359,12 +21436,33 @@ def finalize_paid_service_order(order, receipt='', amount=None):
     """
     if not order or order.is_paid:
         return False
+    if amount is not None:
+        from decimal import Decimal, InvalidOperation
+        try:
+            received = Decimal(str(amount))
+            expected = Decimal(max(1, int(round(float(order.amount)))))
+            if not received.is_finite() or received != expected:
+                logger.error('Service payment amount mismatch on order %s', order.id)
+                return False
+        except (InvalidOperation, ValueError, TypeError):
+            return False
+    # Serialize event settlement across tiers so per-buyer limits cannot race.
+    if order.service and order.service.profile == 'ticket':
+        ServiceListing.query.filter_by(id=order.service_id).update(
+            {'id': ServiceListing.id}, synchronize_session=False)
+    # Claim settlement atomically. A duplicate callback cannot issue more tickets.
+    claimed = ServiceOrder.query.filter(ServiceOrder.id == order.id,
+        ServiceOrder.payment_status != 'paid').update({'payment_status': 'paid'}, synchronize_session=False)
+    if not claimed:
+        db.session.rollback()
+        return False
+    db.session.refresh(order)
     service = order.service
     order.payment_status = 'paid'
     order.paid_at = utcnow()
     if receipt:
         order.mpesa_receipt = receipt[:50]
-    if order.status == 'pending':
+    if order.status in ('pending', 'payment_failed'):
         order.status = 'in_progress'
 
     tier = order.tier
@@ -21374,25 +21472,43 @@ def finalize_paid_service_order(order, receipt='', amount=None):
         # till and only one of them can have the last seat. The later arrival is
         # still marked paid - the money is in - and flagged for a refund rather than
         # silently given a seat that does not exist.
+        from service_fulfilment import ticket_limit_exceeded, assign_legacy_seats
         wanted = max(1, order.quantity or 1)
-        left = tier.seats_left
-        if left is not None and wanted > left:
+        # Lock the tier before backfilling old admissions or allocating a new range.
+        ServicePriceTier.query.filter_by(id=tier.id).update(
+            {'quantity_sold': func.coalesce(ServicePriceTier.quantity_sold, 0)}, synchronize_session=False)
+        db.session.refresh(tier)
+        assign_legacy_seats(tier)
+        reason = ticket_limit_exceeded(service, tier, order.client_id, wanted, exclude_order_id=order.id)
+        reserved = 0
+        if not reason and tier.is_active and service.ticket_review_status == 'approved' and order.status not in ('cancelled', 'refunded'):
+            reserved = ServicePriceTier.query.filter(ServicePriceTier.id == tier.id,
+                db.or_(ServicePriceTier.quantity_total <= 0,
+                       ServicePriceTier.quantity_total.is_(None),
+                       func.coalesce(ServicePriceTier.quantity_sold, 0) + wanted <= ServicePriceTier.quantity_total)
+            ).update({'quantity_sold': func.coalesce(ServicePriceTier.quantity_sold, 0) + wanted}, synchronize_session=False)
+        db.session.refresh(tier)
+        if not reserved:
             order.status = 'oversold_refund_due'
-            logger.error('service order %s paid for %s seats on tier %s with %s left; '
-                         'flagged for refund', order.id, wanted, tier.id, left)
-        else:
-            tier.quantity_sold = (tier.quantity_sold or 0) + wanted
+            for admin in User.query.filter_by(is_admin=True).limit(30).all():
+                create_customer_notification(admin.id, 'Ticket payment needs a refund',
+                    f'Order #{order.id}: {reason or "Ticket allocation is unavailable or no longer valid."} '
+                    'No admission was issued; arrange a refund.', 'payment')
+        elif not tier.is_unlimited:
+            order.ticket_seat_start = tier.quantity_sold - wanted + 1
 
-    if not order.ticket_code and service and service.profile == 'ticket':
+    if not order.ticket_code and service and service.profile == 'ticket' and order.status != 'oversold_refund_due':
         # Minted only on payment, so an unpaid prompt never produces something that
         # looks like a ticket.
         order.ticket_code = generate_ticket_code()
+        from service_fulfilment import issue_admissions
+        issue_admissions(order)
 
-    if (order.pay_to or 'platform') == 'platform' and order.platform_fee:
+    if (order.pay_to or 'platform') == 'platform' and order.platform_fee and order.status != 'oversold_refund_due':
         record_platform_revenue('service_commission', order.platform_fee,
                                 f'Service: {service.title if service else order.service_id}',
                                 str(order.service_id), 'service', order.client_id)
-    if service:
+    if service and service.profile == 'ticket' and order.status != 'oversold_refund_due':
         service.orders_completed = (service.orders_completed or 0) + 1
 
     create_customer_notification(
@@ -21402,7 +21518,7 @@ def finalize_paid_service_order(order, receipt='', amount=None):
          + (f' Your ticket code is {order.ticket_code}.' if order.ticket_code else ''))
         if service else 'Your service payment is confirmed.',
         'payment')
-    if order.provider_id:
+    if order.provider_id and order.status != 'oversold_refund_due':
         create_customer_notification(
             order.provider_id, 'You have been paid for a service',
             f'A client paid KES {order.amount:,.0f} for "{service.title}" on the platform. '
@@ -21432,6 +21548,9 @@ def buy_service_ticket(service_id):
     if not service.is_active:
         flash('This service is no longer listed.', 'danger')
         return redirect(url_for('services_marketplace'))
+    if service.profile == 'ticket' and service.ticket_review_status != 'approved':
+        flash('Ticket sales open after admin verification of this event.', 'warning')
+        return redirect(url_for('service_detail', service_id=service.id))
     if service.profile_spec['flow'] != 'buy':
         flash('This service is arranged through an admin rather than bought directly.',
               'info')
@@ -21458,10 +21577,16 @@ def buy_service_ticket(service_id):
         if left == 0:
             flash(f'{tier.name} is sold out.', 'warning')
         elif left is not None and quantity > left:
-            flash(f'Only {left} left on {tier.name}.', 'warning')
+            flash('The requested number of tickets is unavailable. Try a smaller quantity.', 'warning')
         else:
-            flash(f'You can buy between 1 and {tier.max_per_order or 5} at a time.',
+            flash(f'You can buy between 1 and {min(50, tier.max_per_order or 50)} at a time.',
                   'warning')
+        return redirect(url_for('service_detail', service_id=service.id))
+
+    from service_fulfilment import ticket_limit_exceeded
+    reason = ticket_limit_exceeded(service, tier, current_user.id, quantity)
+    if reason:
+        flash(reason, 'warning')
         return redirect(url_for('service_detail', service_id=service.id))
 
     phone = (request.form.get('phone') or current_user.phone or '').strip()[:30]
@@ -21503,6 +21628,9 @@ def order_service(service_id):
         return redirect(url_for('services_marketplace'))
     if service.profile_spec['flow'] == 'buy':
         return redirect(url_for('buy_service_ticket', service_id=service.id), code=307)
+    if service.price_items:
+        flash('Select your items and request a confirmed quote before payment.', 'info')
+        return redirect(url_for('service_detail', service_id=service.id))
     if service.pays_provider_direct:
         # visit and tenancy: there is no order and no revenue row to create. A
         # barber is paid in the chair and a landlord at the viewing, so all this
@@ -21564,6 +21692,13 @@ def pay_service_order(order_id):
         abort(403)
     if order.is_paid:
         flash('This order is already paid.', 'info')
+        return redirect(url_for('service_detail', service_id=order.service_id))
+    if order.service.profile == 'ticket' and (not order.service.is_active or order.service.ticket_review_status != 'approved'):
+        flash('This event is not currently approved for ticket sales.', 'warning')
+        return redirect(url_for('service_detail', service_id=order.service_id))
+    linked = ServiceLinkRequest.query.filter_by(service_order_id=order.id).first()
+    if linked and not order.service.pays_upfront and not (linked.provider_completed_at or linked.client_confirmed_at):
+        flash('Payment opens when the service is marked delivered or ready.', 'info')
         return redirect(url_for('service_detail', service_id=order.service_id))
     phone = (request.form.get('phone') or current_user.phone or '').strip()[:30]
     ok, message = start_service_payment(order, normalize_mpesa_phone(phone))
@@ -22375,6 +22510,22 @@ def admin_service_request_action(request_id, action):
                 f'thread to reply. An admin can see this conversation.', 'service')
         flash('Marked as linked and both sides notified.', 'success')
     elif action == 'close':
+        if link_request.service_order and not link_request.service_order.is_paid:
+            flash('The accepted platform quote is unpaid. Resolve payment before closing.', 'warning')
+            return redirect(url_for('admin_service_requests'))
+        closed = ServiceLinkRequest.query.filter(ServiceLinkRequest.id == link_request.id,
+            ServiceLinkRequest.status != 'closed').update({'status': 'closed', 'closed_at': now}, synchronize_session=False)
+        if not closed:
+            db.session.rollback()
+            flash('This request is already closed.', 'info')
+            return redirect(request.referrer or url_for('admin_service_requests'))
+        if was != 'closed':
+            create_customer_notification(link_request.client_id, 'Service request closed',
+                f'An admin closed request #{link_request.id}. Thank you for using the service.', 'service')
+            if link_request.service_order:
+                link_request.service_order.status = 'completed'
+                link_request.service_order.completed_at = now
+                link_request.service.orders_completed = (link_request.service.orders_completed or 0) + 1
         link_request.status = 'closed'
         link_request.closed_at = now
         # The completion counter for the two profiles that never produce a
@@ -22495,7 +22646,15 @@ def admin_service_catalogue():
             # them here would reshape a live listing behind its owner's back, and
             # could strip an event's venue off a page that is selling tickets.
             profile = (request.form.get(f'profile_{row.id}') or '').strip().lower()
-            if profile in SERVICE_FULFILMENT_PROFILES:
+            if profile == 'auto' and not row.form_profile_auto:
+                row.form_profile_auto = True
+                row.form_design_status = 'pending'
+                row.form_design_attempts = 0
+            elif profile in SERVICE_FULFILMENT_PROFILES:
+                if profile != row.fulfilment_profile:
+                    row.form_design_json = None
+                    row.form_design_status = 'pending'
+                    row.form_design_attempts = 0
                 row.fulfilment_profile = profile
                 row.form_profile_auto = False
             emoji = (request.form.get(f'emoji_{row.id}', '') or '').strip()[:16]
@@ -23866,6 +24025,10 @@ def phase_two_schema_spec():
             ('event_venue', 'event_venue VARCHAR(200)'),
             ('offering_details', 'offering_details TEXT'),
             ('pricing_details', 'pricing_details TEXT'),
+            ('ticket_review_status', "ticket_review_status VARCHAR(20) DEFAULT 'pending'"),
+            ('ticket_buyer_limit', 'ticket_buyer_limit INTEGER DEFAULT 0'),
+            ('ticket_reviewed_at', 'ticket_reviewed_at DATETIME'),
+            ('ticket_reviewed_by_id', 'ticket_reviewed_by_id INTEGER'),
             ('form_snapshot', 'form_snapshot TEXT'),
             # Retiring a listing. No DEFAULT on any of them: NULL is the whole
             # meaning here - never asked, never cleared, never retired - and a
@@ -23894,8 +24057,16 @@ def phase_two_schema_spec():
             ('tier_id', 'tier_id INTEGER'),
             ('quantity', 'quantity INTEGER DEFAULT 1'),
             ('ticket_code', 'ticket_code VARCHAR(24)'),
+            ('ticket_seat_start', 'ticket_seat_start INTEGER'),
+            ('payment_checked_at', 'payment_checked_at DATETIME'),
         ],
         'service_link_requests': [
+            ('client_confirmed_at', 'client_confirmed_at DATETIME'),
+            ('provider_completed_at', 'provider_completed_at DATETIME'),
+            ('quoted_amount', 'quoted_amount FLOAT'),
+            ('quote_description', 'quote_description VARCHAR(500)'),
+            ('quote_accepted_at', 'quote_accepted_at DATETIME'),
+            ('service_order_id', 'service_order_id INTEGER'),
             ('provider_notified_at', 'provider_notified_at DATETIME'),
         ],
         'service_link_messages': [
@@ -24991,6 +25162,10 @@ def start_background_jobs():
     scheduler.start()
     return scheduler
 
+
+from service_fulfilment import register_service_routes
+register_service_routes(app, create_customer_notification, invalidate_service_caches,
+                        reconcile_service_payment)
 
 background_scheduler = None
 

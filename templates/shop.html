@@ -10,7 +10,7 @@
         <form class="market-search" action="{{ url_for('shop') }}" method="GET">
             {% if current_category %}<input type="hidden" name="category" value="{{ current_category.slug }}">{% endif %}
             {% if current_type %}<input type="hidden" name="type" value="{{ current_type }}">{% endif %}
-            <input type="search" name="search" value="{{ request.args.get('search', '') }}" placeholder="Shoes for rainy weather, phone with best battery life..." aria-label="Search products">
+            <input type="search" name="search" data-product-suggestions="{{ url_for('product_search_suggestions') }}" value="{{ request.args.get('search', '') }}" placeholder="Shoes for rainy weather, phone with best battery life..." aria-label="Search products">
             <button type="submit"><i class="fas fa-search me-2"></i>Search</button>
         </form>
         <a href="{{ url_for('smart_shopping') }}" class="btn btn-gold mt-3"><i class="fas fa-wand-magic-sparkles me-1"></i> Ask AI Shopping Assistant</a>

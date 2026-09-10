@@ -16,7 +16,9 @@ def generate_design(label, profile, api_key, model):
         'https://api.openai.com/v1/responses',
         headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json'},
         json={
-            'model': model, 'tools': [{'type': 'web_search_preview'}],
+            'model': model, 'tools': [{'type': 'web_search'}],
+            'tool_choice': 'required',
+            'include': ['web_search_call.action.sources'],
             'input': [
                 {'role': 'system', 'content':
                  'Design a marketplace listing form. Research primary service-provider documentation '
@@ -43,7 +45,14 @@ def generate_design(label, profile, api_key, model):
     raw = payload.get('output_text') or ''.join(
         part.get('text', '') for item in payload.get('output', [])
         for part in item.get('content', []) if part.get('type') == 'output_text')
-    return validate_design(json.loads(raw))
+    if raw.strip().startswith('```'):
+        raw = '\n'.join(raw.strip().splitlines()[1:-1])
+    design = validate_design(json.loads(raw))
+    design['sources'] = list(dict.fromkeys(
+        source['url'] for item in payload.get('output', []) if item.get('type') == 'web_search_call'
+        for source in item.get('action', {}).get('sources', [])
+        if isinstance(source.get('url'), str) and source['url'].startswith('https://')))[:8]
+    return design
 
 
 def process_pending_designs():
@@ -66,8 +75,12 @@ def process_pending_designs():
             row.form_design_attempts = (row.form_design_attempts or 0) + 1
             db.session.commit()
             try:
+                requested = (row.label, row.fulfilment_profile, row.form_profile_auto)
                 design = generate_design(row.label, 'auto' if row.form_profile_auto else row.fulfilment_profile, api_key,
                                          Setting.get('openai_search_model', 'gpt-4.1-mini'))
+                db.session.refresh(row)
+                if requested != (row.label, row.fulfilment_profile, row.form_profile_auto):
+                    continue
                 if row.form_profile_auto and design.get('profile'):
                     row.fulfilment_profile = design['profile']
                 row.form_design_json = json.dumps(design)

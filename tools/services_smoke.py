@@ -75,7 +75,7 @@ from main import (SERVICE_CLIENT_WELCOME_MESSAGE,
 from models import (SERVICE_FULFILMENT_PROFILES, SERVICE_PROFILE_BY_KEY,
                     BusinessStorefront, CustomerNotification, PlatformRevenue,
                     ServiceCatalogueItem, ServiceLinkMessage, ServiceLinkRequest,
-                    ServiceListing, ServiceOrder, ServicePriceTier, Setting, User,
+                    ServiceListing, ServiceOrder, ServicePriceTier, TicketAdmission, Setting, User,
                     service_profile_spec)
 
 # CSRF off for the same reason the four existing POST-exercising smoke scripts turn
@@ -265,6 +265,8 @@ def teardown():
         ServiceLinkMessage.request_id.in_(request_ids)).delete(synchronize_session=False)
     ServiceLinkRequest.query.filter(
         ServiceLinkRequest.id.in_(request_ids)).delete(synchronize_session=False)
+    TicketAdmission.query.filter(TicketAdmission.order_id.in_(
+        db.session.query(ServiceOrder.id).filter(ServiceOrder.service_id.in_(service_ids)))).delete(synchronize_session=False)
     ServiceOrder.query.filter(
         ServiceOrder.service_id.in_(service_ids)).delete(synchronize_session=False)
     # Before the listings, and by service_id rather than through the cascade: the
@@ -975,6 +977,8 @@ def check_provider_whatsapp_button(customer_id, admin_id, service_id, request_id
 def check_ticket_money(customer_id, provider_id, service):
     """A ticket is bought, and nothing is earned until Safaricom says so."""
     print('tickets: pending until paid, paid once, and never oversold')
+    service.ticket_review_status = 'approved'
+    db.session.commit()
     service_id = service.id
     regular = make_tier(service, 'Regular', 500.0, total=2, max_per_order=2,
                         sort_order=10)
@@ -1048,7 +1052,8 @@ def check_ticket_money(customer_id, provider_id, service):
     check('and that resolver is separate from the product one, which still finds nothing',
           app_module.order_for_checkout_id(FAKE_CHECKOUT_ID) is None)
 
-    with as_anonymous() as client:
+    from unittest.mock import patch
+    with patch.object(app_module, 'check_payment_status', return_value={'ResultCode': '0', 'CheckoutRequestID': FAKE_CHECKOUT_ID}), as_anonymous() as client:
         callback = client.post('/mpesa/callback',
                                json=mpesa_callback_payload(FAKE_CHECKOUT_ID,
                                                            amount=1000.0))

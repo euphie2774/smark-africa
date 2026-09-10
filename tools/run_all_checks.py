@@ -47,6 +47,8 @@ SCRIPTS = [
     'tools/phone_evidence_smoke.py',
     'tools/private_storage_smoke.py',
     'tools/services_smoke.py',
+    'tools/service_forms_smoke.py',
+    'tools/ticket_workflow_smoke.py',
     'tools/invoice_smoke.py',
     'tools/semantic_search_smoke.py',
     'tools/bounded_read_smoke.py',
