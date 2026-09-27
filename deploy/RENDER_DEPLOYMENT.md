@@ -15,6 +15,17 @@ Instance Type: Free
 
 The Gunicorn config binds to Render's `PORT` environment variable automatically.
 
+## PostgreSQL driver startup error
+
+If the build succeeds but startup ends with `ModuleNotFoundError: No module named
+'psycopg'`, SQLAlchemy selected psycopg 3 while this project installs
+`psycopg2-binary`. SQLAlchemy 2.1 changed the default for bare PostgreSQL URLs.
+The application now normalizes `postgres://` and `postgresql://` URLs to
+`postgresql+psycopg2://`, so redeploying this fix uses the installed driver.
+No database reset or credential change is needed. Explicit driver prefixes are
+preserved; if `DATABASE_URL` explicitly starts with `postgresql+psycopg://`,
+change only that prefix to `postgresql+psycopg2://` to use the project's driver.
+
 ## Required Environment Variables
 
 Set these in Render Dashboard > your service > Environment:

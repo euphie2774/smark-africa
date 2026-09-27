@@ -71,8 +71,14 @@ def _engine_options(uri):
 def _database_url(required=False):
     value = (os.environ.get('DATABASE_URL') or '').strip()
     if value:
-        if value.startswith('postgres://'):
-            value = value.replace('postgres://', 'postgresql://', 1)
+        # requirements.txt installs psycopg2-binary. SQLAlchemy 2.1 changed
+        # the driver for bare postgresql:// URLs to psycopg (version 3).
+        # Select our installed driver explicitly, preserving credentials and
+        # connection options verbatim. Keep explicitly chosen drivers intact.
+        for prefix in ('postgres://', 'postgresql://'):
+            if value.startswith(prefix):
+                value = 'postgresql+psycopg2://' + value[len(prefix):]
+                break
         if required and value.startswith('sqlite') and not _truthy(os.environ.get('ALLOW_EPHEMERAL_SQLITE')):
             raise RuntimeError(
                 'SQLite is not safe for deployed user accounts. Set DATABASE_URL '
