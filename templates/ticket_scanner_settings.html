@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block content %}<div class="container py-4" style="max-width:800px">
+<h1 class="h3">{{ service.title }}: entry scanner</h1>
+<p>Your scanner is ready. Anyone you share this private link with can check tickets without an account. Share only with your entry team.</p>
+<label for="scannerLink">Private scanner link</label><input id="scannerLink" class="form-control" readonly value="{{ scanner_url }}">
+<button class="btn btn-outline-primary my-2" id="copyLink">Copy link</button> <a class="btn btn-primary" href="{{ scanner_url }}">Open scanner</a><span id="copyStatus" role="status"></span>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="rotate"><button class="btn btn-outline-danger">Replace link and revoke previous links</button></form>
+<hr><h2 class="h5">Ticket format and printing</h2>
+<p>{{ 'Card printing is allowed by the admin.' if service.ticket_print_allowed else 'Card printing requires admin permission. QR tickets remain available.' }}</p>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<select class="form-select" name="ticket_format"><option value="qr">QR ticket</option><option value="barcode" {{ 'selected' if service.ticket_format == 'barcode' }} {{ 'disabled' if not service.ticket_print_allowed }}>Standard barcode card</option></select>
+<label class="d-block my-3"><input type="checkbox" name="auto_print" value="yes" {{ 'checked' if service.ticket_auto_print }} {{ 'disabled' if not service.ticket_print_allowed }}> Open the print dialog automatically after a successful QR scan</label>
+<p class="small">Cards measure 85.60 × 53.98 mm. A card printed after check-in remains used; it does not grant another entry. Browsers may require confirmation in the print dialog.</p>
+<button class="btn btn-success">Save preferences</button></form>
+{% if service.listing_fee_amount and not service.listing_fee_paid %}<div class="alert alert-warning mt-4">Admin-set listing charge: KSh {{ '%.2f'|format(service.listing_fee_amount) }}. Contact the admin to arrange payment. Sales open after the admin verifies payment.</div>{% else %}<p class="mt-4">No outstanding listing charge.</p>{% endif %}
+<a href="{{ url_for('event_ticket_sales', service_id=service.id) }}">Ticket sales and admission records</a>
+</div><script>document.getElementById('copyLink').onclick=async()=>{const input=document.getElementById('scannerLink');try{await navigator.clipboard.writeText(input.value);document.getElementById('copyStatus').textContent='Copied';}catch(e){input.select();document.getElementById('copyStatus').textContent='Select and copy the link';}};</script>{% endblock %}

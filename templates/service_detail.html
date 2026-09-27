@@ -652,9 +652,15 @@
             {% set is_owner = current_user.is_authenticated and current_user.id == service.provider_id %}
             {% if service.profile == 'ticket' and current_user.is_authenticated and current_user.is_admin %}
             <section class="card card-body mb-3"><h2 class="h6">Verify event listing</h2><p class="small">Check organiser authority, event details, ticket allocation and refund terms before opening sales.</p>
-            <form method="post" action="{{ url_for('review_service_ticket', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-success" name="decision" value="approve">Approve ticket sales</button><button class="btn btn-outline-danger" name="decision" value="reject">Reject / stop sales</button></form></section>
+            <form method="post" action="{{ url_for('review_service_ticket', service_id=service.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label class="form-label">Listing charge (KSh; 0 means free)<input class="form-control" type="number" name="listing_fee" min="0" max="10000000" step="0.01" value="{{ service.listing_fee_amount or 0 }}" required></label>
+            <input type="hidden" name="print_permission_present" value="yes"><label class="d-block"><input type="checkbox" name="print_allowed" value="yes" {{ 'checked' if service.ticket_print_allowed }}> Allow barcode card printing</label>
+            <label class="d-block"><input type="checkbox" name="fee_paid" value="yes"> I have verified the listing charge was paid</label><label class="form-label">Payment reference<input class="form-control" name="fee_reference" maxlength="100" value="{{ service.ticket_fee_reference or '' }}"></label>
+            <p class="small">A charge keeps sales closed until payment is verified. This records an existing payment; it does not collect money.</p>
+            <button class="btn btn-success" name="decision" value="approve">Save review / approve when paid</button><button class="btn btn-outline-danger" name="decision" value="reject">Reject / stop sales</button></form></section>
             {% endif %}
             {% if is_owner or (current_user.is_authenticated and current_user.is_admin) %}
+            {% if is_owner and service.profile == 'ticket' %}<a class="btn btn-primary my-3" href="{{ url_for('ticket_scanner_settings', service_id=service.id) }}">Private scanner link and card settings</a>{% endif %}
             <div class="card border-warning-subtle mt-3">
                 <div class="card-body">
                     <h3 class="h6 fw-bold mb-1">

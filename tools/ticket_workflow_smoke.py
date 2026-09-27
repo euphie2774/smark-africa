@@ -204,6 +204,87 @@ def run():
                 assert sorted(outcomes) == [200, 409], outcomes
                 print('PASS: concurrent last-seat payments issue one admission; concurrent scans admit once')
 
+                from ticket_scanning import scanner_key, barcode_value
+                from flask import g
+                login(provider)
+                settings_url = f'/services/{event2.id}/scanner-settings'
+                assert client.get(settings_url).status_code == 200
+                key = scanner_key(event2)
+                scanner_url = f'/services/{event2.id}/scanner/{key}'
+                login(stranger)
+                assert client.get(settings_url).status_code == 403
+                assert client.post(settings_url, data={'auto_print': 'yes'}).status_code == 403
+                with client.session_transaction() as session:
+                    session.clear()
+                g.pop('_login_user', None)
+                assert client.get(scanner_url).status_code == 200
+                assert client.post(scanner_url, json={'code':'garbage'}).json['state'] == 'invalid'
+                assert client.post(scanner_url, json=['unexpected']).status_code == 400
+                assert client.post(scanner_url, json={'code':'B' + '9' * 100 + '-' + 'a' * 24}).json['state'] == 'invalid'
+                fresh = TicketAdmission.query.filter_by(order_id=unlimited.id).order_by(TicketAdmission.id).first()
+                assert client.get(f'/services/tickets/{fresh.id}/card?key={key}').status_code == 403
+                response = client.post(scanner_url, json={'code':ticket_token(fresh)})
+                assert response.json['state'] == 'accepted' and response.json['card_url'] is None
+                assert client.post(scanner_url, json={'code':barcode_value(fresh)}).json['state'] == 'used'
+                wrong_event = scanner_key(event)
+                assert client.post(f'/services/{event.id}/scanner/{wrong_event}', json={'code':barcode_value(fresh)}).json['state'] == 'invalid'
+                event2.ticket_print_allowed = True
+                db.session.commit()
+                login(provider)
+                client.post(settings_url, data={'ticket_format':'barcode', 'auto_print':'yes'})
+                assert event2.ticket_auto_print and event2.ticket_format == 'barcode'
+                next_ticket = TicketAdmission.query.filter_by(order_id=unlimited.id).order_by(TicketAdmission.id).offset(1).first()
+                with client.session_transaction() as session:
+                    session.clear()
+                g.pop('_login_user', None)
+                response = client.post(scanner_url, json={'code':ticket_token(next_ticket)})
+                assert response.json['auto_print'] and response.json['state'] == 'accepted'
+                card = client.get(response.json['card_url'])
+                assert card.status_code == 200 and b'Smark-Africa.com' in card.data and b'<svg' in card.data
+                assert client.post(scanner_url, json={'code':barcode_value(next_ticket)}).json['state'] == 'used'
+                login(provider)
+                client.post(settings_url, data={'action':'rotate'})
+                assert client.get(scanner_url).status_code == 404
+                assert client.get(response.json['card_url']).status_code == 404
+                assert client.get(f'/services/{event2.id}').status_code == 200
+                assert client.get('/services/mine').status_code == 200
+                assert client.get(f'/services/tickets/{next_ticket.id}/qr').status_code == 200
+                scanner_url = f'/services/{event2.id}/scanner/{scanner_key(event2)}'
+                race_ticket = TicketAdmission.query.filter_by(order_id=unlimited.id).order_by(TicketAdmission.id).offset(2).first()
+                race_code = ticket_token(race_ticket)
+                barrier = Barrier(2)
+                def shared_scan_racer(_):
+                    with app.test_client() as scanner_client:
+                        barrier.wait(timeout=10)
+                        return scanner_client.post(scanner_url, json={'code': race_code}).json['state']
+                db.session.commit()
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    assert sorted(pool.map(shared_scan_racer, range(2))) == ['accepted', 'used']
+                app.config['WTF_CSRF_ENABLED'] = True
+                import re
+                # This smoke test keeps one app context across requests; Flask-WTF
+                # caches tokens on g, unlike real requests with fresh contexts.
+                g.pop('csrf_token', None)
+                page = client.get(scanner_url)
+                csrf = re.search(r'const csrf="([^"]+)"', page.get_data(as_text=True)).group(1)
+                assert client.post(scanner_url, json={'code':race_code}).status_code == 400
+                assert client.post(scanner_url, headers={'X-CSRFToken':csrf}, json={'code':race_code}).json['state'] == 'used'
+                app.config['WTF_CSRF_ENABLED'] = False
+                login(admin)
+                review_url = f'/services/{event.id}/review-ticket'
+                assert client.post(review_url, data={'decision':'approve','listing_fee':'NaN'}).status_code == 400
+                assert client.post(review_url, data={'decision':'approve','listing_fee':'500'}).status_code == 302
+                assert event.ticket_review_status == 'awaiting_fee' and not event.listing_fee_paid
+                assert client.post(review_url, data={'decision':'approve','listing_fee':'500','fee_paid':'yes'}).status_code == 400
+                assert client.post(review_url, data={'decision':'approve','listing_fee':'500','fee_paid':'yes','fee_reference':'VERIFIED-500'}).status_code == 302
+                assert event.ticket_review_status == 'approved' and event.listing_fee_paid
+                assert client.get(f'/services/{event.id}').status_code == 200
+                client.post(review_url, data={'decision':'approve','listing_fee':'600'})
+                assert event.ticket_review_status == 'awaiting_fee' and not event.listing_fee_paid
+                client.post(review_url, data={'decision':'approve','listing_fee':'0'})
+                assert event.ticket_review_status == 'approved'
+                print('PASS: private shared scanner, QR/barcode duplicate protection, print permission, link revocation, admin fee gate')
+
                 service = ServiceListing(title='Laundry delivery', provider_id=provider.id,
                     service_key='laundry', category='Laundry', fulfilment_profile='dropoff',
                     price=100, is_active=True, pay_to='platform', pay_when='after')

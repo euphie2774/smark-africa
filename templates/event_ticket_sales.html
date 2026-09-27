@@ -3,11 +3,13 @@
 {% block content %}
 <div class="container py-4">
 <h1 class="h3">{{ service.title }}: ticket sales</h1>
+{% if current_user.id == service.provider_id %}<a class="btn btn-primary mb-3" href="{{ url_for('ticket_scanner_settings', service_id=service.id) }}">Scanner link and card settings</a>{% endif %}
 <p>Private organiser records. Every scan checks the current payment and admission status. Cancelled and refunded seat numbers are kept reserved and never reassigned.</p>
 <div class="row g-3 mb-4">{% for tier in service.tiers %}<div class="col-md-4"><section class="card card-body"><h2 class="h5">{{ tier.name }}</h2><p>{{ tier.quantity_sold or 0 }} tickets issued<br>{% if tier.is_unlimited %}Unlimited unseated admission{% else %}{{ tier.seats_left }} remaining / {{ tier.quantity_total }} seats{% endif %}</p></section></div>{% endfor %}</div>
 {% for order in pagination.items %}<section class="card card-body mb-3">
 <h2 class="h5">Order #{{ order.id }} · {{ order.client.username }}</h2>
 <p>{{ order.tier.name if order.tier else 'General admission' }} · {{ order.quantity }} tickets · KSh {{ '%.2f'|format(order.amount) }}<br>Payment: <strong>{{ order.payment_status }}</strong> · Order: <strong>{{ order.status|replace('_', ' ') }}</strong></p>
+{% if current_user.id == service.provider_id %}{% for admission in admissions.get(order.id, []) %}{% if admission_state(admission) in ('Valid', 'Used') %}<p>Ticket #{{ admission.id }}: <a href="{{ url_for('service_ticket_qr', admission_id=admission.id) }}">Generate QR</a>{% if service.ticket_print_allowed %} · <a href="{{ url_for('ticket_card', admission_id=admission.id) }}">Print barcode card</a>{% endif %}</p>{% endif %}{% endfor %}{% endif %}
 {% for admission in admissions.get(order.id, []) %}<div class="border-top py-2">Ticket #{{ admission.id }} · {% if admission.allocated_seat is not none %}Seat {{ admission.allocated_seat }}{% else %}Unseated{% endif %} · <strong>{{ admission_state(admission) }}</strong>{% if admission.checked_in_at %} · Entry recorded {{ admission.checked_in_at.strftime('%d %b %Y %H:%M:%S') }} UTC{% endif %}</div>{% else %}<p>No admission issued.</p>{% endfor %}
 {% if current_user.is_admin and order.status != 'refunded' %}<details class="mt-3"><summary>Manage ticket status</summary><form method="post" action="{{ url_for('change_ticket_status', order_id=order.id) }}" class="mt-2">
 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

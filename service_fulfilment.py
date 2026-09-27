@@ -212,11 +212,33 @@ def register_service_routes(app, notify, invalidate, reconcile_payment):
         if approved and (not service.event_starts_at or not service.event_venue or not ServicePriceTier.query.filter_by(service_id=service.id, is_active=True).first()):
             flash('An event needs its start time, venue and tickets before approval.', 'danger')
         else:
-            service.ticket_review_status = 'approved' if approved else 'rejected'
+            try:
+                fee = Decimal(request.form.get('listing_fee', str(service.listing_fee_amount or 0)))
+                if not fee.is_finite() or fee < 0 or fee > 10000000 or fee != fee.quantize(Decimal('0.01')):
+                    raise ValueError()
+            except (InvalidOperation, ValueError):
+                abort(400)
+            if float(fee) != (service.listing_fee_amount or 0):
+                service.listing_fee_paid = False
+                service.ticket_fee_reference = None
+            service.listing_fee_amount = float(fee)
+            if request.form.get('fee_paid') == 'yes':
+                reference = (request.form.get('fee_reference') or '').strip()[:100]
+                if not reference:
+                    abort(400)
+                service.listing_fee_paid = True
+                service.ticket_fee_reference = reference
+            if 'print_permission_present' in request.form:
+                service.ticket_print_allowed = request.form.get('print_allowed') == 'yes'
+                if not service.ticket_print_allowed:
+                    service.ticket_auto_print = False
+                    service.ticket_format = 'qr'
+            service.ticket_review_status = ('awaiting_fee' if fee and not service.listing_fee_paid else 'approved') if approved else 'rejected'
             service.ticket_reviewed_at = datetime.utcnow()
             service.ticket_reviewed_by_id = current_user.id
             notify(service.provider_id, 'Event listing reviewed',
-                   f'{service.title}: {service.ticket_review_status}.', 'service')
+                   f'{service.title}: {service.ticket_review_status}. Listing charge: KSh {fee:.2f}.'
+                   + (' Contact the admin to arrange payment before sales open.' if service.ticket_review_status == 'awaiting_fee' else ''), 'service')
             db.session.commit()
             invalidate()
             flash('Event review saved.', 'success')
@@ -248,7 +270,7 @@ def register_service_routes(app, notify, invalidate, reconcile_payment):
     @login_required
     def service_ticket_qr(admission_id):
         admission = db.session.get(TicketAdmission, admission_id) or abort(404)
-        if current_user.id != admission.order.client_id and not current_user.is_admin:
+        if current_user.id not in (admission.order.client_id, admission.order.provider_id) and not current_user.is_admin:
             abort(403)
         resolve_ticket(admission.order.service_id, ticket_token(admission))
         import qrcode

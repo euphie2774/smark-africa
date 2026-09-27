@@ -132,6 +132,8 @@ csrf = CSRFProtect(app)
 
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):
+    if request.endpoint == 'ticket_scanner':
+        return jsonify(state='invalid', message='Scanner session expired. Reload this page before scanning again.'), 400
     flash('Your session expired. Please try again.', 'warning')
     return redirect(request.url)
 
@@ -21133,7 +21135,7 @@ def create_service():
             flash('A ticketed service needs at least one price band - '
                   'clients buy it without contacting you.', 'danger')
             return back(request.form)
-        if service_direct_contact_enabled() and fee > 0 and not is_admin_lister:
+        if profile != 'ticket' and service_direct_contact_enabled() and fee > 0 and not is_admin_lister:
             service.listing_fee_amount = fee
             service.listing_fee_paid = False
         if request.files.get('service_image'):
@@ -21162,7 +21164,7 @@ def create_service():
                   'directly once the service is done.', 'success')
         else:
             flash('Service listed. Clients will reach you through an admin.', 'success')
-        return redirect(url_for('service_detail', service_id=service.id))
+        return redirect(url_for('ticket_scanner_settings' if profile == 'ticket' else 'service_detail', service_id=service.id))
     return back({'service_key': request.args.get('service', '')})
 
 
@@ -24048,6 +24050,11 @@ def phase_two_schema_spec():
             ('offering_details', 'offering_details TEXT'),
             ('pricing_details', 'pricing_details TEXT'),
             ('ticket_review_status', "ticket_review_status VARCHAR(20) DEFAULT 'pending'"),
+            ('ticket_scanner_version', 'ticket_scanner_version VARCHAR(64)'),
+            ('ticket_print_allowed', 'ticket_print_allowed BOOLEAN DEFAULT 0'),
+            ('ticket_auto_print', 'ticket_auto_print BOOLEAN DEFAULT 0'),
+            ('ticket_format', "ticket_format VARCHAR(10) DEFAULT 'qr'"),
+            ('ticket_fee_reference', 'ticket_fee_reference VARCHAR(100)'),
             ('ticket_buyer_limit', 'ticket_buyer_limit INTEGER DEFAULT 0'),
             ('ticket_reviewed_at', 'ticket_reviewed_at DATETIME'),
             ('ticket_reviewed_by_id', 'ticket_reviewed_by_id INTEGER'),
@@ -25194,6 +25201,8 @@ def start_background_jobs():
 from service_fulfilment import register_service_routes
 register_service_routes(app, create_customer_notification, invalidate_service_caches,
                         reconcile_service_payment)
+from ticket_scanning import register_ticket_scanning
+register_ticket_scanning(app, limiter)
 
 background_scheduler = None
 

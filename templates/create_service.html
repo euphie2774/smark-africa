@@ -52,7 +52,7 @@
 {% for key,label,hint in design.questions %}<label class="form-label" for="detail_{{ selected.key }}_{{ key }}">{{ label }}<textarea class="form-control" id="detail_{{ selected.key }}_{{ key }}" name="detail_{{ selected.key }}_{{ key }}" rows="2" maxlength="1000" placeholder="{{ hint }}">{{ form.get('detail_' ~ selected.key ~ '_' ~ key, '') }}</textarea></label>{% endfor %}
 </section>
 <section class="card card-body shadow-sm mb-3"><h2 class="h5">{{ 'Organiser contact and event poster' if selected.profile == 'ticket' else 'Provider contact and image' }}</h2><label class="form-label">Contact phone (admin only)<input class="form-control" name="provider_phone" type="tel" maxlength="30" value="{{ form.get('provider_phone', '') }}" required></label><label class="form-label">{{ 'Event poster' if selected.profile == 'ticket' else 'Service image' }}<input class="form-control" type="file" name="service_image" accept="image/*"></label></section>
-{% if fee %}<p>Listing fee: KSh {{ fee }}.</p>{% endif %}
+{% if selected.profile == 'ticket' %}<p>The admin reviews your event and decides whether a listing charge applies. You will see the amount before sales open. Your private entry scanner link is available immediately after listing.</p>{% elif fee %}<p>Listing fee: KSh {{ fee }}.</p>{% endif %}
 <button class="btn btn-success btn-lg w-100" type="submit">{{ 'Submit event for verification' if selected.profile == 'ticket' and not current_user.is_admin else 'Publish listing' }}</button>
 </form></div>
 {% endblock %}

@@ -2076,6 +2076,11 @@ class ServiceListing(db.Model):
     event_venue = db.Column(db.String(200))             # ticket
     pricing_details = db.Column(db.Text)
     ticket_review_status = db.Column(db.String(20), default='pending')
+    ticket_scanner_version = db.Column(db.String(64))
+    ticket_print_allowed = db.Column(db.Boolean, default=False)
+    ticket_auto_print = db.Column(db.Boolean, default=False)
+    ticket_format = db.Column(db.String(10), default='qr')
+    ticket_fee_reference = db.Column(db.String(100))
     ticket_buyer_limit = db.Column(db.Integer, default=0)
     ticket_reviewed_at = db.Column(db.DateTime)
     ticket_reviewed_by_id = db.Column(db.Integer, db.ForeignKey('users.id'))

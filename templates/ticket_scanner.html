@@ -1,0 +1,22 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>Entry scanner</title>
+<style>body{font:18px system-ui;margin:24px auto;padding:0 16px;max-width:650px}button,input{font:inherit;padding:12px}input{max-width:100%;box-sizing:border-box}#result{padding:24px;margin:16px 0;background:#eee}.accepted{background:#c9f4d8!important}.used{background:#ffe1a3!important}.invalid{background:#ffd0d0!important}iframe{position:absolute;width:1px;height:1px;border:0}#reader{max-width:480px}</style></head><body>
+<h1>{{ service.title }}</h1><p>Scan a QR ticket or barcode. Results appear here; the camera stays running.</p>
+<button id="start">Start camera</button> <button id="stop" disabled>Stop camera</button><div id="reader"></div>
+<form id="scanForm"><label for="code">USB / Bluetooth scanner or ticket code</label><br><input id="code" autocomplete="off" autofocus required><button>Check ticket</button></form>
+<div id="result" role="status" aria-live="assertive">Ready to scan</div><a id="card" hidden target="_blank" rel="noopener">Print barcode card</a><p id="cameraStatus" role="status"></p>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" referrerpolicy="no-referrer"></script>
+<script>
+const csrf={{ csrf_token()|tojson }}, result=document.getElementById('result'), input=document.getElementById('code'), card=document.getElementById('card');
+let busy=false,last='',lastSeen=0,camera=null;
+function show(message,state){result.textContent=message;result.className=state;}
+async function scan(code,fromCamera=false){
+ const now=Date.now();if(busy)return;if(fromCamera&&code===last&&now-lastSeen<2000){lastSeen=now;return;}last=code;lastSeen=now;busy=true;card.hidden=true;
+ try{const response=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf},body:JSON.stringify({code})});
+ const data=await response.json();show(data.message+(data.category?' '+data.category:''),data.state);
+ if(data.card_url){card.href=data.card_url;card.hidden=false;if(data.auto_print){const frame=document.createElement('iframe');frame.src=data.card_url;frame.onload=()=>{frame.contentWindow.focus();frame.contentWindow.print();};document.querySelectorAll('iframe').forEach(x=>x.remove());document.body.append(frame);}}
+ }catch(e){show('Could not confirm entry. Check your connection and scan again.','invalid');}finally{busy=false;input.value='';input.focus();}
+}
+document.getElementById('scanForm').onsubmit=e=>{e.preventDefault();scan(input.value.trim());};
+document.getElementById('start').onclick=async()=>{try{if(!window.Html5Qrcode)throw Error('Camera library unavailable. Use the barcode reader or reload.');camera=camera||new Html5Qrcode('reader');await camera.start({facingMode:'environment'},{fps:12,qrbox:{width:250,height:180}},code=>scan(code,true));document.getElementById('start').disabled=true;document.getElementById('stop').disabled=false;document.getElementById('cameraStatus').textContent='Camera running';}catch(e){document.getElementById('cameraStatus').textContent='Camera unavailable. Allow camera access over HTTPS, or use a barcode reader. '+e;}};
+document.getElementById('stop').onclick=async()=>{await camera.stop();document.getElementById('start').disabled=false;document.getElementById('stop').disabled=true;};
+</script></body></html>

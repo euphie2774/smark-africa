@@ -61,6 +61,7 @@
                         <div class="flex-grow-1" style="min-width:0;">
                             <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
                                 <h2 class="h6 fw-bold mb-0 text-truncate">{{ service.title }}</h2>
+                                {% if service.profile == 'ticket' %}<a href="{{ url_for('ticket_scanner_settings', service_id=service.id) }}">Scanner link and ticket settings</a>{% endif %}
                                 {% if service.is_active %}
                                 <span class="badge bg-success">Live</span>
                                 {% else %}

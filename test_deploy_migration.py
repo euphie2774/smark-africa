@@ -26,6 +26,8 @@ REPO = os.path.dirname(os.path.abspath(__file__))
 LOCATION_COLUMNS = {
     'products': ['location_label', 'location_county', 'location_lat', 'location_lng'],
     'business_storefronts': ['location_lat', 'location_lng', 'location_county'],
+    'service_listings': ['ticket_scanner_version', 'ticket_print_allowed',
+                         'ticket_auto_print', 'ticket_format', 'ticket_fee_reference'],
 }
 
 # The literal that shipped in init_database before this fix.
