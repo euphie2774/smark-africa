@@ -25203,6 +25203,11 @@ register_service_routes(app, create_customer_notification, invalidate_service_ca
                         reconcile_service_payment)
 from ticket_scanning import register_ticket_scanning
 register_ticket_scanning(app, limiter)
+# Talisman writes Permissions-Policy last. Override its per-view policy rather
+# than setting a header that it would overwrite with the site-wide camera=().
+app.view_functions['ticket_scanner'].talisman_view_options = {
+    'permissions_policy': dict(PERMISSIONS_POLICY, camera='(self)'),
+}
 
 background_scheduler = None
 

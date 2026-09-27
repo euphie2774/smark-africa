@@ -217,7 +217,12 @@ def run():
                 with client.session_transaction() as session:
                     session.clear()
                 g.pop('_login_user', None)
-                assert client.get(scanner_url).status_code == 200
+                scanner_page = client.get(scanner_url, base_url='https://localhost')
+                assert scanner_page.status_code == 200
+                policy = scanner_page.headers['Permissions-Policy']
+                assert 'camera=(self)' in policy, policy
+                assert 'microphone=()' in policy and 'geolocation=()' in policy, policy
+                assert 'camera=()' in client.get(settings_url).headers['Permissions-Policy']
                 assert client.post(scanner_url, json={'code':'garbage'}).json['state'] == 'invalid'
                 assert client.post(scanner_url, json=['unexpected']).status_code == 400
                 assert client.post(scanner_url, json={'code':'B' + '9' * 100 + '-' + 'a' * 24}).json['state'] == 'invalid'
