@@ -211,6 +211,7 @@ def run():
                 assert client.get(settings_url).status_code == 200
                 key = scanner_key(event2)
                 scanner_url = f'/services/{event2.id}/scanner/{key}'
+                scan_headers = {'X-Scanner-Key': key}
                 login(stranger)
                 assert client.get(settings_url).status_code == 403
                 assert client.post(settings_url, data={'auto_print': 'yes'}).status_code == 403
@@ -223,16 +224,16 @@ def run():
                 assert 'camera=(self)' in policy, policy
                 assert 'microphone=()' in policy and 'geolocation=()' in policy, policy
                 assert 'camera=()' in client.get(settings_url).headers['Permissions-Policy']
-                assert client.post(scanner_url, json={'code':'garbage'}).json['state'] == 'invalid'
-                assert client.post(scanner_url, json=['unexpected']).status_code == 400
-                assert client.post(scanner_url, json={'code':'B' + '9' * 100 + '-' + 'a' * 24}).json['state'] == 'invalid'
+                assert client.post(scanner_url, headers=scan_headers, json={'code':'garbage'}).json['state'] == 'invalid'
+                assert client.post(scanner_url, headers=scan_headers, json=['unexpected']).status_code == 400
+                assert client.post(scanner_url, headers=scan_headers, json={'code':'B' + '9' * 100 + '-' + 'a' * 24}).json['state'] == 'invalid'
                 fresh = TicketAdmission.query.filter_by(order_id=unlimited.id).order_by(TicketAdmission.id).first()
                 assert client.get(f'/services/tickets/{fresh.id}/card?key={key}').status_code == 403
-                response = client.post(scanner_url, json={'code':ticket_token(fresh)})
+                response = client.post(scanner_url, headers=scan_headers, json={'code':ticket_token(fresh)})
                 assert response.json['state'] == 'accepted' and response.json['card_url'] is None
-                assert client.post(scanner_url, json={'code':barcode_value(fresh)}).json['state'] == 'used'
+                assert client.post(scanner_url, headers=scan_headers, json={'code':barcode_value(fresh)}).json['state'] == 'used'
                 wrong_event = scanner_key(event)
-                assert client.post(f'/services/{event.id}/scanner/{wrong_event}', json={'code':barcode_value(fresh)}).json['state'] == 'invalid'
+                assert client.post(f'/services/{event.id}/scanner/{wrong_event}', headers={'X-Scanner-Key':wrong_event}, json={'code':barcode_value(fresh)}).json['state'] == 'invalid'
                 event2.ticket_print_allowed = True
                 db.session.commit()
                 login(provider)
@@ -242,38 +243,52 @@ def run():
                 with client.session_transaction() as session:
                     session.clear()
                 g.pop('_login_user', None)
-                response = client.post(scanner_url, json={'code':ticket_token(next_ticket)})
+                response = client.post(scanner_url, headers=scan_headers, json={'code':ticket_token(next_ticket)})
                 assert response.json['auto_print'] and response.json['state'] == 'accepted'
                 card = client.get(response.json['card_url'])
                 assert card.status_code == 200 and b'Smark-Africa.com' in card.data and b'<svg' in card.data
-                assert client.post(scanner_url, json={'code':barcode_value(next_ticket)}).json['state'] == 'used'
+                assert client.post(scanner_url, headers=scan_headers, json={'code':barcode_value(next_ticket)}).json['state'] == 'used'
                 login(provider)
                 client.post(settings_url, data={'action':'rotate'})
                 assert client.get(scanner_url).status_code == 404
+                assert client.post(scanner_url, headers=scan_headers, json={'code':ticket_token(next_ticket)}).status_code == 404
                 assert client.get(response.json['card_url']).status_code == 404
                 assert client.get(f'/services/{event2.id}').status_code == 200
                 assert client.get('/services/mine').status_code == 200
                 assert client.get(f'/services/tickets/{next_ticket.id}/qr').status_code == 200
                 scanner_url = f'/services/{event2.id}/scanner/{scanner_key(event2)}'
+                scan_headers = {'X-Scanner-Key': scanner_key(event2)}
                 race_ticket = TicketAdmission.query.filter_by(order_id=unlimited.id).order_by(TicketAdmission.id).offset(2).first()
                 race_code = ticket_token(race_ticket)
                 barrier = Barrier(2)
                 def shared_scan_racer(_):
                     with app.test_client() as scanner_client:
                         barrier.wait(timeout=10)
-                        return scanner_client.post(scanner_url, json={'code': race_code}).json['state']
+                        return scanner_client.post(scanner_url, headers=scan_headers, json={'code': race_code}).json['state']
                 db.session.commit()
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     assert sorted(pool.map(shared_scan_racer, range(2))) == ['accepted', 'used']
                 app.config['WTF_CSRF_ENABLED'] = True
-                import re
-                # This smoke test keeps one app context across requests; Flask-WTF
-                # caches tokens on g, unlike real requests with fresh contexts.
-                g.pop('csrf_token', None)
-                page = client.get(scanner_url)
-                csrf = re.search(r'const csrf="([^"]+)"', page.get_data(as_text=True)).group(1)
-                assert client.post(scanner_url, json={'code':race_code}).status_code == 400
-                assert client.post(scanner_url, headers={'X-CSRFToken':csrf}, json={'code':race_code}).json['state'] == 'used'
+                # Real HTTPS scans intentionally omit Referer and cookies. The
+                # scanner must not depend on Flask-WTF's session/referrer checks.
+                durable_ticket = TicketAdmission.query.filter_by(order_id=unlimited.id).order_by(TicketAdmission.id).offset(3).first()
+                durable_code = ticket_token(durable_ticket)
+                with app.test_client(use_cookies=False) as gate:
+                    assert gate.post(scanner_url, base_url='https://localhost', json={'code':durable_code}).status_code == 403
+                    assert gate.post(scanner_url, base_url='https://localhost', headers={'X-Scanner-Key':'wrong'}, json={'code':durable_code}).status_code == 403
+                    assert gate.post(scanner_url, base_url='https://localhost', data={'code':durable_code}).status_code == 403
+                    assert gate.post(scanner_url, base_url='https://localhost', headers=scan_headers, json={'code':durable_code}).json['state'] == 'accepted'
+                    import time
+                    future = time.time() + 30 * 86400
+                    with patch('time.time', return_value=future):
+                        assert gate.post(scanner_url, base_url='https://localhost', headers=scan_headers, json={'code':durable_code}).json['state'] == 'used'
+                    preflight = gate.options(scanner_url, base_url='https://localhost', headers={
+                        'Origin':'https://other.example', 'Access-Control-Request-Method':'POST',
+                        'Access-Control-Request-Headers':'X-Scanner-Key'})
+                    assert 'Access-Control-Allow-Origin' not in preflight.headers
+                denied = client.post(settings_url, data={'action':'rotate'})
+                assert denied.status_code == 302
+                assert scanner_key(event2) == scan_headers['X-Scanner-Key']
                 app.config['WTF_CSRF_ENABLED'] = False
                 login(admin)
                 review_url = f'/services/{event.id}/review-ticket'

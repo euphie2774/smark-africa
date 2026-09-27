@@ -132,8 +132,6 @@ csrf = CSRFProtect(app)
 
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):
-    if request.endpoint == 'ticket_scanner':
-        return jsonify(state='invalid', message='Scanner session expired. Reload this page before scanning again.'), 400
     flash('Your session expired. Please try again.', 'warning')
     return redirect(request.url)
 
@@ -25203,6 +25201,10 @@ register_service_routes(app, create_customer_notification, invalidate_service_ca
                         reconcile_service_payment)
 from ticket_scanning import register_ticket_scanning
 register_ticket_scanning(app, limiter)
+# Only this bearer-authenticated endpoint is independent of cookie-based CSRF.
+# It requires X-Scanner-Key and validates the event capability on every scan.
+# Seller settings, link rotation, and admin forms retain normal CSRF protection.
+csrf.exempt(app.view_functions['ticket_scanner'])
 # Talisman writes Permissions-Policy last. Override its per-view policy rather
 # than setting a header that it would overwrite with the site-wide camera=().
 app.view_functions['ticket_scanner'].talisman_view_options = {

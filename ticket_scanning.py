@@ -81,6 +81,15 @@ def register_ticket_scanning(app, limiter):
     @app.route('/services/<int:service_id>/scanner/<key>', methods=['GET', 'POST'])
     @limiter.limit('600 per minute; 20000 per hour', override_defaults=True)
     def ticket_scanner(service_id, key):
+        # Scanning is authorized by a revocable bearer capability, never by a
+        # login cookie. Require the capability in a custom header as well as
+        # the URL: cross-site forms cannot supply this header, and cross-origin
+        # JavaScript needs a CORS preflight (this endpoint does not grant CORS).
+        # This lets a gate stay open without a session/CSRF token expiring, and
+        # preserves no-referrer so the private link cannot leak through headers.
+        if request.method == 'POST' and not secrets.compare_digest(
+                request.headers.get('X-Scanner-Key', '').encode(), key.encode()):
+            return jsonify(state='unauthorized', message='Scanner authorization is missing. Open your private scanner link.'), 403
         service = authorized_service(service_id, key)
         if request.method == 'GET':
             return render_template('ticket_scanner.html', service=service)

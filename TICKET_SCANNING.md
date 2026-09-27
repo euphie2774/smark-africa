@@ -17,6 +17,13 @@ unpaid, cancelled, refunded, or unapproved tickets show Invalid. QR and barcode
 represent one admission. The camera stays active and results update in place.
 Scanning requires connectivity to enforce one entry across multiple gates.
 
+Scanning has no browser-session or CSRF-token timeout. Each scan authenticates
+with the signed scanner link in the URL and an `X-Scanner-Key` request header;
+the browser sends no cookies or referrer. Staff can keep the same page open
+throughout the event. The server still validates the event and ticket on every
+scan, and replacing the scanner link immediately revokes old links. Seller and
+admin forms continue to require normal session authentication and CSRF tokens.
+
 Admin event review controls barcode printing and sets the listing charge (zero
 is free). A nonzero unpaid charge keeps the event awaiting payment. Sellers see
 the amount in notifications and scanner settings. Payment is currently arranged
@@ -35,6 +42,7 @@ and fee reference to existing listings. Existing events default to QR and no car
 printing. No new external service configuration is required.
 
 Verification: `tools/ticket_workflow_smoke.py` covers shared scanner access,
-revocation, QR/barcode replay, concurrent scans, CSRF, print permissions, and
+revocation, QR/barcode replay, concurrent scans, cookie-free HTTPS scanning,
+long-running authorization, seller-form CSRF protection, print permissions, and
 admin charge approval. `test_deploy_migration.py` verifies upgrades on a temporary
 copy of the existing SQLite database.

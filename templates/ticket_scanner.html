@@ -6,12 +6,12 @@
 <div id="result" role="status" aria-live="assertive">Ready to scan</div><a id="card" hidden target="_blank" rel="noopener">Print barcode card</a><p id="cameraStatus" role="status"></p>
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" referrerpolicy="no-referrer"></script>
 <script>
-const csrf={{ csrf_token()|tojson }}, result=document.getElementById('result'), input=document.getElementById('code'), card=document.getElementById('card');
+const scannerKey={{ request.view_args['key']|tojson }}, result=document.getElementById('result'), input=document.getElementById('code'), card=document.getElementById('card');
 let busy=false,last='',lastSeen=0,camera=null;
 function show(message,state){result.textContent=message;result.className=state;}
 async function scan(code,fromCamera=false){
  const now=Date.now();if(busy)return;if(fromCamera&&code===last&&now-lastSeen<2000){lastSeen=now;return;}last=code;lastSeen=now;busy=true;card.hidden=true;
- try{const response=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf},body:JSON.stringify({code})});
+ try{const response=await fetch(location.pathname,{method:'POST',credentials:'omit',referrerPolicy:'no-referrer',headers:{'Content-Type':'application/json','X-Scanner-Key':scannerKey},body:JSON.stringify({code})});
  const data=await response.json();show(data.message+(data.category?' '+data.category:''),data.state);
  if(data.card_url){card.href=data.card_url;card.hidden=false;if(data.auto_print){const frame=document.createElement('iframe');frame.src=data.card_url;frame.onload=()=>{frame.contentWindow.focus();frame.contentWindow.print();};document.querySelectorAll('iframe').forEach(x=>x.remove());document.body.append(frame);}}
  }catch(e){show('Could not confirm entry. Check your connection and scan again.','invalid');}finally{busy=false;input.value='';input.focus();}
