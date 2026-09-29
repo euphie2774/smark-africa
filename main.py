@@ -169,10 +169,10 @@ def web_app_manifest():
         'start_url': '/',
         'scope': '/',
         'display': 'standalone',
-        # Matches the cream navbar so the phone's status bar is
+        # Matches the navbar (navbar-dark bg-dark) so the phone's status bar is
         # not a different colour from the header directly beneath it.
-        'theme_color': '#fffaf0',
-        'background_color': '#fffaf0',
+        'theme_color': '#212529',
+        'background_color': '#ffffff',
         'icons': [
             {'src': url_for('static', filename='images/favicon.png'),
              'sizes': '192x192', 'type': 'image/png'},
