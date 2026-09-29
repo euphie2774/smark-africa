@@ -459,6 +459,27 @@ footer a:hover {
 }
 
 /* ─── Badges ──────────────────────────────────────────── */
+/* Cart cells must not shrink the product into the neighbouring price column. */
+.cart-table td { color: var(--market-ink) !important; }
+.cart-table .cart-product-cell { min-width: 240px; }
+.cart-product img { flex-shrink: 0; }
+.cart-product-copy { min-width: 0; overflow-wrap: anywhere; }
+.cart-product-copy .badge { white-space: normal; }
+.cart-table .cart-price { white-space: nowrap; }
+@media (max-width: 767.98px) {
+    .cart-table-wrapper { overflow: visible; }
+    .cart-table, .cart-table tbody, .cart-table tfoot { display: block; width: 100%; }
+    .cart-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    .cart-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); margin-bottom: 1rem; border: 1px solid var(--market-line); border-radius: 8px; background: var(--market-paper); }
+    .cart-table tbody td { display: block; min-width: 0; padding: .75rem; border: 0; }
+    .cart-table .cart-product-cell { grid-column: 1 / -1; border-bottom: 1px solid var(--market-line); }
+    .cart-table td[data-label]::before { content: attr(data-label); display: block; font-size: .8rem; font-weight: 700; margin-bottom: .35rem; color: #756b5e; }
+    .cart-table .cart-price { white-space: normal; overflow-wrap: anywhere; }
+    .cart-table tfoot tr { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+    .cart-table tfoot td { border: 0; }
+    .cart-table tfoot td:last-child { display: none; }
+}
+
 .badge {
     font-weight: 500;
 }

@@ -132,6 +132,11 @@ csrf = CSRFProtect(app)
 
 @app.errorhandler(CSRFError)
 def handle_csrf_error(e):
+    # Background JSON requests must not redirect or queue a warning that appears
+    # after an unrelated form was successfully saved.
+    if request.is_json or request.path.startswith('/api/') or request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return jsonify(success=False, error='csrf_failed',
+                       message='This request could not be verified. Reload the page and try again.'), 400
     flash('Your session expired. Please try again.', 'warning')
     return redirect(request.url)
 

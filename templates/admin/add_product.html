@@ -373,7 +373,7 @@ function checkMarketPrice() {
         priceCheckAbort = new AbortController();
         fetch("{{ url_for('admin_price_check_api') }}", {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: {'Content-Type': 'application/json', 'X-CSRFToken': document.querySelector('meta[name="csrf-token"]').content},
             signal: priceCheckAbort.signal,
             body: JSON.stringify({
                 product_id: productId,
@@ -405,7 +405,7 @@ document.getElementById('generate-description')?.addEventListener('click', () =>
     if (status) status.textContent = 'Generating recommendation...';
     fetch("{{ url_for('admin_product_description_api') }}", {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': document.querySelector('meta[name="csrf-token"]').content},
         body: JSON.stringify({
             name: nameInput.value,
             category_id: categoryInput?.value || null,

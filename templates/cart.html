@@ -5,8 +5,8 @@
 <h1 class="fw-bold mb-4">Shopping Cart</h1>
 
 {% if cart_items %}
-<div class="table-responsive">
-    <table class="table align-middle">
+<div class="table-responsive cart-table-wrapper">
+    <table class="table align-middle cart-table">
         <thead class="table-dark">
             <tr>
                 <th>Product</th>
@@ -19,12 +19,12 @@
         <tbody>
             {% for item in cart_items %}
             <tr data-cart-row="{{ item.id }}">
-                <td>
-                    <div class="d-flex align-items-center">
+                <td class="cart-product-cell">
+                    <div class="d-flex align-items-center cart-product">
                         {% if item.product.image_url %}
                         <img src="{{ item.product.image_url }}" alt="{{ item.product.name }}" style="width: 60px; height: 60px; object-fit: cover;" class="rounded me-3">
                         {% endif %}
-                        <div>
+                        <div class="cart-product-copy">
                             <a href="{{ url_for('product_page', slug=item.product.slug) }}" class="text-decoration-none fw-bold">{{ item.product.name[:50] }}</a>
                             {% if item.product.is_digital %}<span class="badge bg-info">Digital</span>{% endif %}
                             {% if item.product.free_delivery and not item.product.is_digital %}
@@ -33,7 +33,7 @@
                         </div>
                     </div>
                 </td>
-                <td>
+                <td class="cart-price" data-label="Price">
                     {% if item.effective_price != item.product.selling_price %}
                     <span class="text-muted text-decoration-line-through small">KSh {{ "%.2f"|format(item.product.selling_price) }}</span><br>
                     <span class="text-success fw-bold">KSh {{ "%.2f"|format(item.effective_price) }}</span>
@@ -41,15 +41,15 @@
                     KSh {{ "%.2f"|format(item.product.selling_price) }}
                     {% endif %}
                 </td>
-                <td>
-                    <form method="POST" action="{{ url_for('update_cart', item_id=item.id) }}" class="d-flex align-items-center gap-2">
+                <td data-label="Quantity">
+                    <form method="POST" action="{{ url_for('update_cart', item_id=item.id) }}" class="d-flex flex-wrap align-items-center gap-2">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                         <input type="number" name="quantity" value="{{ item.quantity }}" min="1" max="{{ item.product.stock if not item.product.is_digital else 99 }}" class="form-control" style="width: 70px;">
                         <button type="submit" class="btn btn-sm btn-outline-primary">Update</button>
                     </form>
                 </td>
-                <td class="fw-bold">KSh {{ "%.2f"|format(item.subtotal) }}</td>
-                <td>
+                <td class="fw-bold cart-price" data-label="Total">KSh {{ "%.2f"|format(item.subtotal) }}</td>
+                <td class="cart-action">
                     <form method="POST" action="{{ url_for('remove_cart_item', item_id=item.id) }}"
                           class="cart-remove-form" data-row="{{ item.id }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>

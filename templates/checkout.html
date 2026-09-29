@@ -386,7 +386,7 @@ function updateShipping() {
 
     fetch("{{ url_for('api_shipping_cost') }}", {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': document.querySelector('meta[name="csrf-token"]').content},
         body: JSON.stringify({country, state, city, weight_kg: {{ weight_kg|default(0) }}})
     }).then(r => r.json()).then(data => {
         shippingCost = Number(data.shipping_cost || 0);
